@@ -30,6 +30,11 @@ public final class TilePacker {
     public func pack(_ frame: EncodedFrame, geometry: TileGeometry, compression: Compression)
         -> (parts: [Data], wireBytes: Int, lz4In: Int, lz4Out: Int) {
         let raw = frame.data
+        guard !raw.isEmpty else {
+            let header = TileFrame.header(frameIndex: frameIndex, geometry: geometry, runs: frame.runs, chunks: [])
+            frameIndex &+= 1
+            return ([header], header.count, 0, 0)
+        }
         let count = min(TilePacker.maxChunks, max(1, raw.count / TilePacker.minChunkBytes))
         let step = (raw.count / count + 15) / 16 * 16
         let ranges = stride(from: 0, to: raw.count, by: step).map { $0..<min($0 + step, raw.count) }

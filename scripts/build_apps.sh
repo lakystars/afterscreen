@@ -29,7 +29,7 @@ plist() { # name bundle-id executable min-os extra-keys
     <key>LSMinimumSystemVersion</key><string>$4</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSLocalNetworkUsageDescription</key><string>Afterscreen connects the sender and receiver over Thunderbolt, USB or Wi-Fi.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>Afterscreen connects the sender and receiver over Thunderbolt, USB, Ethernet or Wi-Fi.</string>
     <key>NSBonjourServices</key><array><string>_afterscreen._tcp</string></array>
 $5
 </dict>
@@ -62,7 +62,7 @@ build_receiver() { # arch min-os
     swiftc "${flags[@]}" -parse-as-library -module-name AfterscreenReceiverKit -I "$dir" -emit-module -emit-module-path "$dir/AfterscreenReceiverKit.swiftmodule" \
         -emit-library -static -o "$dir/libAfterscreenReceiverKit.a" "$ROOT"/Receiver/Sources/AfterscreenReceiverKit/*.swift
     swiftc "${flags[@]}" -I "$dir" -L "$dir" -lAfterscreenReceiverKit -lAfterscreenCore \
-        -framework AppKit -framework Metal -framework QuartzCore -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOKit \
+        -framework AppKit -framework Metal -framework QuartzCore -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOKit -framework SystemConfiguration \
         -o "$dir/AfterscreenReceiver" "$ROOT/Receiver/Sources/AfterscreenReceiver/main.swift"
 }
 

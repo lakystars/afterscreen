@@ -39,6 +39,8 @@ final class StreamWindow {
     private var cursorNormalized: (x: Float, y: Float, visible: Bool) = (0, 0, false)
     private var contentPixels = CGSize.zero
     private var sourcePoints = CGSize.zero
+    /// The HUD was shown for a quality test, not by the user
+    private var forcedHUD = false
 
     private let windowed: Bool
 
@@ -83,9 +85,19 @@ final class StreamWindow {
         }
     }
 
+    /// Called again for each new config of a session (quality test stages)
     func show(config: StreamConfig) {
         contentPixels = CGSize(width: config.streamPixels.width, height: config.streamPixels.height)
         sourcePoints = CGSize(width: config.sourcePoints.width, height: config.sourcePoints.height)
+        if config.test && hudLayer.isHidden {
+            hudLayer.isHidden = false
+            forcedHUD = true
+        }
+        guard keyMonitor == nil else {
+            view.needsLayout = true
+            refreshHUD()
+            return
+        }
         NSApp.activate(ignoringOtherApps: true)
         if !windowed {
             if let screen = NSScreen.main { window.setFrame(screen.frame, display: true) }
@@ -106,6 +118,8 @@ final class StreamWindow {
         hudTimer?.invalidate()
         hudTimer = nil
         cursorLayer.isHidden = true
+        if forcedHUD { hudLayer.isHidden = true }
+        forcedHUD = false
         if window.isVisible && !windowed { NSCursor.unhide() }
         window.orderOut(nil)
         if !windowed { NSApp.presentationOptions = [] }

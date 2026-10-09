@@ -19,11 +19,24 @@ public struct EncodedFrame {
 /// BGRA → BC7 mode 6 tiles on the GPU.
 /// Encodes tiles under the dirty rects plus a rolling refresh slice,
 /// diffs them against the reference, gathers changed runs for upload.
-/// Tiles that keep changing go out as BC1 at half the size; once they settle,
-/// their BC7 reference follows. The reference always holds BC7
+/// Tiles that keep changing go out as BC1 at half the size, or switch to the video layer;
+/// once they settle, their BC7 reference follows. The reference always holds BC7
 public final class TileEncoder {
+    /// What the receiver shows for tiles in motion
+    public enum Motion {
+        /// BC1 data on every change
+        case bc1
+        /// A video run when a tile starts moving, then nothing until it settles
+        case video
+    }
+
     public let geometry: TileGeometry
     public private(set) var lastGPUSeconds: Double = 0
+    public var motion = Motion.bc1
+    /// Most settled tiles sent per frame; a slow link keeps a big refinement from stalling motion
+    public var settleLimit = Int.max
+    /// Tiles the receiver shows lossy: BC1, or the video layer
+    public private(set) var lossyTiles = 0
 
     private let queue: MTLCommandQueue
     private let encodePipeline: MTLComputePipelineState
@@ -45,9 +58,9 @@ public final class TileEncoder {
     /// Encode count at each tile's last change; a link-bound stream compares frames, not time
     private var lastFrame: [Int]
     private var encodes = 0
-    /// The receiver holds the BC1 version of these tiles
+    /// The receiver holds the BC1 version of these tiles, or shows the video layer
     private var lossy: [Bool]
-    /// Gather mode per tile: 0 BC7 from cur, 1 BC7 from ref, 2 BC1 from the texture
+    /// Gather mode per tile: 0 BC7 from cur, 1 BC7 from ref, 2 BC1 from the texture, 3 reference only
     private var modes: [UInt32]
     /// Bound during refinement passes, which read no pixels
     private let placeholder: MTLTexture
@@ -181,7 +194,7 @@ public final class TileEncoder {
 
         if forceAll { flags.update(repeating: 1) }
         encodes += 1
-        var settling: [Int] = []
+        var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = []
         for t in 0..<geometry.tileCount {
             if flags[t] != 0 {
                 let since = now - lastChange[t]
@@ -189,33 +202,50 @@ public final class TileEncoder {
                     || (congested && lastFrame[t] == encodes - 1 && since < TileEncoder.congestedMotionWindow))
                 lastChange[t] = now
                 lastFrame[t] = encodes
+                if moving && motion == .video {
+                    // Video tiles join the lossy set once their video run is on its way
+                    if lossy[t] {
+                        flags[t] = 0
+                        modes[t] = 3
+                        referenceOnly.append(t)
+                    } else {
+                        mark(t, mode: 3, in: flags)
+                        entering.append(t)
+                    }
+                    continue
+                }
                 lossy[t] = moving
                 mark(t, mode: moving ? 2 : 0, in: flags)
-            } else if lossy[t] && now - lastChange[t] >= TileEncoder.settleDelay {
+            } else if lossy[t] && now - lastChange[t] >= TileEncoder.settleDelay && settling.count < settleLimit {
                 settling.append(t)
                 mark(t, mode: 1, in: flags)
             }
         }
-        return settle(settling, gather(texture: texture))
+        let frame = gather(texture: texture, referenceOnly: referenceOnly)
+        if frame != nil { entering.forEach { lossy[$0] = true } }
+        return settle(settling, frame)
     }
 
     /// Settling tiles leave the lossy set only once their BC7 version is on its way
     private func settle(_ tiles: [Int], _ frame: EncodedFrame?) -> EncodedFrame? {
         if frame != nil { tiles.forEach { lossy[$0] = false } }
+        lossyTiles = lossy.reduce(0) { $1 ? $0 + 1 : $0 }
         return frame
     }
 
-    /// Sends the BC7 reference of BC1 tiles that have settled; nil when none have
+    /// Sends the BC7 reference of lossy tiles that have settled; nil when none have
     public func refine(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> EncodedFrame? {
         let flags = UnsafeMutableBufferPointer(start: dirtyFlags.contents().assumingMemoryBound(to: UInt32.self), count: geometry.tileCount)
         flags.update(repeating: 0)
-        let settling = (0..<geometry.tileCount).filter { lossy[$0] && now - lastChange[$0] >= TileEncoder.settleDelay }
+        let settling = Array((0..<geometry.tileCount).lazy
+            .filter { self.lossy[$0] && now - self.lastChange[$0] >= TileEncoder.settleDelay }
+            .prefix(settleLimit))
         settling.forEach { mark($0, mode: 1, in: flags) }
         lastGPUSeconds = 0
-        return settling.isEmpty ? nil : settle(settling, gather(texture: placeholder))
+        return settling.isEmpty ? nil : settle(settling, gather(texture: placeholder, referenceOnly: []))
     }
 
-    /// Seconds until the next BC1 tile settles; nil when none is pending
+    /// Seconds until the next lossy tile settles; nil when none is pending
     public func nextRefinement(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> TimeInterval? {
         var soonest: TimeInterval?
         for t in 0..<geometry.tileCount where lossy[t] {
@@ -227,41 +257,49 @@ public final class TileEncoder {
 
     private func mark(_ tile: Int, mode: UInt32, in flags: UnsafeMutableBufferPointer<UInt32>) {
         modes[tile] = mode
-        flags[tile] = UInt32((mode == 2 ? TileFormat.bc1 : .bc7).rawValue) + 1
+        let format: TileFormat = mode == 2 ? .bc1 : (mode == 3 ? .video : .bc7)
+        flags[tile] = UInt32(format.rawValue) + 1
     }
 
-    /// Writes the marked tiles' runs into a free upload buffer
-    private func gather(texture: MTLTexture) -> EncodedFrame? {
+    /// Writes the marked tiles' runs into a free upload buffer; `referenceOnly` tiles only update the reference.
+    /// nil when no run is to be sent, or no upload buffer came free
+    private func gather(texture: MTLTexture, referenceOnly: [Int]) -> EncodedFrame? {
         let flags = UnsafeBufferPointer(start: dirtyFlags.contents().assumingMemoryBound(to: UInt32.self), count: geometry.tileCount)
         let runs = TileRun.runs(marks: flags, geometry: geometry)
-        guard !runs.isEmpty, let slot = acquireUpload() else { return nil }
-        let upload = uploads[slot]
+        guard !runs.isEmpty || !referenceOnly.isEmpty else { return nil }
 
-        // Per sent tile: index, first output unit (8 bytes), run width in blocks, gather mode
+        // Per tile: index, first output unit (8 bytes), run width in blocks, gather mode
         let table = tileTable.contents().assumingMemoryBound(to: UInt32.self)
         var tiles = 0, outUnits = 0
+        func entry(_ tile: Int, _ base: Int, _ width: Int) {
+            table[tiles * 4] = UInt32(tile)
+            table[tiles * 4 + 1] = UInt32(base)
+            table[tiles * 4 + 2] = UInt32(width)
+            table[tiles * 4 + 3] = modes[tile]
+            tiles += 1
+        }
         for run in runs {
             let b = run.blocks(in: geometry)
             let units = run.format.blockBytes / 8
-            for t in 0..<run.count {
-                let tile = run.row * geometry.tilesX + run.first + t
-                table[tiles * 4] = UInt32(tile)
-                table[tiles * 4 + 1] = UInt32(outUnits + t * geometry.tileBlocks * units)
-                table[tiles * 4 + 2] = UInt32(b.w)
-                table[tiles * 4 + 3] = modes[tile]
-                tiles += 1
-            }
+            for t in 0..<run.count { entry(run.row * geometry.tilesX + run.first + t, outUnits + t * geometry.tileBlocks * units, b.w) }
             outUnits += b.w * b.h * units
         }
+        referenceOnly.forEach { entry($0, 0, 0) }
+        var slot: Int?
+        if outUnits > 0 {
+            guard let free = acquireUpload() else { return nil }
+            slot = free
+        }
         guard let gcb = queue.makeCommandBuffer(), let genc = gcb.makeComputeCommandEncoder() else {
-            releaseUpload(slot)
+            slot.map(releaseUpload)
             return nil
         }
         genc.setComputePipelineState(gatherPipeline)
         genc.setTexture(texture, index: 0)
         genc.setBuffer(cur, offset: 0, index: 0)
         genc.setBuffer(ref, offset: 0, index: 1)
-        genc.setBuffer(upload, offset: 0, index: 2)
+        // Reference-only passes write no output
+        genc.setBuffer(slot.map { uploads[$0] } ?? cur, offset: 0, index: 2)
         genc.setBuffer(tileTable, offset: 0, index: 3)
         genc.setBytes(&params, length: params.count * 4, index: 4)
         genc.dispatchThreads(MTLSize(width: geometry.tileBlocks, height: geometry.tileBlocks, depth: tiles),
@@ -271,7 +309,10 @@ public final class TileEncoder {
         gcb.waitUntilCompleted()
         lastGPUSeconds += max(0, gcb.gpuEndTime - gcb.gpuStartTime)
 
+        guard !runs.isEmpty else { return nil }
+        guard let slot = slot else { return EncodedFrame(runs: runs, data: Data()) }
         // The buffer stays alive and reserved until the last copy of `data` is released
+        let upload = uploads[slot]
         let data = Data(bytesNoCopy: upload.contents(), count: outUnits * 8, deallocator: .custom { [upload, weak self] _, _ in
             _ = upload
             self?.releaseUpload(slot)

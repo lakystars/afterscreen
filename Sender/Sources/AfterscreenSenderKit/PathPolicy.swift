@@ -1,6 +1,6 @@
 import AfterscreenCore
 
-/// Chooses tile or video path and stream size from link, probe and receiver capabilities
+/// Chooses the tile or hybrid path from link, probe and receiver capabilities
 public enum PathPolicy {
     public static let tileCapacityGbps = 2.5
     public static let videoMax = PixelSize(width: 3840, height: 2160)
@@ -14,13 +14,25 @@ public enum PathPolicy {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
         let panel = aligned(welcome.panelPixels)
         let points = welcome.panelPoints
-        if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps {
-            return StreamConfig(path: .tile, streamPixels: panel, sourcePoints: points, codec: nil, linkKind: link)
-        }
+        let tiles = StreamConfig(path: .tile, streamPixels: panel, sourcePoints: points, video: nil, linkKind: link)
+        if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps { return tiles }
+        guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
         let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
-        var size = fit(panel, within: videoMax)
-        if codec == .h264 { size = fit(size, within: h264Max) }
-        return StreamConfig(path: .video, streamPixels: size, sourcePoints: points, codec: codec, linkKind: link)
+        let video = VideoLayer(codec: codec, pixels: videoPixels(panel, codec: codec), bitrate: bitrate(capacityGbps: capacityGbps))
+        return StreamConfig(path: .hybrid, streamPixels: panel, sourcePoints: points, video: video, linkKind: link)
+    }
+
+    /// A quality test stage of `config` at `size`
+    static func stage(_ config: StreamConfig, size: PixelSize) -> StreamConfig {
+        var c = config
+        c.streamPixels = size
+        c.video?.pixels = videoPixels(size, codec: config.video?.codec ?? .hevc)
+        c.test = true
+        return c
+    }
+
+    static func videoPixels(_ stream: PixelSize, codec: VideoCodec) -> PixelSize {
+        fit(stream, within: codec == .hevc ? videoMax : h264Max)
     }
 
     static func isPlausible(_ w: Welcome) -> Bool {
@@ -29,9 +41,14 @@ public enum PathPolicy {
             && pt.width >= 320 && pt.height >= 240 && pt.width <= p.width && pt.height <= p.height
     }
 
-    /// Video bitrate: 50 Mbps at 4K60, linear in pixels
-    public static func bitrate(for size: PixelSize) -> Int {
-        max(10_000_000, Int(50_000_000.0 * Double(size.pixelCount) / Double(videoMax.pixelCount)))
+    /// Settled tiles per hybrid frame: half a 60 Hz frame interval of the link, at the typical 2:1 LZ4 ratio
+    public static func settleTiles(capacityGbps: Double?, tileBytes: Int) -> Int {
+        max(16, Int((capacityGbps ?? 0) * 1e9 / 8 / 60 / Double(tileBytes)))
+    }
+
+    /// Video layer bitrate: 40% of the link, leaving the rest to lossless tiles; 20…200 Mbps
+    public static func bitrate(capacityGbps: Double?) -> Int {
+        min(200_000_000, max(20_000_000, Int((capacityGbps ?? 0) * 0.4e9)))
     }
 
     /// BC7 blocks need sizes in multiples of 4

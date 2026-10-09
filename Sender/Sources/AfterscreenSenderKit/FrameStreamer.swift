@@ -14,17 +14,11 @@ struct FrameCounters {
 
 enum FrameStreamerError: Error, CustomStringConvertible {
     case tileEncoder
-    case videoEncoder
 
-    var description: String {
-        switch self {
-        case .tileEncoder: return "Metal tile encoder unavailable"
-        case .videoEncoder: return "Video encoder unavailable"
-        }
-    }
+    var description: String { "Metal tile encoder unavailable" }
 }
 
-/// Captured frames → gate → tile or video encoder → connection, on its own queue
+/// Captured frames → gate → tile encoder (and the hybrid path's video layer) → connection, on its own queue
 final class FrameStreamer {
     let sent = RateCounter()
     let drops = RateCounter(window: 60)
@@ -39,7 +33,9 @@ final class FrameStreamer {
     private var refineTimer: DispatchSourceTimer?
     private var tile: (encoder: TileEncoder, cache: CVMetalTextureCache, packer: TilePacker)?
     private var compression: CompressionPolicy
+    /// Hybrid path: shows tiles in motion; nil on the tile path, or after it failed (motion falls back to BC1)
     private var video: VideoEncoder?
+    private var videoKeyframe = true
     private let lock = NSLock()
     private var keyframeRequested = true
     /// The send queue held a frame back since the last encoded frame
@@ -51,30 +47,26 @@ final class FrameStreamer {
     init(config: StreamConfig, capacityGbps: Double?, connection: Connection) throws {
         self.connection = connection
         compression = CompressionPolicy(capacityGbps: capacityGbps)
-        if config.path == .tile {
-            var cache: CVMetalTextureCache?
-            guard let device = MTLCreateSystemDefaultDevice(),
-                  let encoder = try? TileEncoder(device: device, geometry: TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)),
-                  CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess, let textureCache = cache else {
-                throw FrameStreamerError.tileEncoder
-            }
-            tile = (encoder, textureCache, TilePacker())
-        } else {
-            guard let codec = config.codec,
-                  let encoder = VideoEncoder(codec: codec, size: config.streamPixels, bitrate: PathPolicy.bitrate(for: config.streamPixels)) else {
-                throw FrameStreamerError.videoEncoder
-            }
-            encoder.onParams = { [connection] codec, sets in
+        var cache: CVMetalTextureCache?
+        let geometry = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
+        guard let device = MTLCreateSystemDefaultDevice(), let encoder = try? TileEncoder(device: device, geometry: geometry),
+              CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess, let textureCache = cache else {
+            throw FrameStreamerError.tileEncoder
+        }
+        tile = (encoder, textureCache, TilePacker())
+        if let layer = config.video, let video = VideoEncoder(layer: layer) {
+            video.onParams = { [connection] codec, sets in
                 connection.send(Message(type: .videoParams, payload: VideoWire.params(codec: codec, sets: sets)))
             }
-            encoder.onFrame = { [weak self, weak encoder] keyframe, avcc in
-                guard let self = self, let encoder = encoder else { return }
+            video.onFrame = { [weak self] keyframe, avcc in
+                guard let self = self else { return }
                 let payload = VideoWire.frame(keyframe: keyframe, avcc: avcc)
                 self.connection.send(Message(type: .videoFrame, payload: payload))
-                self.sent.tick()
-                self.count(FrameCounters(bytes: payload.count, encodeMs: encoder.lastEncodeMs))
+                self.count(FrameCounters(bytes: payload.count))
             }
-            video = encoder
+            encoder.motion = .video
+            encoder.settleLimit = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes)
+            self.video = video
         }
         // A written frame frees the link: retry the held frame then instead of polling
         connection.onFrameWritten = { [weak self] in
@@ -112,8 +104,8 @@ final class FrameStreamer {
         lock.unlock()
     }
 
-    /// Drops encoders and any held frame
-    func stop() {
+    /// Drops encoders and any held frame; `completion` runs on the streamer queue once nothing more is sent
+    func stop(completion: (() -> Void)? = nil) {
         queue.async { [self] in
             pumpTimer?.cancel()
             pumpTimer = nil
@@ -122,6 +114,7 @@ final class FrameStreamer {
             gate = FrameGate(interval: gate.interval)
             tile = nil
             video = nil
+            completion?()
         }
     }
 
@@ -158,18 +151,31 @@ final class FrameStreamer {
         let forceKey = keyframeRequested
         keyframeRequested = false
         lock.unlock()
+        if forceKey { videoKeyframe = true }
         let pixelBuffer = captured.pixelBuffer
-        guard let tile = tile else {
-            video?.encode(pixelBuffer, forceKeyframe: forceKey)
-            return
-        }
+        guard let tile = tile else { return }
         var cvTexture: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(nil, tile.cache, pixelBuffer, nil, .bgra8Unorm,
                                                   CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), 0, &cvTexture)
         guard let cvt = cvTexture, let texture = CVMetalTextureGetTexture(cvt) else { return }
         let frame = tile.encoder.encode(texture: texture, forceAll: forceKey, dirty: captured.dirty, congested: queueWasFull)
         gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
-        if let frame = frame { send(frame, tile.encoder, tile.packer, refinement: false) }
+        // The video picture goes out first; the tile frame after it presents both
+        var videoMs = 0.0, presents = false
+        if let video = video, tile.encoder.lossyTiles > 0 {
+            presents = video.encode(pixelBuffer, time: ProcessInfo.processInfo.systemUptime, forceKeyframe: videoKeyframe)
+            videoMs = video.lastEncodeMs
+            if presents {
+                videoKeyframe = false
+            } else {
+                // Lossy tiles settle to BC7, and motion continues as BC1
+                tile.encoder.motion = .bc1
+                self.video = nil
+            }
+        }
+        if let frame = frame ?? (presents ? EncodedFrame(runs: [], data: Data()) : nil) {
+            send(frame, tile.encoder, tile.packer, refinement: false, extraMs: videoMs)
+        }
         scheduleRefine()
     }
 
@@ -189,8 +195,8 @@ final class FrameStreamer {
         refineTimer?.schedule(deadline: .now() + due)
     }
 
-    /// Refinements re-send settled tiles; they count as bytes, not as frames
-    private func send(_ frame: EncodedFrame, _ encoder: TileEncoder, _ packer: TilePacker, refinement: Bool) {
+    /// Refinements re-send settled tiles; they count as bytes, not as frames. `extraMs`: video encode time
+    private func send(_ frame: EncodedFrame, _ encoder: TileEncoder, _ packer: TilePacker, refinement: Bool, extraMs: Double = 0) {
         let g = encoder.geometry
         let packed = packer.pack(frame, geometry: g, compression: compression.next(rawBytes: frame.data.count, queueWasFull: queueWasFull))
         compression.record(rawBytes: packed.lz4In, wireBytes: packed.lz4Out)
@@ -202,7 +208,7 @@ final class FrameStreamer {
         }
         sent.tick()
         count(FrameCounters(bytes: packed.wireBytes, rawTileBytes: frame.data.count, dirtyTiles: frame.tileCount,
-                            totalTiles: g.tileCount, encodeMs: encoder.lastGPUSeconds * 1000))
+                            totalTiles: g.tileCount, encodeMs: encoder.lastGPUSeconds * 1000 + extraMs))
     }
 
     private func count(_ c: FrameCounters) {
@@ -211,7 +217,7 @@ final class FrameStreamer {
         counters.rawTileBytes += c.rawTileBytes
         counters.dirtyTiles += c.dirtyTiles
         counters.totalTiles += c.totalTiles
-        counters.encodeMs = c.encodeMs
+        if c.totalTiles > 0 || c.encodeMs > 0 { counters.encodeMs = c.encodeMs }
         lock.unlock()
     }
 }

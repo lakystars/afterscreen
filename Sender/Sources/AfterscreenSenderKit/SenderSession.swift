@@ -28,17 +28,26 @@ public struct SenderSnapshot {
     public var memoryBytes: UInt64 = 0
     public var gpuPercent = 0.0
     public var receiver: ReceiverStats?
+    public var qualityTest: QualityTest.Report?
 
     public init() {}
 }
 
-/// One connection to a receiver: route, handshake, probe, virtual display, capture and encode
+/// One connection to a receiver: route, handshake, probe, then a virtual display with capture and encode,
+/// or a quality test
 public final class SenderSession {
+    public enum Purpose {
+        case display
+        case qualityTest
+    }
+
     public var onUpdate: ((SenderSnapshot) -> Void)?
     public var onEnd: ((String) -> Void)?
     public private(set) var snapshot = SenderSnapshot()
 
     private let target: DiscoveredReceiver
+    private let purpose: Purpose
+    private var testRun: QualityTestRun?
     private var connection: Connection?
     private var display: VirtualDisplay?
     private var capture: Capture?
@@ -55,8 +64,12 @@ public final class SenderSession {
     private var lastTCP: TCPInfo?
     private var lastSample = Date()
 
-    public init(target: DiscoveredReceiver) {
+    /// Development: pace writes to this many Mbps and treat the route as Wi-Fi
+    public static var simulatedLinkMbps: Double?
+
+    public init(target: DiscoveredReceiver, purpose: Purpose = .display) {
         self.target = target
+        self.purpose = purpose
     }
 
     // MARK: - Lifecycle (main queue)
@@ -66,7 +79,7 @@ public final class SenderSession {
         let routes = RoutePlanner.plan(local: RoutePlanner.currentInterfaces(), remote: target.addresses)
         guard !routes.isEmpty else {
             return end(target.addresses.isEmpty ? "Receiver address unknown"
-                       : "No Thunderbolt, USB or Wi-Fi route to \(target.name)")
+                       : "No Thunderbolt, USB, Ethernet or Wi-Fi route to \(target.name)")
         }
         connect(routes)
     }
@@ -91,12 +104,14 @@ public final class SenderSession {
 
     private func connected(_ c: Connection, route: Route) {
         connection = c
+        let simulated = SenderSession.simulatedLinkMbps
+        c.paceBitsPerSecond = simulated.map { $0 * 1e6 }
         c.onMessage = { [weak self] m in self?.handle(m) }
         c.onClose = { [weak self] reason in self?.end(reason) }
         c.start(queue: .main, idleTimeout: SenderSession.idleTimeout)
         startPing()
         update {
-            $0.link = route.kind
+            $0.link = simulated == nil ? route.kind : .wifi
             $0.interface = route.interface
             $0.mtu = Interfaces.mtu(route.interface)
             $0.state = "Handshake"
@@ -107,10 +122,10 @@ public final class SenderSession {
                            osVersion: "\(os.majorVersion).\(os.minorVersion)"))
     }
 
-    public func stop() {
-        guard let c = connection, !ended else { return end("Stopped") }
-        send(.bye, Bye(reason: "Stopped on the sender"))
-        c.closeAfterFlush(reason: "Stopped")
+    public func stop(reason: String = "Stopped on the sender") {
+        guard let c = connection, !ended else { return end(reason) }
+        send(.bye, Bye(reason: reason))
+        c.closeAfterFlush(reason: reason)
     }
 
     /// Pings and stats arrive at least twice a second on a live link
@@ -121,6 +136,8 @@ public final class SenderSession {
         ended = true
         timers.forEach { $0.cancel() }
         timers.removeAll()
+        testRun?.stop()
+        testRun = nil
         capture?.stop()
         capture = nil
         streamer?.stop()
@@ -154,8 +171,9 @@ public final class SenderSession {
                   let welcome = snapshot.peer, let link = snapshot.link else { return }
             update { $0.capacityGbps = result.gbps }
             guard let config = PathPolicy.choose(link: link, capacityGbps: result.gbps, welcome: welcome) else {
-                return end("Afterscreen supports Thunderbolt, USB and Wi-Fi links")
+                return end("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links")
             }
+            if purpose == .qualityTest { return startQualityTest(config) }
             send(.config, config)
             beginStreaming(config, welcome: welcome)
         case .pong:
@@ -164,7 +182,9 @@ public final class SenderSession {
                 latency.add(ms: ms)
             }
         case .stats:
-            if let stats = try? JSONWire.decode(ReceiverStats.self, from: m.payload) { snapshot.receiver = stats }
+            guard let stats = try? JSONWire.decode(ReceiverStats.self, from: m.payload) else { return }
+            snapshot.receiver = stats
+            testRun?.receiverStats(stats)
         case .keyRequest:
             streamer?.requestKeyframe()
         case .bye:
@@ -247,6 +267,33 @@ public final class SenderSession {
         }
     }
 
+    private func startQualityTest(_ config: StreamConfig) {
+        let stages = QualityTest.stages(panel: config.streamPixels).map { PathPolicy.stage(config, size: $0) }
+        let path = config.video.map { "Tiles + \($0.codec.rawValue.uppercased()) for motion" } ?? "Tiles"
+        let report = QualityTest.Report(receiver: snapshot.peer?.marketingName ?? target.name, link: snapshot.link, path: path)
+        guard let connection = connection,
+              let run = QualityTestRun(connection: connection, configs: stages, capacityGbps: snapshot.capacityGbps, report: report) else {
+            return end("Quality test unavailable: Metal or the test pattern failed")
+        }
+        run.onReport = { [weak self] r in
+            self?.update {
+                $0.qualityTest = r
+                $0.state = r.running.map { "Testing \(QualityTest.label($0))" } ?? "Test finished"
+            }
+        }
+        run.onFinish = { [weak self] in
+            guard let self = self else { return }
+            let stages = (self.snapshot.qualityTest?.stages ?? []).map {
+                String(format: "%@ %d×%d %.0f fps %.2f Gb/s", QualityTest.label($0.size), $0.size.width, $0.size.height, $0.fps, $0.gbps)
+            }
+            FileHandle.standardError.write(Data("[sender] quality test: \(stages.joined(separator: ", "))\n".utf8))
+            self.stop(reason: "Quality test finished")
+        }
+        update { $0.config = config }
+        testRun = run
+        run.start()
+    }
+
     // MARK: - Telemetry (main queue)
 
     /// Keeps the receiver's idle watchdog fed from the handshake on
@@ -287,12 +334,7 @@ public final class SenderSession {
             lastTCP = tcp
         }
         let m = metrics.sample()
-        let required: Double
-        if let config = snapshot.config, config.path == .video {
-            required = 1.5 * Double(PathPolicy.bitrate(for: config.streamPixels)) / 1e9
-        } else {
-            required = PathPolicy.tileCapacityGbps
-        }
+        let required = snapshot.config?.video.map { 1.5 * Double($0.bitrate) / 1e9 } ?? PathPolicy.tileCapacityGbps
         update {
             $0.throughputBitsPerSecond = bitsPerSecond
             $0.throughputHistory = throughput.values

@@ -49,6 +49,14 @@ public final class Connection {
         set { lock.lock(); frameWritten = newValue; lock.unlock() }
     }
     private var frameWritten: (() -> Void)?
+    /// Caps the write rate; simulates a slower link on loopback
+    public var paceBitsPerSecond: Double? {
+        get { lock.lock(); defer { lock.unlock() }; return pace }
+        set { lock.lock(); pace = newValue; lock.unlock() }
+    }
+    private var pace: Double?
+    /// Writer queue only: when the paced link is free again
+    private var paceClock = 0.0
 
     private let fd: Int32
     private let lock = NSLock()
@@ -299,6 +307,7 @@ public final class Connection {
                 if errno == EINTR { continue }
                 return false
             }
+            throttle(bytes: n)
             var left = n
             while left > 0, i < vecs.count {
                 if left >= vecs[i].iov_len {
@@ -312,6 +321,13 @@ public final class Connection {
             }
         }
         return true
+    }
+
+    private func throttle(bytes: Int) {
+        guard let rate = paceBitsPerSecond, rate > 0 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        paceClock = max(paceClock, now) + Double(bytes) * 8 / rate
+        if paceClock > now { usleep(UInt32(min(1, paceClock - now) * 1e6)) }
     }
 
     /// Closes once every message queued before this call is written, or after `grace` seconds

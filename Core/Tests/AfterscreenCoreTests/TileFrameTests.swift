@@ -52,6 +52,16 @@ final class TileFrameTests: XCTestCase {
         XCTAssertEqual(runs[2].bytes(in: g), runs[2].count * 16 * 16 * 8)
     }
 
+    func testVideoRunsComeLastAndCarryNoData() {
+        let g = TileGeometry(width: 256, height: 128)
+        let marks: [UInt32] = [3, 3, 1, 2,
+                               0, 3, 0, 0]
+        let runs = marks.withUnsafeBufferPointer { TileRun.runs(marks: $0, geometry: g) }
+        XCTAssertEqual(runs, [TileRun(row: 0, first: 2, count: 1), TileRun(row: 0, first: 3, count: 1, format: .bc1),
+                              TileRun(row: 0, first: 0, count: 2, format: .video), TileRun(row: 1, first: 1, count: 1, format: .video)])
+        XCTAssertEqual(runs[2].bytes(in: g), 0)
+    }
+
     func testRunClipsAtStreamEdge() {
         let g = TileGeometry(width: 2600, height: 1440)
         let run = TileRun(row: 22, first: 39, count: 2)
@@ -134,6 +144,25 @@ final class TileFrameTests: XCTestCase {
         XCTAssertEqual(frame.bc1Span.offset, 16 * 16 * 16)
         XCTAssertEqual(frame.bc1Span.blocks, 2 * 16 * 16)
         XCTAssertEqual(try frame.decodeAll(), raw)
+    }
+
+    func testLayoutWithVideoRunsHasDataOnlyForTileRuns() throws {
+        let runs = [TileRun(row: 0, first: 0, count: 1), TileRun(row: 1, first: 0, count: 2, format: .bc1),
+                    TileRun(row: 0, first: 1, count: 3, format: .video), TileRun(row: 2, first: 0, count: 4, format: .video)]
+        let size = runs.reduce(0) { $0 + $1.bytes(in: g) }
+        XCTAssertEqual(size, 16 * 16 * 16 + 2 * 16 * 16 * 8)
+        let raw = Data((0..<size).map { UInt8($0 % 251) })
+        let frame = try TileFrame(payload: TileFrame.header(frameIndex: 0, geometry: g, runs: runs, chunks: [(size, 0)]) + raw, expecting: g)
+        XCTAssertEqual(frame.runs, runs)
+        XCTAssertEqual(frame.bc1Span.offset, 16 * 16 * 16)
+        XCTAssertEqual(frame.bc1Span.blocks, 2 * 16 * 16)
+        XCTAssertEqual(try frame.decodeAll(), raw)
+    }
+
+    func testFrameWithoutRunsOnlyPresents() throws {
+        let frame = try TileFrame(payload: TileFrame.header(frameIndex: 0, geometry: g, runs: [], chunks: []), expecting: g)
+        XCTAssertTrue(frame.runs.isEmpty)
+        XCTAssertEqual(frame.rawBytes, 0)
     }
 
     func testLayoutRejectsBC7AfterBC1AndUnknownFormats() {

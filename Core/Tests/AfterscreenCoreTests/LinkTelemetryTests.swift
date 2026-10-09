@@ -2,8 +2,8 @@ import XCTest
 @testable import AfterscreenCore
 
 final class LinkTelemetryTests: XCTestCase {
-    private func facts(_ name: String, tb: Bool = false, ncm: Bool = false, wifi: Bool = false) -> InterfaceFacts {
-        InterfaceFacts(name: name, isBridgeWithThunderbolt: tb, isUSBNCM: ncm, isWiFi: wifi, isLoopback: name.hasPrefix("lo"))
+    private func facts(_ name: String, tb: Bool = false, ncm: Bool = false, wifi: Bool = false, ethernet: Bool = false) -> InterfaceFacts {
+        InterfaceFacts(name: name, isThunderbolt: tb, isUSBNCM: ncm, isWiFi: wifi, isEthernet: ethernet, isLoopback: name.hasPrefix("lo"))
     }
 
     func testClassify() {
@@ -13,6 +13,12 @@ final class LinkTelemetryTests: XCTestCase {
         XCTAssertEqual(LinkClassifier.classify(facts("en0", wifi: true)), .wifi)
         XCTAssertEqual(LinkClassifier.classify(facts("lo0")), .loopback)
         XCTAssertEqual(LinkClassifier.classify(facts("en7")), .unsupported)
+        XCTAssertEqual(LinkClassifier.classify(facts("en7", ethernet: true)), .ethernet)
+        // Thunderbolt and USB networking interfaces are Ethernet-typed too
+        XCTAssertEqual(LinkClassifier.classify(facts("en1", tb: true, ethernet: true)), .thunderbolt)
+        XCTAssertEqual(LinkClassifier.classify(facts("en5", ncm: true, ethernet: true)), .usb)
+        XCTAssertTrue(LinkKind.ethernet.isWired)
+        XCTAssertFalse(LinkKind.wifi.isWired)
     }
 
     func testBridgeMemberParsing() {

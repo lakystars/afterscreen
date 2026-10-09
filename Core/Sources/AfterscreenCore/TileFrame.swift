@@ -27,8 +27,16 @@ public enum TileFormat: UInt8 {
     case bc7 = 0
     /// 8 bytes per block, sent for tiles in motion; receivers transcode it to BC7
     case bc1 = 1
+    /// No data: the tiles show the video layer until a BC7 or BC1 run replaces them
+    case video = 2
 
-    public var blockBytes: Int { self == .bc7 ? 16 : 8 }
+    public var blockBytes: Int {
+        switch self {
+        case .bc7: return 16
+        case .bc1: return 8
+        case .video: return 0
+        }
+    }
 }
 
 /// Span of consecutive tiles in one tile row; its data is the covered blocks, row-major
@@ -65,9 +73,9 @@ public struct TileRun: Equatable {
     }
 
     /// Runs of marked tiles, row by row: mark 0 = unchanged, else `TileFormat` raw value + 1.
-    /// All BC7 runs come before BC1 runs, as the wire format requires
+    /// BC7 runs come before BC1 runs, as the wire format requires; video runs last
     public static func runs(marks: UnsafeBufferPointer<UInt32>, geometry g: TileGeometry) -> [TileRun] {
-        var bc7: [TileRun] = [], bc1: [TileRun] = []
+        var bc7: [TileRun] = [], bc1: [TileRun] = [], video: [TileRun] = []
         for row in 0..<g.tilesY {
             let base = row * g.tilesX
             var x = 0
@@ -80,10 +88,14 @@ public struct TileRun: Equatable {
                 let first = x
                 while x < g.tilesX && marks[base + x] == mark { x += 1 }
                 let run = TileRun(row: row, first: first, count: x - first, format: format)
-                if format == .bc7 { bc7.append(run) } else { bc1.append(run) }
+                switch format {
+                case .bc7: bc7.append(run)
+                case .bc1: bc1.append(run)
+                case .video: video.append(run)
+                }
             }
         }
-        return bc7 + bc1
+        return bc7 + bc1 + video
     }
 }
 
@@ -91,7 +103,8 @@ public struct TileRun: Equatable {
 /// runCount × (u16 row, u16 first, u16 count, u8 format, u8 0), chunkCount × (u32 rawSize, u32 lz4Size; 0 = stored),
 /// zero padding to 16 bytes, then chunk data.
 /// The raw stream is every run's blocks in run order; chunks split it for parallel (de)compression.
-/// BC7 runs come first, so BC7 data stays 16-byte aligned and BC1 blocks end the stream
+/// BC7 runs come first, so BC7 data stays 16-byte aligned and BC1 blocks end the stream.
+/// Video runs carry no data. A frame without runs only presents (the hybrid path's video picture)
 public struct TileFrame {
     public struct Chunk {
         public let rawOffset: Int
@@ -162,7 +175,7 @@ public struct TileFrame {
             }
             let b = run.blocks(in: g)
             runBytes += run.bytes(in: g)
-            runBlocks += b.w * b.h
+            if run.format != .video { runBlocks += b.w * b.h }
             runs.append(run)
         }
         // Repeated runs must not describe more blocks than one frame holds; the receiver sizes buffers by it
@@ -210,7 +223,11 @@ public struct TileFrame {
         var offset = 0, blocks = 0
         for run in runs {
             let b = run.blocks(in: geometry)
-            if run.format == .bc7 { offset += b.w * b.h * BC7.blockBytes } else { blocks += b.w * b.h }
+            switch run.format {
+            case .bc7: offset += b.w * b.h * BC7.blockBytes
+            case .bc1: blocks += b.w * b.h
+            case .video: break
+            }
         }
         return (offset, blocks)
     }

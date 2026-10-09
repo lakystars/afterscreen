@@ -58,12 +58,12 @@ final class FakeDisplay: StreamDisplay {
     func end(reason: String) { record { ended.append(reason) } }
     func showTiles(_ frame: TileFrame) -> Bool {
         guard let raw = try? frame.decodeAll() else { return false }
-        record { tiles.append(raw) }
+        record { tiles.append(raw); log.append("tiles") }
         tileGate?.wait()
         return true
     }
     func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool { record { log.append("params") }; return true }
-    func showVideoFrame(avcc: Data, keyframe: Bool) -> Bool { record { videoFrames += 1 }; return true }
+    func decodeVideo(avcc: Data) -> Bool { record { videoFrames += 1; log.append("video") }; return true }
     func cursor(x: Float, y: Float, visible: Bool) {}
     func cursorImage(_ image: CursorImage) {}
 }
@@ -157,7 +157,7 @@ final class ReceiverSessionTests: XCTestCase {
 
     func testConfigBeginsStream() {
         let config = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
-                                  sourcePoints: PixelSize(width: 128, height: 64), codec: nil, linkKind: .loopback)
+                                  sourcePoints: PixelSize(width: 128, height: 64), video: nil, linkKind: .loopback)
         client.send(try! JSONWire.message(.config, config))
         waitForDisplay { [display] in display.begun == [config] }
     }
@@ -166,7 +166,7 @@ final class ReceiverSessionTests: XCTestCase {
         let g = TileGeometry(width: 256, height: 128)
         let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1), TileRun(row: 1, first: 2, count: 2)])
         client.send(try! JSONWire.message(.config, StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
-                                                                 sourcePoints: PixelSize(width: 128, height: 64), codec: nil, linkKind: .loopback)))
+                                                                 sourcePoints: PixelSize(width: 128, height: 64), video: nil, linkKind: .loopback)))
         client.send(Message(type: .tileFrame, payload: frame.payload))
         waitForDisplay { [display] in display.tiles.count == 1 }
         XCTAssertEqual(display.tiles.first, frame.raw)
@@ -190,7 +190,7 @@ final class ReceiverSessionTests: XCTestCase {
     }
 
     private let tileConfig = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
-                                          sourcePoints: PixelSize(width: 128, height: 64), codec: nil, linkKind: .loopback)
+                                          sourcePoints: PixelSize(width: 128, height: 64), video: nil, linkKind: .loopback)
 
     private func expectEnd(_ send: () -> Void) -> String {
         let ended = expectation(description: "ended")
@@ -206,14 +206,36 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertTrue(reason.contains("no data"), reason)
     }
 
+    private let hybridConfig = StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 256, height: 128),
+                                            sourcePoints: PixelSize(width: 128, height: 64),
+                                            video: VideoLayer(codec: .hevc, pixels: PixelSize(width: 192, height: 96), bitrate: 20_000_000),
+                                            linkKind: .wifi)
+
     func testConfigResetsDecoderBeforeVideoParams() {
-        let config = StreamConfig(path: .video, streamPixels: PixelSize(width: 1920, height: 1080),
-                                  sourcePoints: PixelSize(width: 1920, height: 1080), codec: .hevc, linkKind: .wifi)
-        client.send(try! JSONWire.message(.config, config))
+        client.send(try! JSONWire.message(.config, hybridConfig))
         client.send(Message(type: .videoParams, payload: VideoWire.params(codec: .hevc, sets: [Data([1]), Data([2]), Data([3])])))
         waitForDisplay { [display] in display.log.contains("params") && display.log.contains("begin") }
         let log = display.read { display.log }
         XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "prepare")), try XCTUnwrap(log.firstIndex(of: "params")), "\(log)")
+    }
+
+    func testHybridVideoFrameDecodesAndTheTileFrameAfterItPresents() {
+        let g = TileGeometry(width: 256, height: 128)
+        client.send(try! JSONWire.message(.config, hybridConfig))
+        client.send(Message(type: .videoParams, payload: VideoWire.params(codec: .hevc, sets: [Data([1])])))
+        client.send(Message(type: .videoFrame, payload: VideoWire.frame(keyframe: true, avcc: Data([0, 0, 0, 1, 9]))))
+        client.send(Message(type: .tileFrame, payload: tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 2, format: .video)]).payload))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        XCTAssertEqual(display.read { display.log.filter { $0 != "begin" } }, ["prepare", "params", "video", "tiles"])
+    }
+
+    func testVideoFrameOnTheTilePathEndsSession() {
+        let reason = expectEnd {
+            client.send(try! JSONWire.message(.config, tileConfig))
+            client.send(Message(type: .videoFrame, payload: VideoWire.frame(keyframe: true, avcc: Data([1]))))
+        }
+        XCTAssertTrue(reason.contains("hybrid"), reason)
+        XCTAssertEqual(display.read { display.videoFrames }, 0)
     }
 
     func testTileFrameForAnotherGeometryEndsSession() {
@@ -504,5 +526,84 @@ final class StreamRendererTests: XCTestCase {
     func testShadersCompileAndPipelinesBuild() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         XCTAssertNotNil(StreamRenderer(device: device))
+    }
+
+    private func texture(_ device: MTLDevice, _ format: MTLPixelFormat, _ w: Int, _ h: Int, _ texel: [UInt8]) -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead, .renderTarget]
+        let t = device.makeTexture(descriptor: desc)!
+        let bytes = (0..<(w * h)).flatMap { _ in texel }
+        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: bytes, bytesPerRow: w * texel.count)
+        return t
+    }
+
+    func testHybridFragmentShowsVideoOnlyInMaskedTiles() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let library = try device.makeLibrary(source: StreamRenderer.shaders, options: nil)
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "screenQuad")
+        desc.fragmentFunction = library.makeFunction(name: "hybridFragment")
+        desc.colorAttachments[0].pixelFormat = .rgba8Unorm
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        let target = texture(device, .rgba8Unorm, 128, 64, [0, 0, 0, 0])
+        let tiles = texture(device, .rgba8Unorm, 128, 64, [255, 0, 0, 255])
+        // Video layer at half size: white (Y 235, Cb = Cr = 128)
+        let luma = texture(device, .r8Unorm, 64, 32, [235])
+        let chroma = texture(device, .rg8Unorm, 32, 16, [128, 128])
+        let mask = try XCTUnwrap(device.makeBuffer(bytes: [UInt8(1), 0], length: 2, options: .storageModeShared))
+        var grid: [UInt32] = [2, 64, 128, 64]
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let queue = try XCTUnwrap(device.makeCommandQueue())
+        let cb = try XCTUnwrap(queue.makeCommandBuffer())
+        let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(tiles, index: 0)
+        enc.setFragmentTexture(luma, index: 1)
+        enc.setFragmentTexture(chroma, index: 2)
+        enc.setFragmentBuffer(mask, offset: 0, index: 0)
+        enc.setFragmentBytes(&grid, length: 16, index: 1)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var pixels = [UInt8](repeating: 0, count: 128 * 64 * 4)
+        target.getBytes(&pixels, bytesPerRow: 128 * 4, from: MTLRegionMake2D(0, 0, 128, 64), mipmapLevel: 0)
+        func pixel(_ x: Int, _ y: Int) -> [UInt8] { Array(pixels[(y * 128 + x) * 4..<(y * 128 + x) * 4 + 3]) }
+        XCTAssertEqual(pixel(10, 30), [255, 255, 255], "masked tile shows the video")
+        XCTAssertEqual(pixel(63, 63), [255, 255, 255])
+        XCTAssertEqual(pixel(64, 0), [255, 0, 0], "unmasked tile shows the tiles")
+        XCTAssertEqual(pixel(127, 63), [255, 0, 0])
+    }
+}
+
+final class VideoMaskTests: XCTestCase {
+    private let g = TileGeometry(width: 256, height: 128) // 4×2 tiles
+
+    func testVideoRunsSetTilesAndTileRunsClearThem() {
+        var mask = VideoMask()
+        mask.apply([TileRun(row: 0, first: 1, count: 3, format: .video), TileRun(row: 1, first: 0, count: 1, format: .video)], geometry: g)
+        XCTAssertEqual(mask.bytes, [0, 1, 1, 1, 1, 0, 0, 0])
+        XCTAssertEqual(mask.shown, 4)
+        mask.apply([TileRun(row: 0, first: 2, count: 1), TileRun(row: 1, first: 0, count: 2, format: .bc1)], geometry: g)
+        XCTAssertEqual(mask.bytes, [0, 1, 0, 1, 0, 0, 0, 0])
+        XCTAssertEqual(mask.shown, 2)
+        mask.apply([TileRun(row: 0, first: 1, count: 1, format: .video)], geometry: g)
+        XCTAssertEqual(mask.shown, 2, "a tile already on video is not counted twice")
+    }
+
+    func testNewGeometryOrResetClearsTheMask() {
+        var mask = VideoMask()
+        mask.apply([TileRun(row: 0, first: 0, count: 4, format: .video)], geometry: g)
+        mask.apply([], geometry: TileGeometry(width: 128, height: 128))
+        XCTAssertEqual(mask.bytes, [0, 0, 0, 0])
+        XCTAssertEqual(mask.shown, 0)
+        mask.apply([TileRun(row: 0, first: 0, count: 1, format: .video)], geometry: g)
+        mask.reset()
+        XCTAssertEqual(mask.shown, 0)
+        XCTAssertTrue(mask.bytes.isEmpty)
     }
 }

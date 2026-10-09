@@ -166,7 +166,7 @@ public final class TileTexture {
         }
         guard let blit = cb.makeBlitCommandEncoder() else { throw FramingError.invalid("tile upload") }
         var offset = start, transcodedOffset = 0
-        for run in frame.runs {
+        for run in frame.runs where run.format != .video {
             let b = run.blocks(in: g), size = run.size(in: g), origin = run.origin(in: g)
             let from = run.format == .bc7 ? source : transcoded!
             let at = run.format == .bc7 ? offset : transcodedOffset

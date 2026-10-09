@@ -2,7 +2,8 @@ import Foundation
 import AfterscreenCore
 
 /// Screen side of a session. begin/end/cursor run on the main queue;
-/// showTiles and video calls run on the session's serial decode queue
+/// showTiles and video calls run on the session's serial decode queue.
+/// On the hybrid path a video frame only decodes; the tile frame after it presents
 public protocol StreamDisplay: AnyObject {
     func begin(config: StreamConfig)
     /// Decode queue: drop decoder and texture state from the previous stream
@@ -15,7 +16,7 @@ public protocol StreamDisplay: AnyObject {
     /// false when the decoder cannot be created
     func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool
     /// false when the frame failed to decode
-    func showVideoFrame(avcc: Data, keyframe: Bool) -> Bool
+    func decodeVideo(avcc: Data) -> Bool
     func cursor(x: Float, y: Float, visible: Bool)
     func cursorImage(_ image: CursorImage)
     var gpuMeter: GPUTimeMeter { get }
@@ -138,9 +139,9 @@ public final class ReceiverSession {
             DispatchQueue.main.async { [weak self] in self?.display?.begin(config: config) }
         case .tileFrame:
             frameStarted()
-            guard let config = config, config.path == .tile else {
+            guard let config = config else {
                 frameFinished()
-                return fail("tile frame without a tile stream")
+                return fail("tile frame before the stream config")
             }
             let payload = m.payload
             let geometry = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
@@ -149,6 +150,7 @@ public final class ReceiverSession {
                 self?.frameFinished()
             }
         case .videoParams:
+            guard config?.path == .hybrid else { return fail("video without a hybrid stream") }
             guard let params = try? VideoWire.parseParams(m.payload) else { return fail("bad video parameters") }
             decodeQueue.async { [weak self] in
                 guard let self = self, let display = self.display else { return }
@@ -158,16 +160,15 @@ public final class ReceiverSession {
             }
         case .videoFrame:
             frameStarted()
-            guard let frame = try? VideoWire.parseFrame(m.payload) else {
+            guard config?.path == .hybrid, let frame = try? VideoWire.parseFrame(m.payload) else {
                 frameFinished()
-                return fail("bad video frame")
+                return fail("video frame without a hybrid stream")
             }
-            received.tick()
             decodeQueue.async { [weak self] in
                 guard let self = self else { return }
                 defer { self.frameFinished() }
                 guard let display = self.display else { return }
-                if !display.showVideoFrame(avcc: frame.avcc, keyframe: frame.keyframe) {
+                if !display.decodeVideo(avcc: frame.avcc) {
                     self.queue.async { self.decodeFailed() }
                 }
             }

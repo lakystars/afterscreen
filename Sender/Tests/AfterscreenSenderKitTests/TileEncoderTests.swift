@@ -231,7 +231,7 @@ final class TileEncoderTests: XCTestCase {
 }
 
 final class MotionTests: XCTestCase {
-    private func texture(_ device: MTLDevice, _ pixels: [UInt32], _ w: Int, _ h: Int) -> MTLTexture {
+    func texture(_ device: MTLDevice, _ pixels: [UInt32], _ w: Int, _ h: Int) -> MTLTexture {
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
         desc.usage = .shaderRead
         let t = device.makeTexture(descriptor: desc)!
@@ -240,7 +240,7 @@ final class MotionTests: XCTestCase {
     }
 
     /// Video-like colour field with a moving phase, BGRA (a few levels per pixel per channel)
-    private func scene(_ w: Int, _ h: Int, phase: Double) -> [UInt32] {
+    func scene(_ w: Int, _ h: Int, phase: Double) -> [UInt32] {
         (0..<(w * h)).map { i -> UInt32 in
             let x = Double(i % w), y = Double(i / w)
             let r = UInt32(127 + 120 * sin(x / 24 + phase)), g = UInt32(127 + 120 * cos(y / 20 - phase)), b = UInt32(127 + 100 * sin((x + y) / 30))
@@ -318,6 +318,64 @@ final class MotionTests: XCTestCase {
         let slower = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 4), w, h), forceAll: false, dirty: nil,
                                                   now: 5.2, congested: true))
         XCTAssertEqual(slower.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
+    }
+}
+
+extension MotionTests {
+    private func blocksMatch(_ frame: EncodedFrame, _ reference: UnsafeRawBufferPointer, _ g: TileGeometry) -> Bool {
+        frame.data.withUnsafeBytes { data in
+            (0..<g.blocksY).allSatisfy { by in
+                (0..<g.blocksX).allSatisfy { bx in
+                    memcmp(data.baseAddress! + (by * g.blocksX + bx) * 16,
+                           reference.baseAddress! + TileEncoder.blockOffset(bx: bx, by: by, geometry: g), 16) == 0
+                }
+            }
+        }
+    }
+
+    func testMovingTilesSwitchToTheVideoLayerAndSettleToTheLatestBC7() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let g = TileGeometry(width: w, height: h)
+        let encoder = try TileEncoder(device: device, geometry: g, uploadBuffers: 6)
+        encoder.motion = .video
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0)
+        let first = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 1), w, h), forceAll: false, dirty: nil, now: 1))
+        XCTAssertEqual(first.runs, [TileRun(row: 0, first: 0, count: 2)], "a change after a pause is sharp")
+        XCTAssertEqual(encoder.lossyTiles, 0)
+
+        let entering = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 2), w, h), forceAll: false, dirty: nil, now: 1.016))
+        XCTAssertEqual(entering.runs, [TileRun(row: 0, first: 0, count: 2, format: .video)])
+        XCTAssertEqual(entering.data.count, 0)
+        XCTAssertEqual(encoder.lossyTiles, 2)
+
+        XCTAssertNil(encoder.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: false, dirty: nil, now: 1.032),
+                     "tiles already on the video layer send nothing")
+        XCTAssertEqual(encoder.lossyTiles, 2)
+
+        let settled = try XCTUnwrap(encoder.refine(now: 1.2))
+        XCTAssertEqual(settled.runs, [TileRun(row: 0, first: 0, count: 2)])
+        XCTAssertEqual(encoder.lossyTiles, 0)
+        let fresh = try TileEncoder(device: device, geometry: g)
+        _ = fresh.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: true, dirty: nil, now: 0)
+        XCTAssertTrue(blocksMatch(settled, fresh.reference, g), "the settled tiles carry the last moving picture")
+    }
+
+    func testSettlingIsCappedPerFrame() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let encoder = try TileEncoder(device: device, geometry: TileGeometry(width: w, height: h), uploadBuffers: 6)
+        encoder.motion = .video
+        encoder.settleLimit = 1
+        for (i, now) in [0, 1, 1.016].enumerated() {
+            _ = encoder.encode(texture: texture(device, scene(w, h, phase: Double(i)), w, h), forceAll: i == 0, dirty: nil, now: now)
+        }
+        XCTAssertEqual(encoder.lossyTiles, 2)
+        XCTAssertEqual(try XCTUnwrap(encoder.refine(now: 1.2)).runs, [TileRun(row: 0, first: 0, count: 1)])
+        XCTAssertEqual(encoder.lossyTiles, 1)
+        XCTAssertEqual(encoder.nextRefinement(now: 1.2), 0)
+        XCTAssertEqual(try XCTUnwrap(encoder.refine(now: 1.21)).runs, [TileRun(row: 0, first: 1, count: 1)])
+        XCTAssertNil(encoder.nextRefinement(now: 1.21))
     }
 }
 

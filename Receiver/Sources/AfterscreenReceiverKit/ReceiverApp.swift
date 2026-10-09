@@ -98,13 +98,15 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         switch config.linkKind {
         case .thunderbolt: link = "ϟ Thunderbolt"
         case .usb: link = "⌁ USB"
-        case .wifi: link = "Wi-Fi"
+        case .ethernet: link = "⇄ Ethernet"
+        case .wifi: link = "≋ Wi-Fi"
         case .loopback: link = "Loopback"
         case .unsupported: link = "Unsupported"
         }
-        let path = config.path == .tile ? "tiles (BC7)" : "video (\(config.codec?.rawValue.uppercased() ?? "?"))"
+        let path = config.video.map { "tiles + \($0.codec.rawValue.uppercased()) \($0.pixels.width)×\($0.pixels.height)" } ?? "tiles (BC7)"
+        let title = config.test ? "Afterscreen quality test" : "Afterscreen"
         return """
-         Afterscreen  \(link)
+         \(title)  \(link)
          \(config.streamPixels.width)×\(config.streamPixels.height) \(path)
          displayed \(String(format: "%.0f", screen.displayedFPS)) fps · late \(screen.lateFrames)
          upload \(Format.ms(screen.uploadMs)) · GPU \(Format.percent(screen.gpuMeter.lastPercent))

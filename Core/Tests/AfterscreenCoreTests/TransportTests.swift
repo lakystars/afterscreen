@@ -63,6 +63,23 @@ final class TransportTests: XCTestCase {
         client.close(reason: "done")
     }
 
+    func testPacedWritesHoldTheConfiguredRate() throws {
+        let (client, server) = try pair()
+        client.paceBitsPerSecond = 80e6
+        let got = expectation(description: "paced")
+        got.expectedFulfillmentCount = 4
+        server.onMessage = { _ in got.fulfill() }
+        server.start(queue: queue)
+        client.start(queue: queue)
+        let start = Date()
+        for _ in 0..<4 { client.send(Message(type: .tileFrame, payload: Data(count: 500_000))) }
+        wait(for: [got], timeout: 5)
+        // 500 KB at 80 Mbps holds the writer 0.05 s, so the fourth write starts after 0.15 s
+        XCTAssertGreaterThan(Date().timeIntervalSince(start), 0.14)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+        client.close(reason: "done")
+    }
+
     func testPeerCloseFiresOnceWithReason() throws {
         let (client, server) = try pair()
         let closed = expectation(description: "closed")

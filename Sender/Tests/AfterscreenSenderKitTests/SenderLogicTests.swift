@@ -60,31 +60,59 @@ final class PathPolicyTests: XCTestCase {
         XCTAssertEqual(c?.path, .tile)
         XCTAssertEqual(c?.streamPixels, fiveK)
         XCTAssertEqual(c?.sourcePoints, PixelSize(width: 2560, height: 1440))
-        XCTAssertNil(c?.codec)
+        XCTAssertNil(c?.video)
+        XCTAssertEqual(PathPolicy.choose(link: .ethernet, capacityGbps: 9.4, welcome: welcome(panel: fiveK))?.path, .tile)
     }
 
-    func testSlowWiredLinkFallsBackToVideo() {
-        let c = PathPolicy.choose(link: .usb, capacityGbps: 1, welcome: welcome(panel: fiveK))
-        XCTAssertEqual(c?.path, .video)
-        XCTAssertEqual(c?.streamPixels, PixelSize(width: 3840, height: 2160))
+    func testSlowLinksUseHybridAtPanelPixelsWithA4KVideoLayer() {
+        for (link, gbps) in [(LinkKind.usb, 1.0), (.ethernet, 0.94), (.wifi, 0.6), (.wifi, 5)] {
+            let c = PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome(panel: fiveK))
+            XCTAssertEqual(c?.path, .hybrid, "\(link) \(gbps)")
+            XCTAssertEqual(c?.streamPixels, fiveK)
+            XCTAssertEqual(c?.video?.codec, .hevc)
+            XCTAssertEqual(c?.video?.pixels, PixelSize(width: 3840, height: 2160))
+        }
     }
 
-    func testWiFiUsesHEVCAt4K() {
-        let c = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK))
-        XCTAssertEqual(c?.path, .video)
-        XCTAssertEqual(c?.codec, .hevc)
-        XCTAssertEqual(c?.streamPixels, PixelSize(width: 3840, height: 2160))
-    }
-
-    func testWiFiWithoutHEVCUsesH264() {
+    func testHybridWithoutHEVCUsesH264WithinItsLimit() {
         let c = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK, hevc: false))
-        XCTAssertEqual(c?.codec, .h264)
-        XCTAssertLessThanOrEqual(c?.streamPixels.width ?? 0, 4096)
+        XCTAssertEqual(c?.video?.codec, .h264)
+        XCTAssertEqual(c?.video?.pixels, PixelSize(width: 4096, height: 2304))
     }
 
-    func testWiFiKeeps1440pPanelNative() {
+    func testVideoLayerKeeps1440pPanelNative() {
         let c = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: PixelSize(width: 2560, height: 1440), hevc: false))
-        XCTAssertEqual(c?.streamPixels, PixelSize(width: 2560, height: 1440))
+        XCTAssertEqual(c?.video?.pixels, PixelSize(width: 2560, height: 1440))
+    }
+
+    func testReceiverWithoutVideoDecodeStaysOnTiles() {
+        var w = welcome(panel: fiveK, hevc: false)
+        w.h264Decode = false
+        let c = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: w)
+        XCTAssertEqual(c?.path, .tile)
+        XCTAssertNil(c?.video)
+    }
+
+    func testQualityTestStagesKeepThePathAndFitTheVideoLayer() throws {
+        let c = try XCTUnwrap(PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK)))
+        let small = PathPolicy.stage(c, size: PixelSize(width: 1920, height: 1080))
+        XCTAssertEqual(small.streamPixels, PixelSize(width: 1920, height: 1080))
+        XCTAssertEqual(small.video?.pixels, PixelSize(width: 1920, height: 1080))
+        XCTAssertTrue(small.test)
+        XCTAssertEqual(PathPolicy.stage(c, size: fiveK).video?.pixels, PixelSize(width: 3840, height: 2160))
+        XCTAssertFalse(c.test)
+    }
+
+    func testSettledTilesPerFrameFillHalfAFrameIntervalAtTwoToOne() {
+        XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: 0.3, tileBytes: 4096), 152)
+        XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: nil, tileBytes: 4096), 16)
+    }
+
+    func testVideoBitrateIsFortyPercentOfCapacityWithinLimits() {
+        XCTAssertEqual(PathPolicy.bitrate(capacityGbps: 0.3), 120_000_000)
+        XCTAssertEqual(PathPolicy.bitrate(capacityGbps: 0.94), 200_000_000)
+        XCTAssertEqual(PathPolicy.bitrate(capacityGbps: 0.02), 20_000_000)
+        XCTAssertEqual(PathPolicy.bitrate(capacityGbps: nil), 20_000_000)
     }
 
     func testUnsupportedIsRefusedAndLoopbackAllowed() {
@@ -254,12 +282,13 @@ final class RoutePlannerTests: XCTestCase {
         LocalInterface(name: "bridge0", ip: "169.254.20.5", netmask: "255.255.0.0", kind: .thunderbolt),
         LocalInterface(name: "en5", ip: "169.254.99.1", netmask: "255.255.0.0", kind: .usb),
         LocalInterface(name: "bridge100", ip: "192.168.139.3", netmask: "255.255.255.0", kind: .unsupported),
+        LocalInterface(name: "en8", ip: "192.168.10.77", netmask: "255.255.255.0", kind: .ethernet),
     ]
 
-    func testThunderboltFirstThenUSBThenWiFi() {
+    func testThunderboltFirstThenUSBThenEthernetThenWiFi() {
         let routes = RoutePlanner.plan(local: locals, remote: ["192.168.10.40", "169.254.7.7", "fe80::1"])
-        XCTAssertEqual(routes.map(\.interface), ["bridge0", "en5", "en0"])
-        XCTAssertEqual(routes.map(\.address), ["169.254.7.7", "169.254.7.7", "192.168.10.40"])
+        XCTAssertEqual(routes.map(\.interface), ["bridge0", "en5", "en8", "en0"])
+        XCTAssertEqual(routes.map(\.address), ["169.254.7.7", "169.254.7.7", "192.168.10.40", "192.168.10.40"])
     }
 
     func testNoSharedSubnetMeansNoRoute() {

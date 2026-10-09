@@ -187,11 +187,11 @@ enum Shaders {
         uint tile;
         uint outBase;  // in 8-byte units
         uint runWidth; // in blocks
-        uint mode;     // 0 = BC7 from cur, 1 = BC7 from ref, 2 = BC1 from the texture
+        uint mode;     // 0 = BC7 from cur, 1 = BC7 from ref, 2 = BC1 from the texture, 3 = reference only
     };
 
-    // One threadgroup per sent tile: writes its blocks in run order (row-major per run).
-    // Modes 0 and 2 also copy the new BC7 encoding into the reference
+    // One threadgroup per tile: writes its blocks in run order (row-major per run).
+    // Modes 0, 2 and 3 also copy the new BC7 encoding into the reference
     kernel void tileGather(texture2d<float, access::read> src [[texture(0)]],
                            device const uint4 *cur [[buffer(0)]],
                            device uint4 *ref [[buffer(1)]],
@@ -203,6 +203,10 @@ enum Shaders {
         uint2 blk = uint2((e.tile % p.tilesX) * p.tileBlocks + gid.x, (e.tile / p.tilesX) * p.tileBlocks + gid.y);
         if (blk.x >= p.blocksX || blk.y >= p.blocksY) return;
         uint slot = e.tile * p.tileBlocks * p.tileBlocks + gid.y * p.tileBlocks + gid.x;
+        if (e.mode == 3u) {
+            ref[slot] = cur[slot];
+            return;
+        }
         uint i = gid.y * e.runWidth + gid.x;
         if (e.mode == 2u) {
             ref[slot] = cur[slot];

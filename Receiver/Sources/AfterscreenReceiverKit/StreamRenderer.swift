@@ -5,7 +5,8 @@ import AfterscreenCore
 import QuartzCore
 import VideoToolbox
 
-/// Draws the current picture into a CAMetalLayer, letterboxed.
+/// Draws the current picture into a CAMetalLayer, letterboxed: the BC7 tile texture,
+/// with the hybrid path's video picture in tiles the mask marks.
 /// All entry points run on the session decode queue except `layout`
 final class StreamRenderer {
     let layer = CAMetalLayer()
@@ -21,18 +22,21 @@ final class StreamRenderer {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let tilePipeline: MTLRenderPipelineState
-    private let nv12Pipeline: MTLRenderPipelineState
+    private let hybridPipeline: MTLRenderPipelineState
     private let tileTexture: TileTexture
     private var textureCache: CVMetalTextureCache?
     private var decoder: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
-    private var lumaTexture: CVMetalTexture?
-    private var chromaTexture: CVMetalTexture?
-    private var path: StreamPath?
+    /// Latest decoded video picture (NV12 planes); each draw that samples it keeps it alive
+    private var video: (luma: CVMetalTexture, chroma: CVMetalTexture)?
+    private var mask = VideoMask()
+    /// Ring of 3: with 2 drawables, the draw that last read a buffer has completed before its reuse
+    private var maskBuffers: [MTLBuffer] = []
+    private var maskRing = 0
     private let sizeLock = NSLock()
     private var drawableSize = CGSize.zero
 
-    private static let shaders = """
+    static let shaders = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -52,9 +56,14 @@ final class StreamRenderer {
         return float4(tex.sample(s, in.uv).rgb, 1.0);
     }
 
-    // NV12 BT.709 video range
-    fragment float4 nv12Fragment(VOut in [[stage_in]], texture2d<float> luma [[texture(0)]], texture2d<float> chroma [[texture(1)]]) {
+    // grid: tiles per row, tile edge in pixels, stream width and height.
+    // Masked tiles show the video picture (NV12, BT.709 video range), the rest the BC7 picture
+    fragment float4 hybridFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
+                                   texture2d<float> luma [[texture(1)]], texture2d<float> chroma [[texture(2)]],
+                                   device const uchar *mask [[buffer(0)]], constant uint4 &grid [[buffer(1)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
+        uint2 p = min(uint2(in.uv * float2(grid.zw)), grid.zw - uint2(1));
+        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) return float4(tex.sample(s, in.uv).rgb, 1.0);
         float y = (luma.sample(s, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
         float2 c = (chroma.sample(s, in.uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
@@ -72,11 +81,11 @@ final class StreamRenderer {
             desc.colorAttachments[0].pixelFormat = .bgra8Unorm
             return try? device.makeRenderPipelineState(descriptor: desc)
         }
-        guard let tile = pipeline("tileFragment"), let nv12 = pipeline("nv12Fragment") else { return nil }
+        guard let tile = pipeline("tileFragment"), let hybrid = pipeline("hybridFragment") else { return nil }
         self.device = device
         self.queue = queue
         tilePipeline = tile
-        nv12Pipeline = nv12
+        hybridPipeline = hybrid
         tileTexture = TileTexture(device: device)
         CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
         layer.device = device
@@ -102,20 +111,20 @@ final class StreamRenderer {
         sizeLock.unlock()
     }
 
-    func reset(path: StreamPath) {
-        self.path = path
+    func reset() {
         if let d = decoder { VTDecompressionSessionInvalidate(d) }
         decoder = nil
         format = nil
-        lumaTexture = nil
-        chromaTexture = nil
+        video = nil
+        mask.reset()
         statsLock.lock()
         stats = (0, 0, 0)
         statsLock.unlock()
     }
 
     func releaseResources() {
-        reset(path: path ?? .tile)
+        reset()
+        maskBuffers = []
         tileTexture.release()
     }
 
@@ -137,18 +146,48 @@ final class StreamRenderer {
         stats.decodeMs = decode
         stats.uploadMs = max(0, (ProcessInfo.processInfo.systemUptime - start) * 1000 - decode)
         statsLock.unlock()
+        mask.apply(frame.runs, geometry: frame.geometry)
         guard let texture = tileTexture.texture else {
             cb.commit()
             return true
         }
-        encodeDraw(cb, content: CGSize(width: frame.geometry.width, height: frame.geometry.height)) { enc in
-            enc.setRenderPipelineState(tilePipeline)
-            enc.setFragmentTexture(texture, index: 0)
+        let g = frame.geometry
+        let content = CGSize(width: g.width, height: g.height)
+        if mask.shown > 0, let picture = video, let luma = CVMetalTextureGetTexture(picture.luma),
+           let chroma = CVMetalTextureGetTexture(picture.chroma), let maskBuffer = nextMaskBuffer() {
+            cb.addCompletedHandler { _ in _ = picture }
+            var grid = [UInt32(g.tilesX), UInt32(g.tilePixels), UInt32(g.width), UInt32(g.height)]
+            encodeDraw(cb, content: content) { enc in
+                enc.setRenderPipelineState(hybridPipeline)
+                enc.setFragmentTexture(texture, index: 0)
+                enc.setFragmentTexture(luma, index: 1)
+                enc.setFragmentTexture(chroma, index: 2)
+                enc.setFragmentBuffer(maskBuffer, offset: 0, index: 0)
+                enc.setFragmentBytes(&grid, length: 16, index: 1)
+            }
+        } else {
+            encodeDraw(cb, content: content) { enc in
+                enc.setRenderPipelineState(tilePipeline)
+                enc.setFragmentTexture(texture, index: 0)
+            }
         }
         return true
     }
 
-    // MARK: - Video path
+    /// The current mask in the next ring buffer
+    private func nextMaskBuffer() -> MTLBuffer? {
+        let bytes = mask.bytes
+        if maskBuffers.first.map({ $0.length != bytes.count }) ?? true {
+            maskBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: bytes.count, options: .storageModeShared) }
+        }
+        guard maskBuffers.count == 3 else { return nil }
+        maskRing = (maskRing + 1) % 3
+        let buffer = maskBuffers[maskRing]
+        bytes.withUnsafeBytes { buffer.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        return buffer
+    }
+
+    // MARK: - Video layer
 
     func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool {
         var desc: CMVideoFormatDescription?
@@ -182,7 +221,8 @@ final class StreamRenderer {
         return true
     }
 
-    func showVideoFrame(avcc: Data) -> Bool {
+    /// Decodes synchronously into the current video picture; the next tile frame draws it
+    func decodeVideo(avcc: Data) -> Bool {
         guard let decoder = decoder, let format = format, let sample = makeSample(avcc, format: format) else { return false }
         var image: CVImageBuffer?
         let status = VTDecompressionSessionDecodeFrame(decoder, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, _, buffer, _, _ in
@@ -190,19 +230,12 @@ final class StreamRenderer {
         }
         guard status == noErr, let pixelBuffer = image, let cache = textureCache else { return false }
         var luma: CVMetalTexture?, chroma: CVMetalTexture?
-        let w = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), h = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
-        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .r8Unorm, w, h, 0, &luma)
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .r8Unorm,
+                                                  CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), CVPixelBufferGetHeightOfPlane(pixelBuffer, 0), 0, &luma)
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .rg8Unorm,
                                                   CVPixelBufferGetWidthOfPlane(pixelBuffer, 1), CVPixelBufferGetHeightOfPlane(pixelBuffer, 1), 1, &chroma)
-        guard let l = luma, let c = chroma, let lt = CVMetalTextureGetTexture(l), let ct = CVMetalTextureGetTexture(c),
-              let cb = queue.makeCommandBuffer() else { return false }
-        lumaTexture = l
-        chromaTexture = c
-        encodeDraw(cb, content: CGSize(width: w, height: h)) { enc in
-            enc.setRenderPipelineState(nv12Pipeline)
-            enc.setFragmentTexture(lt, index: 0)
-            enc.setFragmentTexture(ct, index: 1)
-        }
+        guard let l = luma, let c = chroma else { return false }
+        video = (l, c)
         return true
     }
 

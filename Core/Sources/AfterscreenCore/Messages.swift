@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 3
+    public static let version = 4
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -18,12 +18,13 @@ public struct PixelSize: Codable, Equatable, Hashable {
 }
 
 public enum LinkKind: String, Codable {
-    case thunderbolt, usb, wifi, loopback, unsupported
+    case thunderbolt, usb, ethernet, wifi, loopback, unsupported
 
-    public var isWired: Bool { self == .thunderbolt || self == .usb || self == .loopback }
+    public var isWired: Bool { self != .wifi && self != .unsupported }
 }
 
-public enum StreamPath: String, Codable { case tile, video }
+/// `tile`: BC7 tiles, moving tiles as BC1. `hybrid`: BC7 tiles, moving tiles shown from a video layer
+public enum StreamPath: String, Codable { case tile, hybrid }
 
 public enum VideoCodec: String, Codable { case hevc, h264 }
 
@@ -74,19 +75,38 @@ public struct Welcome: Codable, Equatable {
     public var isRetina: Bool { panelPixels.width >= panelPoints.width * 2 }
 }
 
+/// The hybrid path's video stream
+public struct VideoLayer: Codable, Equatable {
+    public var codec: VideoCodec
+    /// Encoded size; the receiver scales it to the stream
+    public var pixels: PixelSize
+    public var bitrate: Int
+
+    public init(codec: VideoCodec, pixels: PixelSize, bitrate: Int) {
+        self.codec = codec
+        self.pixels = pixels
+        self.bitrate = bitrate
+    }
+}
+
 public struct StreamConfig: Codable, Equatable {
     public var path: StreamPath
     public var streamPixels: PixelSize
     public var sourcePoints: PixelSize
-    public var codec: VideoCodec?
+    /// Set on the hybrid path
+    public var video: VideoLayer?
     public var linkKind: LinkKind
+    /// A quality test stage: generated frames, no virtual display
+    public var test: Bool
 
-    public init(path: StreamPath, streamPixels: PixelSize, sourcePoints: PixelSize, codec: VideoCodec?, linkKind: LinkKind) {
+    public init(path: StreamPath, streamPixels: PixelSize, sourcePoints: PixelSize, video: VideoLayer?, linkKind: LinkKind,
+                test: Bool = false) {
         self.path = path
         self.streamPixels = streamPixels
         self.sourcePoints = sourcePoints
-        self.codec = codec
+        self.video = video
         self.linkKind = linkKind
+        self.test = test
     }
 }
 

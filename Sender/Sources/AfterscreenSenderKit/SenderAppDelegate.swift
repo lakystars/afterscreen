@@ -36,13 +36,13 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Automation hook: connect to the first receiver whose name contains `match`
-    public func autoConnect(match: String) {
-        model.$receivers.first { list in list.contains { $0.name.localizedCaseInsensitiveContains(match) || match == "*" } }
+    /// Automation hook: connect to, or test, the first receiver whose name contains `match`
+    public func autoConnect(match: String, test: Bool = false) {
+        let matches: (DiscoveredReceiver) -> Bool = { $0.name.localizedCaseInsensitiveContains(match) || match == "*" }
+        model.$receivers.first { $0.contains(where: matches) }
             .sink { [weak self] list in
-                if let r = list.first(where: { $0.name.localizedCaseInsensitiveContains(match) || match == "*" }) {
-                    self?.model.connect(r)
-                }
+                guard let r = list.first(where: matches) else { return }
+                test ? self?.model.runQualityTest(r) : self?.model.connect(r)
             }
             .store(in: &cancellables)
     }

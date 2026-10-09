@@ -14,9 +14,9 @@ public struct Route: Equatable {
     public var kind: LinkKind
 }
 
-/// Orders (local interface, receiver address) pairs: Thunderbolt, USB, then Wi-Fi
+/// Orders (local interface, receiver address) pairs: Thunderbolt, USB, Ethernet, then Wi-Fi
 public enum RoutePlanner {
-    private static let priority: [LinkKind] = [.thunderbolt, .usb, .wifi]
+    private static let priority: [LinkKind] = [.thunderbolt, .usb, .ethernet, .wifi]
 
     public static func plan(local: [LocalInterface], remote: [String]) -> [Route] {
         let remoteV4 = remote.filter { ipv4($0) != nil }

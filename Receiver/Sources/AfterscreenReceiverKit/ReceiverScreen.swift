@@ -11,6 +11,8 @@ public final class ReceiverScreen: StreamDisplay {
 
     private let renderer: StreamRenderer
     private let window: StreamWindow
+    /// Held while a stream is shown: input arrives on the sender, so the iMac would idle into display sleep
+    private var awake: NSObjectProtocol?
 
     public init?(windowed: Bool = false) {
         guard let device = MTLCreateSystemDefaultDevice(), let renderer = StreamRenderer(device: device) else { return nil }
@@ -27,10 +29,14 @@ public final class ReceiverScreen: StreamDisplay {
 
     public func begin(config: StreamConfig) {
         window.show(config: config)
+        if awake == nil {
+            awake = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated],
+                                                          reason: "Showing a Afterscreen stream")
+        }
     }
 
     public func prepare(config: StreamConfig) {
-        renderer.reset(path: config.path)
+        renderer.reset()
     }
 
     public func releaseDecodeResources() {
@@ -39,6 +45,8 @@ public final class ReceiverScreen: StreamDisplay {
 
     public func end(reason: String) {
         window.hide()
+        if let a = awake { ProcessInfo.processInfo.endActivity(a) }
+        awake = nil
     }
 
     public func showTiles(_ frame: TileFrame) -> Bool {
@@ -49,8 +57,8 @@ public final class ReceiverScreen: StreamDisplay {
         renderer.setVideoParams(codec: codec, parameterSets: parameterSets)
     }
 
-    public func showVideoFrame(avcc: Data, keyframe: Bool) -> Bool {
-        renderer.showVideoFrame(avcc: avcc)
+    public func decodeVideo(avcc: Data) -> Bool {
+        renderer.decodeVideo(avcc: avcc)
     }
 
     public func cursor(x: Float, y: Float, visible: Bool) {

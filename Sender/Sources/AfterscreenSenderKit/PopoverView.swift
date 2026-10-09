@@ -7,6 +7,7 @@ enum LinkLabel {
         switch kind {
         case .thunderbolt?: return "ϟ"
         case .usb?: return "⌁"
+        case .ethernet?: return "⇄"
         case .wifi?: return "≋"
         case .loopback?: return "↺"
         default: return "?"
@@ -17,6 +18,7 @@ enum LinkLabel {
         switch kind {
         case .thunderbolt?: return "Thunderbolt"
         case .usb?: return "USB"
+        case .ethernet?: return "Ethernet"
         case .wifi?: return "Wi-Fi"
         case .loopback?: return "Loopback (same Mac)"
         case .unsupported?: return "Unsupported"
@@ -81,6 +83,51 @@ private struct SectionTitle: View {
     }
 }
 
+/// Quality test result: verdict, link and one bar per stage
+private struct QualityCard: View {
+    var report: QualityTest.Report
+    var testing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionTitle(text: "Quality test · \(report.receiver)")
+            if let v = report.verdict {
+                Text("\(QualityTest.label(v.size)) · \(Int(v.fps.rounded())) fps").font(.system(size: 24, weight: .bold, design: .rounded))
+            } else if !testing && !report.stages.isEmpty {
+                Text("Under \(Int(QualityTest.smoothFPS)) fps at every size").font(.system(size: 15, weight: .semibold))
+            }
+            if report.link != nil {
+                Text("\(LinkLabel.glyph(report.link)) \(LinkLabel.name(report.link)) · \(report.path)")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            ForEach(report.stages.indices, id: \.self) { i in stageRow(report.stages[i]) }
+            if testing {
+                HStack {
+                    ProgressView(value: Double(report.stages.count), total: Double(max(1, report.total)))
+                    Text(report.running.map { "Testing \(QualityTest.label($0))…" } ?? "Measuring the link…")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func stageRow(_ stage: QualityTest.Stage) -> some View {
+        let color: Color = stage.fps >= QualityTest.smoothFPS ? .green : (stage.fps >= 30 ? .yellow : .red)
+        return HStack(spacing: 8) {
+            Text(QualityTest.label(stage.size)).frame(width: 42, alignment: .leading)
+            Text("\(stage.size.width)×\(stage.size.height)").foregroundStyle(.secondary)
+            Spacer()
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.2)).frame(width: 60, height: 6)
+                Capsule().fill(color).frame(width: 60 * min(1, stage.fps / 60), height: 6)
+            }
+            Text("\(Int(stage.fps.rounded())) fps").frame(width: 48, alignment: .trailing)
+            Text(String(format: "%.1f Gb/s", stage.gbps)).foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
+        }
+        .font(.system(size: 11, design: .monospaced))
+    }
+}
+
 public struct PopoverView: View {
     @ObservedObject var model: AppModel
     @State private var showHardware = false
@@ -89,7 +136,9 @@ public struct PopoverView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if model.isActive || model.snapshot.isStreaming {
+            if model.isTesting {
+                testBody
+            } else if model.isActive || model.snapshot.isStreaming {
                 streamingBody
             } else {
                 idleBody
@@ -117,9 +166,10 @@ public struct PopoverView: View {
                     Button("Open Settings") { model.openPrivacySettings() }
                 }
             }
+            if let report = model.testReport { QualityCard(report: report, testing: false) }
             SectionTitle(text: "Receivers")
             if model.receivers.isEmpty {
-                Text("Looking for Afterscreen Receiver… Start it on the iMac and connect a Thunderbolt or USB cable.")
+                Text("Looking for Afterscreen Receiver… Start it on the iMac, then connect a Thunderbolt, USB or Ethernet cable, or join the same network.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(model.receivers) { r in
@@ -130,8 +180,23 @@ public struct PopoverView: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button("Test") { model.runQualityTest(r) }
+                        .help("Measure the highest resolution and frame rate this receiver and link sustain")
                     Button("Connect") { model.connect(r) }
                 }
+            }
+        }
+    }
+
+    private var testBody: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Quality test").font(.headline)
+            Text("The iMac shows full-motion frames at each size for 3 seconds.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let report = model.testReport { QualityCard(report: report, testing: true) }
+            HStack {
+                Spacer()
+                Button("Stop") { model.disconnect() }
             }
         }
     }
@@ -168,12 +233,12 @@ public struct PopoverView: View {
                 "\(Int(s.captureFPS.rounded())) · \(Int(s.sentFPS.rounded())) · \(Int((s.receiver?.displayedFPS ?? 0).rounded()))")
             Row("Dropped / min", "\(s.droppedPerMinute)")
             if let c = s.config {
-                Row("Path", c.path == .tile ? "Tiles (BC7) \(c.streamPixels.width)×\(c.streamPixels.height)"
-                    : "\(c.codec?.rawValue.uppercased() ?? "Video") \(c.streamPixels.width)×\(c.streamPixels.height)")
-                if c.path == .tile {
-                    Row("Changed tiles", String(format: "%.0f%%", s.dirtyPercent))
-                    Row("Compression", s.compressionRatio > 0 ? String(format: "%.1f×", s.compressionRatio) : "—")
+                Row("Path", "Tiles (BC7) \(c.streamPixels.width)×\(c.streamPixels.height)")
+                if let v = c.video {
+                    Row("Motion", "\(v.codec.rawValue.uppercased()) \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps")
                 }
+                Row("Changed tiles", String(format: "%.0f%%", s.dirtyPercent))
+                Row("Compression", s.compressionRatio > 0 ? String(format: "%.1f×", s.compressionRatio) : "—")
             }
             Row("Encode", Format.ms(s.encodeMs))
             SectionTitle(text: "This app (sender)")

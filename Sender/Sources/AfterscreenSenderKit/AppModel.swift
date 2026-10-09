@@ -10,6 +10,9 @@ public final class AppModel: ObservableObject {
     @Published public var activeReceiver: String?
     @Published public var screenRecordingGranted = CGPreflightScreenCaptureAccess()
     @Published public var lastMessage: String?
+    /// Latest quality test, kept after it ends
+    @Published public var testReport: QualityTest.Report?
+    @Published public var isTesting = false
 
     private var session: SenderSession?
     private let discovery = Discovery()
@@ -44,6 +47,25 @@ public final class AppModel: ObservableObject {
 
     public func disconnect() {
         session?.stop()
+    }
+
+    /// Needs no Screen Recording: the test streams generated frames
+    public func runQualityTest(_ receiver: DiscoveredReceiver) {
+        guard session == nil else { return }
+        let session = SenderSession(target: receiver, purpose: .qualityTest)
+        session.onUpdate = { [weak self] s in
+            if let r = s.qualityTest { self?.testReport = r }
+        }
+        session.onEnd = { [weak self] reason in
+            self?.session = nil
+            self?.isTesting = false
+            self?.lastMessage = reason
+        }
+        self.session = session
+        testReport = QualityTest.Report(receiver: receiver.name, total: QualityTest.scales.count)
+        isTesting = true
+        lastMessage = nil
+        session.start()
     }
 
     public func openPrivacySettings() {

@@ -13,8 +13,12 @@ final class MessagesTests: XCTestCase {
                               osVersion: "13.7", gpuNames: ["Radeon Pro 580", "Intel HD 630"],
                               panelPixels: PixelSize(width: 5120, height: 2880), panelPoints: PixelSize(width: 2560, height: 1440),
                               hevcDecode: true, h264Decode: true, bc7: true))
-        try roundTrip(StreamConfig(path: .video, streamPixels: PixelSize(width: 3840, height: 2160),
-                                   sourcePoints: PixelSize(width: 2560, height: 1440), codec: .hevc, linkKind: .wifi))
+        try roundTrip(StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 5120, height: 2880),
+                                   sourcePoints: PixelSize(width: 2560, height: 1440),
+                                   video: VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 160_000_000),
+                                   linkKind: .wifi))
+        try roundTrip(StreamConfig(path: .tile, streamPixels: PixelSize(width: 5120, height: 2880),
+                                   sourcePoints: PixelSize(width: 2560, height: 1440), video: nil, linkKind: .ethernet))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
                                     cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18))
         try roundTrip(Bye(reason: "user"))

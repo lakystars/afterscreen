@@ -100,8 +100,8 @@ final class FramingTests: XCTestCase {
         XCTAssertEqual(pool.freeCount, 2)
     }
 
-    func testFormatTaggedRunsAreProtocolVersionThree() {
-        XCTAssertEqual(AfterscreenProtocol.version, 3)
+    func testHybridPathAndEthernetAreProtocolVersionFour() {
+        XCTAssertEqual(AfterscreenProtocol.version, 4)
     }
 
     func testPoolKnowsItsOwnBuffers() {

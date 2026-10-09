@@ -1,18 +1,23 @@
 import Foundation
 import IOKit
+import SystemConfiguration
 
 public struct InterfaceFacts: Equatable {
     public var name: String
-    public var isBridgeWithThunderbolt: Bool
+    /// A Thunderbolt IP interface, or a bridge with one as a member
+    public var isThunderbolt: Bool
     public var isUSBNCM: Bool
     public var isWiFi: Bool
+    /// SystemConfiguration type Ethernet; Thunderbolt and USB networking report it too
+    public var isEthernet: Bool
     public var isLoopback: Bool
 
-    public init(name: String, isBridgeWithThunderbolt: Bool, isUSBNCM: Bool, isWiFi: Bool, isLoopback: Bool) {
+    public init(name: String, isThunderbolt: Bool, isUSBNCM: Bool, isWiFi: Bool, isEthernet: Bool, isLoopback: Bool) {
         self.name = name
-        self.isBridgeWithThunderbolt = isBridgeWithThunderbolt
+        self.isThunderbolt = isThunderbolt
         self.isUSBNCM = isUSBNCM
         self.isWiFi = isWiFi
+        self.isEthernet = isEthernet
         self.isLoopback = isLoopback
     }
 }
@@ -20,25 +25,35 @@ public struct InterfaceFacts: Equatable {
 public enum LinkClassifier {
     public static func classify(_ f: InterfaceFacts) -> LinkKind {
         if f.isLoopback { return .loopback }
-        if f.isBridgeWithThunderbolt { return .thunderbolt }
+        if f.isThunderbolt { return .thunderbolt }
         if f.isUSBNCM { return .usb }
         if f.isWiFi { return .wifi }
+        if f.isEthernet { return .ethernet }
         return .unsupported
     }
 
     public static func facts(for name: String) -> InterfaceFacts {
         let chain = ioClassChain(bsdName: name)
-        var tbBridge = false
-        if name.hasPrefix("bridge"), let output = run("/sbin/ifconfig", [name]) {
-            tbBridge = bridgeMembers(ifconfigOutput: output).contains { member in
-                ioClassChain(bsdName: member).contains { $0.contains("ThunderboltIP") }
-            }
+        let isThunderboltIP: (String) -> Bool = { ioClassChain(bsdName: $0).contains { $0.contains("ThunderboltIP") } }
+        var thunderbolt = chain.contains { $0.contains("ThunderboltIP") }
+        if !thunderbolt, name.hasPrefix("bridge"), let output = run("/sbin/ifconfig", [name]) {
+            thunderbolt = bridgeMembers(ifconfigOutput: output).contains(where: isThunderboltIP)
         }
         return InterfaceFacts(name: name,
-                              isBridgeWithThunderbolt: tbBridge,
+                              isThunderbolt: thunderbolt,
                               isUSBNCM: chain.contains { $0.contains("NCM") },
                               isWiFi: chain.contains { $0.contains("80211") || $0.contains("WLAN") },
+                              isEthernet: isEthernetType(name),
                               isLoopback: name.hasPrefix("lo"))
+    }
+
+    /// Wired Ethernet per SystemConfiguration; VM bridges and tunnels are not listed as Ethernet
+    static func isEthernetType(_ name: String) -> Bool {
+        let all = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface]) ?? []
+        return all.contains {
+            (SCNetworkInterfaceGetBSDName($0) as String?) == name
+                && (SCNetworkInterfaceGetInterfaceType($0) as String?) == (kSCNetworkInterfaceTypeEthernet as String)
+        }
     }
 
     public static func bridgeMembers(ifconfigOutput: String) -> [String] {
