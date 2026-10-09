@@ -1,0 +1,108 @@
+import CoreMedia
+import CoreVideo
+import Foundation
+import AfterscreenCore
+import ScreenCaptureKit
+
+/// Captured frame and its changed regions in output pixels; nil means unknown
+struct CapturedFrame {
+    let pixelBuffer: CVPixelBuffer
+    var dirty: [CGRect]?
+
+    /// Beyond this many merged regions the frame is treated as unknown (all tiles)
+    static let maxRegions = 256
+
+    /// Regions for a frame that replaces an unsent one: both frames' changes
+    static func merge(_ dropped: [CGRect]?, into newer: [CGRect]?) -> [CGRect]? {
+        guard let dropped = dropped, let newer = newer, dropped.count + newer.count <= maxRegions else { return nil }
+        return newer + dropped
+    }
+}
+
+/// ScreenCaptureKit stream of one display; delivers only frames with new content
+final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
+    var onFrame: ((CapturedFrame) -> Void)?
+    var onStop: ((String) -> Void)?
+    let captured = RateCounter()
+
+    private let displayID: CGDirectDisplayID
+    private let size: PixelSize
+    private let queue = DispatchQueue(label: "afterscreen.capture", qos: .userInteractive, autoreleaseFrequency: .workItem)
+    private var stream: SCStream?
+
+    init(displayID: CGDirectDisplayID, size: PixelSize) {
+        self.displayID = displayID
+        self.size = size
+    }
+
+    /// The virtual display can take a moment to appear in shareable content
+    func start(completion: @escaping (Error?) -> Void) {
+        Task {
+            do {
+                var display: SCDisplay?
+                for _ in 0..<20 {
+                    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                    display = content.displays.first { $0.displayID == displayID }
+                    if display != nil { break }
+                    try await Task.sleep(nanoseconds: 150_000_000)
+                }
+                guard let display = display else {
+                    throw NSError(domain: "Afterscreen", code: 1, userInfo: [NSLocalizedDescriptionKey: "Virtual display not visible to ScreenCaptureKit"])
+                }
+                let config = SCStreamConfiguration()
+                config.width = size.width
+                config.height = size.height
+                config.pixelFormat = kCVPixelFormatType_32BGRA
+                config.colorSpaceName = CGColorSpace.sRGB
+                config.showsCursor = false
+                config.queueDepth = 3
+                // A ceiling, not a target: the virtual display composites only as fast as it is consumed
+                config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
+                let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: config, delegate: self)
+                try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+                try await stream.startCapture()
+                self.stream = stream
+                completion(nil)
+            } catch {
+                completion(error)
+            }
+        }
+    }
+
+    func stop() {
+        guard let stream = stream else { return }
+        self.stream = nil
+        stream.stopCapture { _ in }
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, sampleBuffer.isValid,
+              let info = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
+              let raw = info[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
+              let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        captured.tick()
+        onFrame?(CapturedFrame(pixelBuffer: pixelBuffer, dirty: Capture.dirtyRects(info, outputWidth: CVPixelBufferGetWidth(pixelBuffer))))
+    }
+
+    private static func dirtyRects(_ info: [SCStreamFrameInfo: Any], outputWidth: Int) -> [CGRect]? {
+        guard let rects = info[.dirtyRects] as? [NSDictionary],
+              let content = (info[.contentRect] as? NSDictionary).flatMap({ CGRect(dictionaryRepresentation: $0) }),
+              let scale = info[.scaleFactor] as? CGFloat else { return nil }
+        return scaled(rects.compactMap { CGRect(dictionaryRepresentation: $0) }, content: content, scale: scale, outputWidth: outputWidth)
+    }
+
+    /// Dirty rects arrive in display pixels; `content` (points) × `scale` maps onto the output width
+    static func scaled(_ rects: [CGRect], content: CGRect, scale: CGFloat, outputWidth: Int) -> [CGRect]? {
+        let k = CGFloat(outputWidth) / (content.width * scale)
+        guard scale > 0, content.width > 0, k.isFinite, k > 0 else { return nil }
+        let ox = content.minX * scale, oy = content.minY * scale
+        return rects.filter { !$0.isEmpty }.map {
+            let r = CGRect(x: ($0.minX - ox) * k, y: ($0.minY - oy) * k, width: $0.width * k, height: $0.height * k)
+            return k == 1 ? r : r.integral
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        onStop?(error.localizedDescription)
+    }
+}

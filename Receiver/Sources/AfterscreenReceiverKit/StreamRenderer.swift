@@ -1,0 +1,269 @@
+import CoreMedia
+import CoreVideo
+import Metal
+import AfterscreenCore
+import QuartzCore
+import VideoToolbox
+
+/// Draws the current picture into a CAMetalLayer, letterboxed.
+/// All entry points run on the session decode queue except `layout`
+final class StreamRenderer {
+    let layer = CAMetalLayer()
+    let gpuMeter = GPUTimeMeter()
+    let displayed = RateCounter()
+    /// Telemetry written on the decode queue, read elsewhere
+    private let statsLock = NSLock()
+    private var stats = (late: 0, uploadMs: 0.0, decodeMs: 0.0)
+    var lateFrames: Int { statsLock.lock(); defer { statsLock.unlock() }; return stats.late }
+    var uploadMs: Double { statsLock.lock(); defer { statsLock.unlock() }; return stats.uploadMs }
+    var decodeMs: Double { statsLock.lock(); defer { statsLock.unlock() }; return stats.decodeMs }
+
+    private let device: MTLDevice
+    private let queue: MTLCommandQueue
+    private let tilePipeline: MTLRenderPipelineState
+    private let nv12Pipeline: MTLRenderPipelineState
+    private let tileTexture: TileTexture
+    private var textureCache: CVMetalTextureCache?
+    private var decoder: VTDecompressionSession?
+    private var format: CMVideoFormatDescription?
+    private var lumaTexture: CVMetalTexture?
+    private var chromaTexture: CVMetalTexture?
+    private var path: StreamPath?
+    private let sizeLock = NSLock()
+    private var drawableSize = CGSize.zero
+
+    private static let shaders = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct VOut { float4 position [[position]]; float2 uv; };
+
+    vertex VOut screenQuad(uint vid [[vertex_id]]) {
+        float2 p = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? -1.0 : 1.0);
+        VOut o;
+        o.position = float4(p, 0.0, 1.0);
+        o.uv = float2((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
+        return o;
+    }
+
+    // BC7 picture; alpha is not part of the stream
+    fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        return float4(tex.sample(s, in.uv).rgb, 1.0);
+    }
+
+    // NV12 BT.709 video range
+    fragment float4 nv12Fragment(VOut in [[stage_in]], texture2d<float> luma [[texture(0)]], texture2d<float> chroma [[texture(1)]]) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        float y = (luma.sample(s, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
+        float2 c = (chroma.sample(s, in.uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
+        float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
+        return float4(saturate(rgb), 1.0);
+    }
+    """
+
+    init?(device: MTLDevice) {
+        guard let queue = device.makeCommandQueue(),
+              let library = try? device.makeLibrary(source: StreamRenderer.shaders, options: nil) else { return nil }
+        func pipeline(_ fragment: String) -> MTLRenderPipelineState? {
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = library.makeFunction(name: "screenQuad")
+            desc.fragmentFunction = library.makeFunction(name: fragment)
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            return try? device.makeRenderPipelineState(descriptor: desc)
+        }
+        guard let tile = pipeline("tileFragment"), let nv12 = pipeline("nv12Fragment") else { return nil }
+        self.device = device
+        self.queue = queue
+        tilePipeline = tile
+        nv12Pipeline = nv12
+        tileTexture = TileTexture(device: device)
+        CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
+        layer.device = device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        // Opaque full-screen layers can be scanned out directly on Apple-silicon receivers
+        layer.isOpaque = true
+        layer.displaySyncEnabled = true
+        layer.allowsNextDrawableTimeout = true
+        layer.maximumDrawableCount = 2
+        layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        layer.backgroundColor = CGColor(gray: 0, alpha: 1)
+    }
+
+    /// Main thread: keeps the drawable in step with the view
+    func layout(bounds: CGRect, scale: CGFloat) {
+        layer.frame = bounds
+        layer.contentsScale = scale
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        layer.drawableSize = size
+        sizeLock.lock()
+        drawableSize = size
+        sizeLock.unlock()
+    }
+
+    func reset(path: StreamPath) {
+        self.path = path
+        if let d = decoder { VTDecompressionSessionInvalidate(d) }
+        decoder = nil
+        format = nil
+        lumaTexture = nil
+        chromaTexture = nil
+        statsLock.lock()
+        stats = (0, 0, 0)
+        statsLock.unlock()
+    }
+
+    func releaseResources() {
+        reset(path: path ?? .tile)
+        tileTexture.release()
+    }
+
+    // MARK: - Tile path
+
+    /// false when the tile data fails to decode
+    func applyTiles(_ frame: TileFrame) -> Bool {
+        guard let cb = queue.makeCommandBuffer() else { return false }
+        let start = ProcessInfo.processInfo.systemUptime
+        tileTexture.ensure(geometry: frame.geometry)
+        do {
+            try tileTexture.encodeUpload(frame, into: cb)
+        } catch {
+            cb.commit()
+            return false
+        }
+        let decode = tileTexture.lastDecodeMs
+        statsLock.lock()
+        stats.decodeMs = decode
+        stats.uploadMs = max(0, (ProcessInfo.processInfo.systemUptime - start) * 1000 - decode)
+        statsLock.unlock()
+        guard let texture = tileTexture.texture else {
+            cb.commit()
+            return true
+        }
+        encodeDraw(cb, content: CGSize(width: frame.geometry.width, height: frame.geometry.height)) { enc in
+            enc.setRenderPipelineState(tilePipeline)
+            enc.setFragmentTexture(texture, index: 0)
+        }
+        return true
+    }
+
+    // MARK: - Video path
+
+    func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool {
+        var desc: CMVideoFormatDescription?
+        let status: OSStatus = withPointers(parameterSets) { pointers, sizes in
+            switch codec {
+            case .hevc:
+                return CMVideoFormatDescriptionCreateFromHEVCParameterSets(allocator: nil, parameterSetCount: pointers.count,
+                                                                           parameterSetPointers: pointers, parameterSetSizes: sizes,
+                                                                           nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &desc)
+            case .h264:
+                return CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: nil, parameterSetCount: pointers.count,
+                                                                           parameterSetPointers: pointers, parameterSetSizes: sizes,
+                                                                           nalUnitHeaderLength: 4, formatDescriptionOut: &desc)
+            }
+        }
+        guard status == noErr, let newFormat = desc else { return false }
+        if let current = format, CMFormatDescriptionEqual(current, otherFormatDescription: newFormat), decoder != nil { return true }
+        if let d = decoder { VTDecompressionSessionInvalidate(d) }
+        decoder = nil
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        var session: VTDecompressionSession?
+        let created = VTDecompressionSessionCreate(allocator: nil, formatDescription: newFormat, decoderSpecification: nil,
+                                                   imageBufferAttributes: attrs as CFDictionary, outputCallback: nil,
+                                                   decompressionSessionOut: &session)
+        guard created == noErr, let s = session else { return false }
+        decoder = s
+        format = newFormat
+        return true
+    }
+
+    func showVideoFrame(avcc: Data) -> Bool {
+        guard let decoder = decoder, let format = format, let sample = makeSample(avcc, format: format) else { return false }
+        var image: CVImageBuffer?
+        let status = VTDecompressionSessionDecodeFrame(decoder, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, _, buffer, _, _ in
+            if status == noErr { image = buffer }
+        }
+        guard status == noErr, let pixelBuffer = image, let cache = textureCache else { return false }
+        var luma: CVMetalTexture?, chroma: CVMetalTexture?
+        let w = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), h = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .r8Unorm, w, h, 0, &luma)
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .rg8Unorm,
+                                                  CVPixelBufferGetWidthOfPlane(pixelBuffer, 1), CVPixelBufferGetHeightOfPlane(pixelBuffer, 1), 1, &chroma)
+        guard let l = luma, let c = chroma, let lt = CVMetalTextureGetTexture(l), let ct = CVMetalTextureGetTexture(c),
+              let cb = queue.makeCommandBuffer() else { return false }
+        lumaTexture = l
+        chromaTexture = c
+        encodeDraw(cb, content: CGSize(width: w, height: h)) { enc in
+            enc.setRenderPipelineState(nv12Pipeline)
+            enc.setFragmentTexture(lt, index: 0)
+            enc.setFragmentTexture(ct, index: 1)
+        }
+        return true
+    }
+
+    private func makeSample(_ avcc: Data, format: CMVideoFormatDescription) -> CMSampleBuffer? {
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: avcc.count, blockAllocator: nil,
+                                                 customBlockSource: nil, offsetToData: 0, dataLength: avcc.count, flags: 0,
+                                                 blockBufferOut: &block) == noErr, let b = block else { return nil }
+        let copied = avcc.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: b, offsetIntoDestination: 0, dataLength: avcc.count) }
+        guard copied == noErr else { return nil }
+        var sample: CMSampleBuffer?
+        var size = avcc.count
+        CMSampleBufferCreateReady(allocator: nil, dataBuffer: b, formatDescription: format, sampleCount: 1,
+                                  sampleTimingEntryCount: 0, sampleTimingArray: nil, sampleSizeEntryCount: 1,
+                                  sampleSizeArray: &size, sampleBufferOut: &sample)
+        return sample
+    }
+
+    // MARK: - Draw
+
+    private func encodeDraw(_ cb: MTLCommandBuffer, content: CGSize, bind: (MTLRenderCommandEncoder) -> Void) {
+        sizeLock.lock()
+        let size = drawableSize
+        sizeLock.unlock()
+        let meter = gpuMeter
+        cb.addCompletedHandler { cb in meter.add(seconds: cb.gpuEndTime - cb.gpuStartTime) }
+        guard size.width > 0, let drawable = layer.nextDrawable() else {
+            statsLock.lock()
+            stats.late += 1
+            statsLock.unlock()
+            cb.commit()
+            return
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else {
+            cb.commit()
+            return
+        }
+        let rect = RenderGeometry.aspectFit(content: content, in: CGRect(origin: .zero, size: size))
+        enc.setViewport(MTLViewport(originX: Double(rect.minX), originY: Double(rect.minY),
+                                    width: Double(rect.width), height: Double(rect.height), znear: 0, zfar: 1))
+        bind(enc)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.present(drawable)
+        let counter = displayed
+        cb.addCompletedHandler { _ in counter.tick() }
+        cb.commit()
+    }
+}
+
+private func withPointers<R>(_ sets: [Data], _ body: ([UnsafePointer<UInt8>], [Int]) -> R) -> R {
+    let copies = sets.map { data -> UnsafeMutablePointer<UInt8> in
+        let p = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, data.count))
+        data.copyBytes(to: p, count: data.count)
+        return p
+    }
+    defer { copies.forEach { $0.deallocate() } }
+    return body(copies.map { UnsafePointer($0) }, sets.map(\.count))
+}
