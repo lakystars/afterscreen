@@ -16,7 +16,7 @@ final class ReceiverSettingsTests: XCTestCase {
     }
 
     private func settings() -> ReceiverSettings {
-        ReceiverSettings(defaults: defaults, agentDirectory: agents, executable: "/Applications/Afterscreen Receiver.app/Contents/MacOS/Afterscreen Receiver")
+        ReceiverSettings(defaults: defaults, agentDirectory: agents, bundleID: "io.github.lakystars.afterscreen.receiver")
     }
 
     func testDefaultsAndPersistence() {
@@ -35,8 +35,8 @@ final class ReceiverSettingsTests: XCTestCase {
         XCTAssertTrue(s.accepts(.wifi))
         s.accept = .wired
         XCTAssertFalse(s.accepts(.wifi))
-        XCTAssertFalse(s.accepts(.unsupported))
-        for kind in [LinkKind.thunderbolt, .usb, .ethernet, .loopback] { XCTAssertTrue(s.accepts(kind), "\(kind)") }
+        // An adapter the classifier does not know is still a cable
+        for kind in [LinkKind.thunderbolt, .usb, .ethernet, .loopback, .unsupported] { XCTAssertTrue(s.accepts(kind), "\(kind)") }
     }
 
     func testOpenAtLoginWritesAndRemovesALaunchAgent() throws {
@@ -47,7 +47,8 @@ final class ReceiverSettingsTests: XCTestCase {
         let file = agents.appendingPathComponent("io.github.lakystars.afterscreen.receiver.plist")
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: file), format: nil) as? [String: Any])
         XCTAssertEqual(plist["Label"] as? String, "io.github.lakystars.afterscreen.receiver")
-        XCTAssertEqual(plist["ProgramArguments"] as? [String], ["/Applications/Afterscreen Receiver.app/Contents/MacOS/Afterscreen Receiver"])
+        // By bundle id: the app may move, or run translocated, after the login item is set
+        XCTAssertEqual(plist["ProgramArguments"] as? [String], ["/usr/bin/open", "-b", "io.github.lakystars.afterscreen.receiver"])
         XCTAssertEqual(plist["RunAtLoad"] as? Bool, true)
         XCTAssertEqual(plist["LimitLoadToSessionType"] as? String, "Aqua")
         s.launchAtLogin = false

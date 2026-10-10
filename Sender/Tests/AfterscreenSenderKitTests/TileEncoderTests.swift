@@ -119,6 +119,23 @@ final class TileEncoderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(psnr(decodeCPU(encoder, geometry: g), rgba), 32)
     }
 
+    func testTenBitSourceIsDitheredNotRoundedToOneLevel() throws {
+        // 10-bit 410 is 102.20 in 8-bit steps: rounding paints 102 everywhere, a dark band
+        let w = 64, h = 64
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgr10a2Unorm, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead]
+        let tex = try XCTUnwrap(device.makeTexture(descriptor: desc))
+        let word: UInt32 = 3 << 30 | 410 << 20 | 410 << 10 | 410
+        tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: [UInt32](repeating: word, count: w * h), bytesPerRow: w * 4)
+        let g = TileGeometry(width: w, height: h)
+        let encoder = try TileEncoder(device: device, geometry: g)
+        _ = encoder.encode(texture: tex, forceAll: true, dirty: nil)
+        let out = decodeCPU(encoder, geometry: g)
+        let reds = stride(from: 0, to: out.count, by: 4).map { Int(out[$0]) }
+        XCTAssertEqual(Set(reds), [102, 103])
+        XCTAssertEqual(Double(reds.reduce(0, +)) / Double(reds.count), 410.0 / 1023 * 255, accuracy: 0.05)
+    }
+
     func testPartialEdgeTilesDecodeInsideStream() throws {
         let w = 96, h = 72 // 2×2 tiles, both partial
         let rgba = (0..<w * h).flatMap { i -> [UInt8] in [UInt8(i % w * 2), UInt8(i / w * 3), 90, 255] }
@@ -268,7 +285,7 @@ final class MotionTests: XCTestCase {
         let w = 128, h = 64
         let g = TileGeometry(width: w, height: h)
         // This test keeps several frames alive at once
-        let encoder = try TileEncoder(device: device, geometry: g, uploadBuffers: 6)
+        let encoder = try TileEncoder(device: device, geometry: g, uploadBuffers: 8)
         _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0)
         let first = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 1), w, h), forceAll: false, dirty: nil, now: 1))
         XCTAssertEqual(first.runs, [TileRun(row: 0, first: 0, count: 2)], "a change after a pause is sharp")
@@ -318,6 +335,17 @@ final class MotionTests: XCTestCase {
         let slower = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 4), w, h), forceAll: false, dirty: nil,
                                                   now: 5.2, congested: true))
         XCTAssertEqual(slower.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
+
+        // A link so slow that frames are seconds apart: consecutive changes still mean motion
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 5), w, h), forceAll: false, dirty: nil, now: 20, congested: true)
+        let crawling = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 6), w, h), forceAll: false, dirty: nil,
+                                                    now: 21.2, congested: true))
+        XCTAssertEqual(crawling.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
+        // Without congestion, a change a second later is an edit, not motion
+        _ = encoder.refine(now: 30)
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 7), w, h), forceAll: false, dirty: nil, now: 40)
+        let edit = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 8), w, h), forceAll: false, dirty: nil, now: 41.2))
+        XCTAssertEqual(edit.runs, [TileRun(row: 0, first: 0, count: 2)])
     }
 }
 
@@ -351,14 +379,27 @@ extension MotionTests {
 
         XCTAssertNil(encoder.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: false, dirty: nil, now: 1.032),
                      "tiles already on the video layer send nothing")
+        XCTAssertNil(encoder.encode(texture: texture(device, scene(w, h, phase: 4), w, h), forceAll: false, dirty: nil, now: 1.112),
+                     "a slower change before the tile settles keeps it on the video layer")
         XCTAssertEqual(encoder.lossyTiles, 2)
 
-        let settled = try XCTUnwrap(encoder.refine(now: 1.2))
+        let settled = try XCTUnwrap(encoder.refine(now: 1.3))
         XCTAssertEqual(settled.runs, [TileRun(row: 0, first: 0, count: 2)])
         XCTAssertEqual(encoder.lossyTiles, 0)
         let fresh = try TileEncoder(device: device, geometry: g)
-        _ = fresh.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: true, dirty: nil, now: 0)
+        _ = fresh.encode(texture: texture(device, scene(w, h, phase: 4), w, h), forceAll: true, dirty: nil, now: 0)
         XCTAssertTrue(blocksMatch(settled, fresh.reference, g), "the settled tiles carry the last moving picture")
+    }
+
+    func testAfterASlowFullFrameTheNextCongestedChangeIsMotion() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let encoder = try TileEncoder(device: device, geometry: TileGeometry(width: w, height: h))
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0)
+        // The full frame took 1.3 s on the link while the source kept moving
+        let next = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 1), w, h), forceAll: false, dirty: nil,
+                                                now: 1.3, congested: true))
+        XCTAssertEqual(next.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
     }
 
     func testSettlingIsCappedPerFrame() throws {

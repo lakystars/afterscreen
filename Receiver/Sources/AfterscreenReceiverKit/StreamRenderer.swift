@@ -30,6 +30,10 @@ final class StreamRenderer {
     /// Latest decoded video picture (NV12 planes); each draw that samples it keeps it alive
     private var video: (luma: CVMetalTexture, chroma: CVMetalTexture)?
     private var mask = VideoMask()
+    /// Decoded planes are 16-bit (10 bits used) for a Main10 stream
+    private var tenBit = false
+    /// 10 bits per channel: the iMac panels take 10-bit input, so dithered BC7 and Main10 video keep their steps
+    static let drawableFormat = MTLPixelFormat.bgr10a2Unorm
     /// Ring of 3: with 2 drawables, the draw that last read a buffer has completed before its reuse
     private var maskBuffers: [MTLBuffer] = []
     private var maskRing = 0
@@ -78,7 +82,7 @@ final class StreamRenderer {
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction = library.makeFunction(name: "screenQuad")
             desc.fragmentFunction = library.makeFunction(name: fragment)
-            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            desc.colorAttachments[0].pixelFormat = StreamRenderer.drawableFormat
             return try? device.makeRenderPipelineState(descriptor: desc)
         }
         guard let tile = pipeline("tileFragment"), let hybrid = pipeline("hybridFragment") else { return nil }
@@ -89,7 +93,7 @@ final class StreamRenderer {
         tileTexture = TileTexture(device: device)
         CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
         layer.device = device
-        layer.pixelFormat = .bgra8Unorm
+        layer.pixelFormat = StreamRenderer.drawableFormat
         layer.framebufferOnly = true
         // Opaque full-screen layers can be scanned out directly on Apple-silicon receivers
         layer.isOpaque = true
@@ -130,8 +134,8 @@ final class StreamRenderer {
 
     // MARK: - Tile path
 
-    /// false when the tile data fails to decode
-    func applyTiles(_ frame: TileFrame) -> Bool {
+    /// false when the tile data fails to decode; without `present` the upload commits undrawn
+    func applyTiles(_ frame: TileFrame, present: Bool = true) -> Bool {
         guard let cb = queue.makeCommandBuffer() else { return false }
         let start = ProcessInfo.processInfo.systemUptime
         tileTexture.ensure(geometry: frame.geometry)
@@ -147,7 +151,7 @@ final class StreamRenderer {
         stats.uploadMs = max(0, (ProcessInfo.processInfo.systemUptime - start) * 1000 - decode)
         statsLock.unlock()
         mask.apply(frame.runs, geometry: frame.geometry)
-        guard let texture = tileTexture.texture else {
+        guard present, let texture = tileTexture.texture else {
             cb.commit()
             return true
         }
@@ -189,7 +193,7 @@ final class StreamRenderer {
 
     // MARK: - Video layer
 
-    func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool {
+    func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool {
         var desc: CMVideoFormatDescription?
         let status: OSStatus = withPointers(parameterSets) { pointers, sizes in
             switch codec {
@@ -204,11 +208,11 @@ final class StreamRenderer {
             }
         }
         guard status == noErr, let newFormat = desc else { return false }
-        if let current = format, CMFormatDescriptionEqual(current, otherFormatDescription: newFormat), decoder != nil { return true }
+        if let current = format, CMFormatDescriptionEqual(current, otherFormatDescription: newFormat), decoder != nil, tenBit == self.tenBit { return true }
         if let d = decoder { VTDecompressionSessionInvalidate(d) }
         decoder = nil
         let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferPixelFormatTypeKey: tenBit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey: true,
         ]
         var session: VTDecompressionSession?
@@ -218,6 +222,7 @@ final class StreamRenderer {
         guard created == noErr, let s = session else { return false }
         decoder = s
         format = newFormat
+        self.tenBit = tenBit
         return true
     }
 
@@ -230,9 +235,10 @@ final class StreamRenderer {
         }
         guard status == noErr, let pixelBuffer = image, let cache = textureCache else { return false }
         var luma: CVMetalTexture?, chroma: CVMetalTexture?
-        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .r8Unorm,
+        // 10-bit planes hold their samples in the high bits of 16, so the same normalized math applies
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, tenBit ? .r16Unorm : .r8Unorm,
                                                   CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), CVPixelBufferGetHeightOfPlane(pixelBuffer, 0), 0, &luma)
-        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .rg8Unorm,
+        CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, tenBit ? .rg16Unorm : .rg8Unorm,
                                                   CVPixelBufferGetWidthOfPlane(pixelBuffer, 1), CVPixelBufferGetHeightOfPlane(pixelBuffer, 1), 1, &chroma)
         guard let l = luma, let c = chroma else { return false }
         video = (l, c)

@@ -164,18 +164,19 @@ public struct TileFrame {
 
         var runs: [TileRun] = []
         runs.reserveCapacity(runCount)
-        var runBytes = 0, runBlocks = 0
+        var runBytes = 0, runBlocks = 0, sawBC1 = false
         for _ in 0..<runCount {
             let row = Int(try r.u16()), first = Int(try r.u16()), count = Int(try r.u16())
             guard let format = TileFormat(rawValue: try r.u8()), try r.u8() == 0 else { throw FramingError.invalid("tile run format") }
             let run = TileRun(row: row, first: first, count: count, format: format)
             guard run.row < g.tilesY, run.count > 0, run.first + run.count <= g.tilesX,
-                  !(run.format == .bc7 && runs.last?.format == .bc1) else {
+                  !(run.format == .bc7 && sawBC1) else {
                 throw FramingError.invalid("tile run")
             }
             let b = run.blocks(in: g)
             runBytes += run.bytes(in: g)
             if run.format != .video { runBlocks += b.w * b.h }
+            if run.format == .bc1 { sawBC1 = true }
             runs.append(run)
         }
         // Repeated runs must not describe more blocks than one frame holds; the receiver sizes buffers by it

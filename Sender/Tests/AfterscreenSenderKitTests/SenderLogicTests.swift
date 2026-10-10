@@ -52,10 +52,10 @@ final class CursorNormalizeTests: XCTestCase {
 }
 
 final class PathPolicyTests: XCTestCase {
-    private func welcome(panel: PixelSize, hevc: Bool = true) -> Welcome {
+    private func welcome(panel: PixelSize, hevc: Bool = true, main10: Bool = false) -> Welcome {
         Welcome(protocolVersion: 1, name: "iMac", modelID: "iMac18,3", marketingName: "iMac", osVersion: "13.7", gpuNames: [],
                 panelPixels: panel, panelPoints: panel.width >= 3000 ? PixelSize(width: panel.width / 2, height: panel.height / 2) : panel,
-                hevcDecode: hevc, h264Decode: true, bc7: true)
+                hevcDecode: hevc, h264Decode: true, bc7: true, hevcMain10Decode: main10)
     }
 
     private let fiveK = PixelSize(width: 5120, height: 2880)
@@ -78,10 +78,28 @@ final class PathPolicyTests: XCTestCase {
         }
     }
 
-    func testHybridWithoutHEVCUsesH264WithinItsLimit() {
+    func testSlowerLinksGetASmallerVideoLayer() {
+        // 0.15 bit per pixel at 60 fps: 4K from 75 Mbps, 1440p from 33 Mbps
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.14, welcome: welcome(panel: fiveK))?.video?.pixels,
+                       PixelSize(width: 2560, height: 1440))
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.05, welcome: welcome(panel: fiveK))?.video?.pixels,
+                       PixelSize(width: 1920, height: 1080))
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.19, welcome: welcome(panel: fiveK))?.video?.pixels,
+                       PixelSize(width: 3840, height: 2160))
+    }
+
+    func testVideoLayerIsTenBitWhenTheReceiverDecodesMain10() {
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK, main10: true))?.video?.tenBit, true)
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK))?.video?.tenBit, false)
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK, hevc: false, main10: true))?.video?.tenBit,
+                       false, "H.264 stays 8-bit")
+    }
+
+    func testHybridWithoutHEVCUsesH264At1440p() {
+        // 4K60 H.264 needs level 5.2, past the HEVC-less (2014–2015) iMacs' decoders
         let c = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK, hevc: false))
         XCTAssertEqual(c?.video?.codec, .h264)
-        XCTAssertEqual(c?.video?.pixels, PixelSize(width: 4096, height: 2304))
+        XCTAssertEqual(c?.video?.pixels, PixelSize(width: 2560, height: 1440))
     }
 
     func testVideoLayerKeeps1440pPanelNative() {
@@ -290,24 +308,60 @@ final class RoutePlannerTests: XCTestCase {
     ]
 
     func testThunderboltFirstThenUSBThenEthernetThenWiFi() {
-        let routes = RoutePlanner.plan(local: locals, remote: ["192.168.10.40", "169.254.7.7", "fe80::1"])
+        let routes = RoutePlanner.plan(local: locals, remote: ["192.168.10.40", "169.254.7.7", "fe80::1"].map { RemoteAddress($0) })
         XCTAssertEqual(routes.map(\.interface), ["bridge0", "en5", "en8", "en0"])
         XCTAssertEqual(routes.map(\.address), ["169.254.7.7", "169.254.7.7", "192.168.10.40", "192.168.10.40"])
     }
 
     func testNoSharedSubnetMeansNoRoute() {
-        let routes = RoutePlanner.plan(local: locals, remote: ["10.0.0.9"])
+        let routes = RoutePlanner.plan(local: locals, remote: ["10.0.0.9"].map { RemoteAddress($0) })
         XCTAssertTrue(routes.isEmpty)
     }
 
     func testSameMacUsesLoopback() {
-        let routes = RoutePlanner.plan(local: locals, remote: ["192.168.10.31"])
+        let routes = RoutePlanner.plan(local: locals, remote: ["192.168.10.31"].map { RemoteAddress($0) })
         XCTAssertEqual(routes.first?.interface, "lo0")
         XCTAssertEqual(routes.first?.address, "127.0.0.1")
     }
 
+    func testLinkLocalAddressesUseTheInterfaceThatAnswered() {
+        let locals = [
+            LocalInterface(name: "bridge0", ip: "169.254.18.130", netmask: "255.255.0.0", kind: .thunderbolt),
+            LocalInterface(name: "en5", ip: "169.254.99.1", netmask: "255.255.0.0", kind: .usb),
+            LocalInterface(name: "en12", ip: "169.254.240.86", netmask: "255.255.0.0", kind: .ethernet),
+            LocalInterface(name: "en0", ip: "192.168.0.179", netmask: "255.255.255.0", kind: .wifi),
+        ]
+        let remote = [RemoteAddress("169.254.174.145", via: "en5"), RemoteAddress("169.254.240.6", via: "en12"),
+                      RemoteAddress("192.168.0.152", via: "en0")]
+        let routes = RoutePlanner.plan(local: locals, remote: remote)
+        XCTAssertEqual(routes.map(\.interface), ["en5", "en12", "en0"], "nothing answered on bridge0")
+        XCTAssertEqual(routes.map(\.address), ["169.254.174.145", "169.254.240.6", "192.168.0.152"])
+    }
+
+    private let threeLinks = [Route(interface: "en5", address: "169.254.174.145", kind: .usb),
+                              Route(interface: "en12", address: "169.254.240.6", kind: .ethernet),
+                              Route(interface: "en0", address: "192.168.0.152", kind: .wifi)]
+
+    func testAvailableLinksInPreferenceOrderWithoutRepeats() {
+        XCTAssertEqual(RoutePlanner.kinds(threeLinks + [Route(interface: "en7", address: "169.254.1.1", kind: .ethernet)]),
+                       [.usb, .ethernet, .wifi])
+    }
+
+    func testAChosenLinkKeepsOnlyItsRoutes() {
+        let chosen = RoutePlanner.select(threeLinks, prefer: .wifi)
+        XCTAssertEqual(chosen.routes.map(\.interface), ["en0"])
+        XCTAssertFalse(chosen.fellBack)
+        XCTAssertEqual(RoutePlanner.select(threeLinks, prefer: nil).routes, threeLinks)
+    }
+
+    func testAChosenLinkThatIsGoneFallsBackToTheFastest() {
+        let chosen = RoutePlanner.select(threeLinks, prefer: .thunderbolt)
+        XCTAssertEqual(chosen.routes, threeLinks)
+        XCTAssertTrue(chosen.fellBack)
+    }
+
     func testUnsupportedInterfacesAreSkipped() {
-        let routes = RoutePlanner.plan(local: locals, remote: ["192.168.139.9"])
+        let routes = RoutePlanner.plan(local: locals, remote: ["192.168.139.9"].map { RemoteAddress($0) })
         XCTAssertTrue(routes.isEmpty)
     }
 }

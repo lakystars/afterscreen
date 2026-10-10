@@ -28,8 +28,26 @@ enum LinkLabel {
 }
 
 extension Format {
+    /// Four characters, left-padded with figure spaces: a changing digit count would move the status item and its open popover
     static func compactGbps(_ bitsPerSecond: Double) -> String {
-        bitsPerSecond >= 1e9 ? String(format: "%.1fG", bitsPerSecond / 1e9) : String(format: "%.0fM", bitsPerSecond / 1e6)
+        let text: String
+        switch bitsPerSecond {
+        case 10e9...: text = String(format: "%.0fG", bitsPerSecond / 1e9)
+        case 1e9...: text = String(format: "%.1fG", bitsPerSecond / 1e9)
+        default: text = String(format: "%.0fM", bitsPerSecond / 1e6)
+        }
+        return String(repeating: "\u{2007}", count: max(0, 4 - text.count)) + text
+    }
+}
+
+/// Menu bar item text: the icon, the link glyph while streaming, and optionally fps and throughput at a fixed width
+enum StatusTitle {
+    static func text(_ s: SenderSnapshot, stats: Bool) -> String {
+        guard s.isStreaming else { return "▭" }
+        let glyph = "▭ \(LinkLabel.glyph(s.link))"
+        guard stats else { return glyph }
+        let fps = String(Int(s.sentFPS.rounded()))
+        return glyph + " " + String(repeating: "\u{2007}", count: max(0, 2 - fps.count)) + fps + "fps · " + Format.compactGbps(s.throughputBitsPerSecond)
     }
 }
 
@@ -73,6 +91,25 @@ private struct Row<Trailing: View>: View {
 private extension Row where Trailing == EmptyView {
     init(_ label: String, _ value: String, color: Color = .primary) {
         self.init(label: label, value: value, valueColor: color) { EmptyView() }
+    }
+}
+
+/// Automatic, then each link that reaches the receiver now
+private struct LinkPicker: View {
+    @ObservedObject var model: AppModel
+    var receiver: String
+
+    var body: some View {
+        Picker("Link", selection: Binding(get: { model.link(for: receiver) }, set: { model.setLink($0) })) {
+            Text("Automatic").tag(LinkKind?.none)
+            ForEach(model.links[receiver] ?? [], id: \.self) { kind in
+                Text("\(LinkLabel.glyph(kind)) \(LinkLabel.name(kind))").tag(LinkKind?.some(kind))
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .fixedSize()
+        .help("Automatic uses the fastest link that answers")
     }
 }
 
@@ -158,7 +195,7 @@ public struct PopoverView: View {
             }
         }
         .padding(12)
-        .frame(width: 340)
+        .frame(width: 380)
     }
 
     private var idleBody: some View {
@@ -185,6 +222,7 @@ public struct PopoverView: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    LinkPicker(model: model, receiver: r.name)
                     Button("Test") { model.runQualityTest(r) }
                         .help("Measure the highest resolution and frame rate this receiver and link sustain")
                     Button("Connect") { model.connect(r) }
@@ -196,7 +234,7 @@ public struct PopoverView: View {
     private var testBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Quality test").font(.headline)
-            Text("The iMac shows full-motion frames at each size for 3 seconds.")
+            Text("The iMac shows full-motion frames at each size for a few seconds.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             if let report = model.testReport { QualityCard(report: report, testing: true) }
             HStack {
@@ -227,7 +265,13 @@ public struct PopoverView: View {
                 .help("Brightness of the receiver's panel")
             }
             SectionTitle(text: "Connection")
-            Row("Method", "\(LinkLabel.glyph(s.link)) \(LinkLabel.name(s.link)) · \(s.interface ?? "—")")
+            Row(label: "Method", value: "\(LinkLabel.glyph(s.link)) \(LinkLabel.name(s.link)) · \(s.interface ?? "—")") {
+                if let receiver = model.activeReceiver { LinkPicker(model: model, receiver: receiver) }
+            }
+            if let missing = s.missingLink {
+                Text("\(LinkLabel.name(missing)) does not reach the receiver; using the fastest link")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+            }
             if let mtu = s.mtu {
                 let advice = LinkMetrics.mtuAdvice(mtu: mtu, link: s.link)
                 Row("MTU", advice.map { "\(mtu) · \($0)" } ?? "\(mtu)", color: advice == nil ? .primary : .orange)
@@ -249,7 +293,7 @@ public struct PopoverView: View {
             if let c = s.config {
                 Row("Path", "Tiles (BC7) \(c.streamPixels.width)×\(c.streamPixels.height)")
                 if let v = c.video {
-                    Row("Motion", "\(v.codec.rawValue.uppercased()) \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps")
+                    Row("Motion", "\(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps")
                 }
                 Row("Changed tiles", String(format: "%.0f%%", s.dirtyPercent))
                 Row("Compression", s.compressionRatio > 0 ? String(format: "%.1f×", s.compressionRatio) : "—")

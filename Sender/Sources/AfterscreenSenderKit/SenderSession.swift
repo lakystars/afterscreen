@@ -29,6 +29,8 @@ public struct SenderSnapshot {
     public var gpuPercent = 0.0
     public var receiver: ReceiverStats?
     public var qualityTest: QualityTest.Report?
+    /// The chosen link did not answer, so the fastest one carries the stream
+    public var missingLink: LinkKind?
 
     public init() {}
 }
@@ -44,9 +46,15 @@ public final class SenderSession {
     public var onUpdate: ((SenderSnapshot) -> Void)?
     public var onEnd: ((String) -> Void)?
     public private(set) var snapshot = SenderSnapshot()
+    /// The receiver's user stopped the stream
+    public private(set) var pausedByReceiver = false
 
     private let target: DiscoveredReceiver
     private let purpose: Purpose
+    private let link: LinkKind?
+    private var route: Route?
+    /// Carries only the cursor, so it never waits behind queued frames; the main connection is the fallback
+    private var cursorConnection: Connection?
     private var displaySize: DisplaySize
     private var testRun: QualityTestRun?
     private var connection: Connection?
@@ -67,11 +75,15 @@ public final class SenderSession {
 
     /// Development: pace writes to this many Mbps and treat the route as Wi-Fi
     public static var simulatedLinkMbps: Double?
+    /// Development: one telemetry line per second on stderr
+    public static var logStats = false
 
-    public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard) {
+    /// `link`: the link to use; nil, or a link that no longer answers, takes the fastest
+    public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil) {
         self.target = target
         self.purpose = purpose
         self.displaySize = displaySize
+        self.link = link
     }
 
     /// Receiver panel brightness, 0…1
@@ -91,12 +103,15 @@ public final class SenderSession {
 
     public func start() {
         update { $0.state = "Finding a route" }
-        let routes = RoutePlanner.plan(local: RoutePlanner.currentInterfaces(), remote: target.addresses)
-        guard !routes.isEmpty else {
-            return end(target.addresses.isEmpty ? "Receiver address unknown"
-                       : "No Thunderbolt, USB, Ethernet or Wi-Fi route to \(target.name)")
+        RoutePlanner.routes(to: target) { [weak self] routes in
+            DispatchQueue.main.async {
+                guard let self = self, !self.ended else { return }
+                let chosen = RoutePlanner.select(routes, prefer: self.link)
+                guard !chosen.routes.isEmpty else { return self.end("No Thunderbolt, USB, Ethernet or Wi-Fi route to \(self.target.name)") }
+                self.update { $0.missingLink = chosen.fellBack ? self.link : nil }
+                self.connect(chosen.routes)
+            }
         }
-        connect(routes)
     }
 
     private func connect(_ routes: [Route]) {
@@ -119,6 +134,7 @@ public final class SenderSession {
 
     private func connected(_ c: Connection, route: Route) {
         connection = c
+        self.route = route
         let simulated = SenderSession.simulatedLinkMbps
         c.paceBitsPerSecond = simulated.map { $0 * 1e6 }
         c.onMessage = { [weak self] m in self?.handle(m) }
@@ -149,6 +165,7 @@ public final class SenderSession {
     private func end(_ reason: String) {
         guard !ended else { return }
         ended = true
+        if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] session ended: \(reason)\n".utf8)) }
         timers.forEach { $0.cancel() }
         timers.removeAll()
         testRun?.stop()
@@ -161,6 +178,8 @@ public final class SenderSession {
         activity = nil
         cursor?.stop()
         cursor = nil
+        cursorConnection?.close(reason: reason)
+        cursorConnection = nil
         display = nil
         connection?.close(reason: reason)
         update {
@@ -179,6 +198,7 @@ public final class SenderSession {
             guard PathPolicy.isPlausible(welcome) else { return end("Receiver reported an invalid display size") }
             update { $0.peer = welcome }
             guard welcome.protocolVersion == AfterscreenProtocol.version else { return }
+            if purpose == .display { openCursorChannel(token: welcome.channelToken) }
             update { $0.state = "Measuring the link" }
             probe()
         case .probeResult:
@@ -202,11 +222,31 @@ public final class SenderSession {
             testRun?.receiverStats(stats)
         case .keyRequest:
             streamer?.requestKeyframe()
+            testRun?.requestKeyframe()
         case .bye:
-            let reason = (try? JSONWire.decode(Bye.self, from: m.payload))?.reason ?? "Receiver stopped"
-            end(reason)
+            let bye = try? JSONWire.decode(Bye.self, from: m.payload)
+            pausedByReceiver = bye?.pause ?? false
+            end(bye?.reason ?? "Receiver stopped")
         default:
             break
+        }
+    }
+
+    /// Same route as the session; on failure the cursor stays on the main connection
+    private func openCursorChannel(token: UInt32) {
+        guard let route = route, token != 0 else { return }
+        Connection.connect(host: route.address, port: target.port,
+                           interfaceName: route.kind == .loopback ? nil : route.interface, timeout: 2) { [weak self] result in
+            DispatchQueue.main.async {
+                guard case let .success(c) = result else { return }
+                guard let self = self, !self.ended else { return c.close(reason: "Cancelled") }
+                c.onClose = { [weak self, weak c] _ in
+                    if self?.cursorConnection === c { self?.cursorConnection = nil }
+                }
+                c.start(queue: .main)
+                c.send(Message(type: .cursorChannel, payload: ChannelWire.encode(token)))
+                self.cursorConnection = c
+            }
         }
     }
 
@@ -249,15 +289,17 @@ public final class SenderSession {
 
         let cursor = CursorTracker(displayID: display.displayID)
         cursor.onPosition = { [weak self] x, y, visible in
-            self?.connection?.send(Message(type: .cursorPos, payload: CursorWire.pos(x: x, y: y, visible: visible)))
+            guard let self = self else { return }
+            (self.cursorConnection ?? self.connection)?.send(Message(type: .cursorPos, payload: CursorWire.pos(x: x, y: y, visible: visible)))
         }
         cursor.onImage = { [weak self, weak display] image in
             guard let display = display else { return }
             // Points → stream pixels, so the receiver needs no display size
             let k = Double(config.streamPixels.width) / max(1, Double(display.bounds.width))
             func px(_ v: Int) -> Int { Int((Double(v) * k).rounded()) }
-            self?.connection?.send(Message(type: .cursorImage, payload: CursorWire.image(width: px(image.width), height: px(image.height),
-                                                                                          hotX: px(image.hotX), hotY: px(image.hotY), png: image.png)))
+            guard let self = self else { return }
+            (self.cursorConnection ?? self.connection)?.send(Message(type: .cursorImage, payload: CursorWire.image(
+                width: px(image.width), height: px(image.height), hotX: px(image.hotX), hotY: px(image.hotY), png: image.png)))
         }
         cursor.start()
         self.cursor = cursor
@@ -289,7 +331,7 @@ public final class SenderSession {
 
     private func startQualityTest(_ config: StreamConfig) {
         let stages = QualityTest.stages(panel: config.streamPixels).map { PathPolicy.stage(config, size: $0) }
-        let path = config.video.map { "Tiles + \($0.codec.rawValue.uppercased()) for motion" } ?? "Tiles"
+        let path = config.video.map { "Tiles + \($0.codec.rawValue.uppercased())\($0.tenBit ? " 10-bit" : "") for motion" } ?? "Tiles"
         let report = QualityTest.Report(receiver: snapshot.peer?.marketingName ?? target.name, link: snapshot.link, path: path)
         guard let connection = connection,
               let run = QualityTestRun(connection: connection, configs: stages, capacityGbps: snapshot.capacityGbps, report: report) else {
@@ -306,11 +348,15 @@ public final class SenderSession {
             let stages = (self.snapshot.qualityTest?.stages ?? []).map {
                 String(format: "%@ %d×%d %.0f fps %.2f Gb/s", QualityTest.label($0.size), $0.size.width, $0.size.height, $0.fps, $0.gbps)
             }
-            FileHandle.standardError.write(Data("[sender] quality test: \(stages.joined(separator: ", "))\n".utf8))
+            let link = String(format: "%@ via %@, %.2f Gb/s, %@", self.snapshot.link?.rawValue ?? "?", self.snapshot.interface ?? "?",
+                              self.snapshot.capacityGbps ?? 0, path)
+            FileHandle.standardError.write(Data("[sender] quality test (\(link)): \(stages.joined(separator: ", "))\n".utf8))
             self.stop(reason: "Quality test finished")
         }
         update { $0.config = config }
         testRun = run
+        // As while streaming: a background menu bar app's 60 Hz pattern timer is not to be coalesced
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Quality test")
         run.start()
     }
 
@@ -374,6 +420,15 @@ public final class SenderSession {
             $0.memoryBytes = m.memoryBytes
             $0.gpuPercent = streamer?.gpuMeter.percentSinceLastRead() ?? 0
         }
+        if SenderSession.logStats { logLine() }
+    }
+
+    private func logLine() {
+        let s = snapshot, r = s.receiver
+        let line = String(format: "[sender] fps %.0f/%.0f/%.0f  %.3f Gb/s  encode %.1f ms  cpu %.1f%%  receiver cpu %.1f%% gpu %.0f%% late %d\n",
+                          s.captureFPS, s.sentFPS, r?.displayedFPS ?? 0, s.throughputBitsPerSecond / 1e9, s.encodeMs, s.cpuPercent,
+                          r?.cpuPercent ?? 0, r?.gpuPercent ?? 0, r?.lateFrames ?? 0)
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     private func update(_ change: (inout SenderSnapshot) -> Void) {

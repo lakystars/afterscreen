@@ -24,10 +24,15 @@ public enum QualityTest {
 
     /// Panel fractions measured: 5K gives 1080p, 1440p, 4K, 5K
     static let scales = [0.375, 0.5, 0.75, 1.0]
-    static let stageSeconds = 3.0
-    /// Left out of each stage: the receiver's fps counter spans one second
-    static let warmup = 1.0
+    /// Measured part of each stage
+    static let measureSeconds = 2.0
     public static let smoothFPS = 55.0
+
+    /// Left out at the start of a stage: the receiver's fps counter spans one second, and a new stream
+    /// opens with lossless frames (one byte per pixel) that a slow link takes a while to carry; at most 5 s
+    static func warmup(stage: PixelSize, capacityGbps: Double?) -> Double {
+        min(5, 1 + 2 * Double(stage.pixelCount) * 8 / ((capacityGbps ?? 0) * 1e9))
+    }
 
     public static func stages(panel: PixelSize) -> [PixelSize] {
         scales.map { PathPolicy.aligned(PixelSize(width: Int(Double(panel.width) * $0), height: Int(Double(panel.height) * $0))) }
@@ -58,6 +63,7 @@ final class QualityTestRun {
     /// 60 Hz pattern frames for the current stage
     private var ticker: DispatchSourceTimer?
     private var stageStart = 0.0
+    private var warmup = 1.0
     private var samples: [Double] = []
     private var stopped = false
     private let queue = DispatchQueue(label: "afterscreen.test", qos: .userInteractive, autoreleaseFrequency: .workItem)
@@ -74,6 +80,10 @@ final class QualityTestRun {
 
     func start() { next() }
 
+    func requestKeyframe() {
+        streamer?.requestKeyframe()
+    }
+
     func stop() {
         stopped = true
         ticker?.cancel()
@@ -84,7 +94,7 @@ final class QualityTestRun {
 
     /// Displayed fps after the warm-up counts toward the stage
     func receiverStats(_ stats: ReceiverStats) {
-        if ProcessInfo.processInfo.systemUptime - stageStart >= QualityTest.warmup { samples.append(stats.displayedFPS) }
+        if ProcessInfo.processInfo.systemUptime - stageStart >= warmup { samples.append(stats.displayedFPS) }
     }
 
     private func next() {
@@ -95,7 +105,7 @@ final class QualityTestRun {
             let bytes = streamer.takeCounters().bytes
             let fps = samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count)
             report.stages.append(QualityTest.Stage(size: configs[index].streamPixels, fps: fps,
-                                                   gbps: Double(bytes) * 8 / (QualityTest.stageSeconds - QualityTest.warmup) / 1e9))
+                                                   gbps: Double(bytes) * 8 / QualityTest.measureSeconds / 1e9))
         }
         index += 1
         let old = streamer
@@ -119,6 +129,7 @@ final class QualityTestRun {
         self.streamer = streamer
         samples = []
         stageStart = ProcessInfo.processInfo.systemUptime
+        warmup = QualityTest.warmup(stage: config.streamPixels, capacityGbps: capacityGbps)
         report.running = config.streamPixels
         onReport?(report)
 
@@ -132,11 +143,11 @@ final class QualityTestRun {
         }
         ticker.resume()
         self.ticker = ticker
-        DispatchQueue.main.asyncAfter(deadline: .now() + QualityTest.warmup) { [weak self, weak streamer] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + warmup) { [weak self, weak streamer] in
             guard self?.streamer === streamer else { return }
             _ = streamer?.takeCounters()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + QualityTest.stageSeconds) { [weak self, weak streamer] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + warmup + QualityTest.measureSeconds) { [weak self, weak streamer] in
             guard let self = self, self.streamer === streamer else { return }
             self.next()
         }

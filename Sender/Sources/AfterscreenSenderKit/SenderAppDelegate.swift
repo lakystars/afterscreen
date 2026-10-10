@@ -20,10 +20,12 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.action = #selector(toggle)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: PopoverView(model: model) { [weak self] in self?.showSettings() })
-        model.$snapshot.receive(on: RunLoop.main).sink { [weak self] _ in
-            guard let self = self else { return }
-            self.statusItem.button?.title = self.model.statusTitle
-        }.store(in: &cancellables)
+        // Published fires before the change is stored, so the title is read on the next run loop turn
+        model.$snapshot.map { _ in () }.merge(with: model.settings.$menuBarStats.map { _ in () })
+            .receive(on: RunLoop.main).sink { [weak self] in
+                guard let self = self else { return }
+                self.statusItem.button?.title = self.model.statusTitle
+            }.store(in: &cancellables)
     }
 
     @objc private func toggle() {
@@ -32,6 +34,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             model.screenRecordingGranted = CGPreflightScreenCaptureAccess()
+            model.refreshLinks()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }

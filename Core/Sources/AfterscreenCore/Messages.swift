@@ -54,10 +54,14 @@ public struct Welcome: Codable, Equatable {
     public var hevcDecode: Bool
     public var h264Decode: Bool
     public var bc7: Bool
+    /// Hardware HEVC Main10 (10-bit) decode, probed with a 4K stream
+    public var hevcMain10Decode: Bool
+    /// Per session: a second connection presenting it carries the cursor, clear of queued frames
+    public var channelToken: UInt32
 
     public init(protocolVersion: Int, name: String, modelID: String, marketingName: String, osVersion: String,
                 gpuNames: [String], panelPixels: PixelSize, panelPoints: PixelSize,
-                hevcDecode: Bool, h264Decode: Bool, bc7: Bool) {
+                hevcDecode: Bool, h264Decode: Bool, bc7: Bool, hevcMain10Decode: Bool = false, channelToken: UInt32 = 0) {
         self.protocolVersion = protocolVersion
         self.name = name
         self.modelID = modelID
@@ -69,6 +73,8 @@ public struct Welcome: Codable, Equatable {
         self.hevcDecode = hevcDecode
         self.h264Decode = h264Decode
         self.bc7 = bc7
+        self.hevcMain10Decode = hevcMain10Decode
+        self.channelToken = channelToken
     }
 
     /// Retina panels are driven as HiDPI (points = pixels / 2)
@@ -81,11 +87,14 @@ public struct VideoLayer: Codable, Equatable {
     /// Encoded size; the receiver scales it to the stream
     public var pixels: PixelSize
     public var bitrate: Int
+    /// HEVC Main10 from 10-bit 4:2:0: gradients without the bands 8-bit leaves
+    public var tenBit: Bool
 
-    public init(codec: VideoCodec, pixels: PixelSize, bitrate: Int) {
+    public init(codec: VideoCodec, pixels: PixelSize, bitrate: Int, tenBit: Bool = false) {
         self.codec = codec
         self.pixels = pixels
         self.bitrate = bitrate
+        self.tenBit = tenBit
     }
 }
 
@@ -135,7 +144,13 @@ public struct ReceiverStats: Codable, Equatable {
 
 public struct Bye: Codable, Equatable {
     public var reason: String
-    public init(reason: String) { self.reason = reason }
+    /// The receiver's user stopped the stream: the sender does not reconnect on its own
+    public var pause: Bool
+
+    public init(reason: String, pause: Bool = false) {
+        self.reason = reason
+        self.pause = pause
+    }
 }
 
 public struct ProbeResult: Codable, Equatable {
@@ -225,6 +240,20 @@ public enum PingWire {
     public static func decode(_ data: Data) throws -> UInt64 {
         var r = ByteReader(data)
         return try r.u64()
+    }
+}
+
+/// cursorChannel: u32 session token from welcome
+public enum ChannelWire {
+    public static func encode(_ token: UInt32) -> Data {
+        var w = ByteWriter(capacity: 4)
+        w.u32(token)
+        return w.data
+    }
+
+    public static func decode(_ data: Data) throws -> UInt32 {
+        var r = ByteReader(data)
+        return try r.u32()
     }
 }
 

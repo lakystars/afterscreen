@@ -20,7 +20,7 @@ public final class ReceiverSettings: ObservableObject {
         static let onDisconnect = "onDisconnect"
     }
 
-    static let agentLabel = "io.github.lakystars.afterscreen.receiver"
+    public static let agentLabel = "io.github.lakystars.afterscreen.receiver"
 
     @Published public var accept: Accept {
         didSet { defaults.set(accept.rawValue, forKey: Key.accept) }
@@ -31,23 +31,23 @@ public final class ReceiverSettings: ObservableObject {
 
     private let defaults: UserDefaults
     private let agentFile: URL
-    private let executable: String
+    private let bundleID: String
 
     public init(defaults: UserDefaults = .standard,
                 agentDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents"),
-                executable: String = Bundle.main.executablePath ?? CommandLine.arguments[0]) {
+                bundleID: String = Bundle.main.bundleIdentifier ?? ReceiverSettings.agentLabel) {
         self.defaults = defaults
         agentFile = agentDirectory.appendingPathComponent(ReceiverSettings.agentLabel + ".plist")
-        self.executable = executable
+        self.bundleID = bundleID
         accept = Accept(rawValue: defaults.string(forKey: Key.accept) ?? "") ?? .any
         onDisconnect = OnDisconnect(rawValue: defaults.string(forKey: Key.onDisconnect) ?? "") ?? .showDesktop
     }
 
     public func accepts(_ link: LinkKind) -> Bool {
-        accept == .any || link.isWired
+        accept == .any || link != .wifi
     }
 
-    /// Starts the app in the user's GUI session at login
+    /// Starts the app in the user's GUI session at login, found by bundle id wherever it lives
     public var launchAtLogin: Bool {
         get { FileManager.default.fileExists(atPath: agentFile.path) }
         set {
@@ -58,7 +58,7 @@ public final class ReceiverSettings: ObservableObject {
             }
             let plist: [String: Any] = [
                 "Label": ReceiverSettings.agentLabel,
-                "ProgramArguments": [executable],
+                "ProgramArguments": ["/usr/bin/open", "-b", bundleID],
                 "RunAtLoad": true,
                 "LimitLoadToSessionType": "Aqua",
             ]

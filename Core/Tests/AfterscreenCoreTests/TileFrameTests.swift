@@ -175,6 +175,14 @@ final class TileFrameTests: XCTestCase {
         XCTAssertThrowsError(try TileFrame(payload: bad, expecting: g))
     }
 
+    func testLayoutRejectsBC7AfterBC1EvenWithVideoRunsBetween() {
+        let runs = [TileRun(row: 0, first: 0, count: 1, format: .bc1), TileRun(row: 1, first: 0, count: 1, format: .video),
+                    TileRun(row: 2, first: 0, count: 1)]
+        let size = runs.reduce(0) { $0 + $1.bytes(in: g) }
+        XCTAssertThrowsError(try TileFrame(payload: TileFrame.header(frameIndex: 0, geometry: g, runs: runs, chunks: [(size, 0)])
+            + Data(count: size), expecting: g))
+    }
+
     func testLayoutRejectsMoreBlocksThanOneFrame() {
         let row = TileRun(row: 0, first: 0, count: 4, format: .bc1)
         let runs = [TileRun](repeating: row, count: 4) // 4 rows of BC1 on a 3-row frame: bytes fit, blocks do not

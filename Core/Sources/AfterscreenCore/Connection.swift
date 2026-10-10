@@ -43,7 +43,7 @@ public final class Connection {
     /// Runs on the reader thread before each delivery; blocking it stops reading (TCP backpressure).
     /// Set before `start`
     public var readGate: ((Message) -> Void)?
-    /// Writer queue: a tile or video frame has been written
+    /// Writer queue: a tile frame has been written
     public var onFrameWritten: (() -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return frameWritten }
         set { lock.lock(); frameWritten = newValue; lock.unlock() }
@@ -89,14 +89,15 @@ public final class Connection {
         return queued
     }
 
-    /// Tile, video and probe messages not yet written
+    /// Tile and probe messages not yet written
     public var queuedFrames: Int {
         lock.lock(); defer { lock.unlock() }
         return queuedPictures
     }
 
+    /// Tile frames stand for whole frames: on the hybrid path each video frame precedes one
     private static func isPicture(_ type: MessageType) -> Bool {
-        type == .tileFrame || type == .videoFrame || type == .probe
+        type == .tileFrame || type == .probe
     }
 
     public var isClosed: Bool {
@@ -126,6 +127,7 @@ public final class Connection {
             cursor = ai.pointee.ai_next
             let fd = socket(ai.pointee.ai_family, ai.pointee.ai_socktype, ai.pointee.ai_protocol)
             guard fd >= 0 else { lastError = TransportError.system("socket", errno); continue }
+            sizeBuffers(fd)
             if let name = interfaceName {
                 var index = UInt32(if_nametoindex(name))
                 if ai.pointee.ai_family == AF_INET6 {

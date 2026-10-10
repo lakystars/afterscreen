@@ -220,8 +220,10 @@ final class TransportTests: XCTestCase {
         client.start(queue: queue)
         client.send(Message(type: .tileFrame, payload: Data(count: 48 << 20)))
         for _ in 0..<10 { client.send(Message(type: .cursorPos, payload: Data(count: 9))) }
+        // A video frame always precedes the tile frame that presents it
+        client.send(Message(type: .videoFrame, payload: Data(count: 9)))
         XCTAssertEqual(client.queuedFrames, 1)
-        XCTAssertEqual(client.queuedMessages, 11)
+        XCTAssertEqual(client.queuedMessages, 12)
         client.close(reason: "done")
         server.close(reason: "done")
     }

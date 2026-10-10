@@ -12,9 +12,9 @@ final class MessagesTests: XCTestCase {
         try roundTrip(Welcome(protocolVersion: 1, name: "iMac", modelID: "iMac18,3", marketingName: "iMac 27\" 5K (2017)",
                               osVersion: "13.7", gpuNames: ["Radeon Pro 580", "Intel HD 630"],
                               panelPixels: PixelSize(width: 5120, height: 2880), panelPoints: PixelSize(width: 2560, height: 1440),
-                              hevcDecode: true, h264Decode: true, bc7: true))
+                              hevcDecode: true, h264Decode: true, bc7: true, hevcMain10Decode: true, channelToken: 7))
         try roundTrip(StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 5120, height: 2880),
-                                   video: VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 160_000_000),
+                                   video: VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 160_000_000, tenBit: true),
                                    linkKind: .wifi))
         try roundTrip(StreamConfig(path: .tile, streamPixels: PixelSize(width: 5120, height: 2880),
                                    video: nil, linkKind: .ethernet))
@@ -23,6 +23,7 @@ final class MessagesTests: XCTestCase {
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
                                     cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: nil))
         try roundTrip(Bye(reason: "user"))
+        try roundTrip(Bye(reason: "Stopped on the receiver", pause: true))
         try roundTrip(ProbeResult(bytes: 1 << 20, seconds: 0.3))
     }
 
@@ -39,6 +40,11 @@ final class MessagesTests: XCTestCase {
     func testTruncatedCursorThrows() {
         XCTAssertThrowsError(try CursorWire.parsePos(Data([1, 2, 3])))
         XCTAssertThrowsError(try CursorWire.parseImage(Data([1, 0, 2])))
+    }
+
+    func testChannelTokenRoundTrip() throws {
+        XCTAssertEqual(try ChannelWire.decode(ChannelWire.encode(0xDEAD_BEEF)), 0xDEAD_BEEF)
+        XCTAssertThrowsError(try ChannelWire.decode(Data([1])))
     }
 
     func testBrightnessWireClampsToTheUnitRange() throws {

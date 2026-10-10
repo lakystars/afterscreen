@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.pwr_mgt
 import Metal
 import AfterscreenCore
 
@@ -30,6 +31,9 @@ public final class ReceiverScreen: StreamDisplay {
     public func begin(config: StreamConfig) {
         window.show(config: config)
         if awake == nil {
+            // Wakes a display the last session's end put to sleep; the activity below only keeps it awake
+            var id: IOPMAssertionID = 0
+            IOPMAssertionDeclareUserActivity("Afterscreen stream" as CFString, kIOPMUserActiveLocal, &id)
             awake = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated],
                                                           reason: "Showing a Afterscreen stream")
         }
@@ -49,12 +53,12 @@ public final class ReceiverScreen: StreamDisplay {
         awake = nil
     }
 
-    public func showTiles(_ frame: TileFrame) -> Bool {
-        renderer.applyTiles(frame)
+    public func showTiles(_ frame: TileFrame, present: Bool) -> Bool {
+        renderer.applyTiles(frame, present: present)
     }
 
-    public func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool {
-        renderer.setVideoParams(codec: codec, parameterSets: parameterSets)
+    public func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool {
+        renderer.setVideoParams(codec: codec, tenBit: tenBit, parameterSets: parameterSets)
     }
 
     public func decodeVideo(avcc: Data) -> Bool {

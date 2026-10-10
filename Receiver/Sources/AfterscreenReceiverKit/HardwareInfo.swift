@@ -61,6 +61,33 @@ public enum HardwareInfo {
             .map { PixelSize(width: $0.pixelWidth, height: $0.pixelHeight) }
     }
 
+    /// 3840×2160 HEVC Main10 parameter sets (VPS, SPS, PPS), made by VideoToolbox on the sender side
+    private static let main10Probe: [[UInt8]] = [
+        [0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+         0x99, 0x15, 0xc0, 0x90],
+        [0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x99, 0xa0, 0x01,
+         0xe0, 0x20, 0x02, 0x1c, 0x4d, 0x88, 0x15, 0xee, 0x45, 0x95, 0x10],
+        [0x44, 0x01, 0xc0, 0x2c, 0xbd, 0x14, 0xd9],
+    ]
+
+    /// Whether a hardware decoder accepts a 4K Main10 stream; Kaby Lake and later Intel iMacs, and Apple silicon
+    public static let hevcMain10Decode: Bool = {
+        var format: CMVideoFormatDescription?
+        let created: OSStatus = main10Probe.withPointers { pointers, sizes in
+            CMVideoFormatDescriptionCreateFromHEVCParameterSets(allocator: nil, parameterSetCount: pointers.count, parameterSetPointers: pointers,
+                                                                parameterSetSizes: sizes, nalUnitHeaderLength: 4, extensions: nil,
+                                                                formatDescriptionOut: &format)
+        }
+        guard created == noErr, let description = format else { return false }
+        var session: VTDecompressionSession?
+        let spec = [kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true] as CFDictionary
+        guard VTDecompressionSessionCreate(allocator: nil, formatDescription: description, decoderSpecification: spec,
+                                           imageBufferAttributes: nil, outputCallback: nil, decompressionSessionOut: &session) == noErr,
+              let decoder = session else { return false }
+        VTDecompressionSessionInvalidate(decoder)
+        return true
+    }()
+
     public static func gpuNames() -> [String] {
         let names = MTLCopyAllDevices().map(\.name)
         return names.isEmpty ? ["Unknown GPU"] : names
@@ -76,6 +103,18 @@ public enum HardwareInfo {
                        gpuNames: gpuNames(), panelPixels: panel, panelPoints: points(forPanel: panel),
                        hevcDecode: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
                        h264Decode: VTIsHardwareDecodeSupported(kCMVideoCodecType_H264),
-                       bc7: true)
+                       bc7: true, hevcMain10Decode: hevcMain10Decode)
+    }
+}
+
+private extension Array where Element == [UInt8] {
+    func withPointers<R>(_ body: ([UnsafePointer<UInt8>], [Int]) -> R) -> R {
+        let copies = map { bytes -> UnsafeMutablePointer<UInt8> in
+            let p = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+            p.initialize(from: bytes, count: bytes.count)
+            return p
+        }
+        defer { copies.forEach { $0.deallocate() } }
+        return body(copies.map { UnsafePointer($0) }, map(\.count))
     }
 }

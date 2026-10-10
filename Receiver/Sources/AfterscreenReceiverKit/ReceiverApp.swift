@@ -78,7 +78,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     }
 
     private func accept(_ connection: Connection) {
-        guard session == nil, let screen = screen else { return refuse(connection, "Receiver is busy with another sender") }
+        if let session = session { return session.offerChannel(connection) }
+        guard let screen = screen else { return refuse(connection, "Receiver display is unavailable") }
         let link = connection.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
         guard settings.accepts(link) else { return refuse(connection, "This receiver accepts Thunderbolt, USB and Ethernet only") }
         let session = ReceiverSession(connection: connection, hardware: hardware, display: screen)
@@ -90,7 +91,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             guard let self = self else { return }
             let duration = self.startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
             self.lastSummary = "Last session: \(self.session?.peer?.name ?? "sender"), \(duration / 60)m \(duration % 60)s — \(reason)"
-            if self.settings.onDisconnect == .sleepDisplay && !self.stoppedHere && self.session?.config?.test != true {
+            // Only after a session that showed a stream: early failures would put the display to sleep on every retry
+            if let config = self.session?.config, !config.test, self.settings.onDisconnect == .sleepDisplay && !self.stoppedHere {
                 ReceiverAppDelegate.sleepDisplay()
             }
             self.stoppedHere = false
@@ -159,7 +161,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
 
     @objc private func stopStreaming() {
         stoppedHere = true
-        session?.stop(reason: "Stopped on the receiver")
+        session?.stop(reason: "Stopped on the receiver", pause: true)
     }
 
     @objc private func showSettings() {

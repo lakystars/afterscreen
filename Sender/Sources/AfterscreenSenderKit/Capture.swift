@@ -52,7 +52,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let config = SCStreamConfiguration()
                 config.width = size.width
                 config.height = size.height
-                config.pixelFormat = kCVPixelFormatType_32BGRA
+                // 10-bit RGB: an 8-bit capture cuts the compositor's output to 1/255 steps, which bands dark gradients.
+                // Extended range keeps the compositor's precision; sRGB keeps SDR colour
+                config.pixelFormat = kCVPixelFormatType_ARGB2101010LEPacked
+                if #available(macOS 15.0, *) { config.captureDynamicRange = .hdrLocalDisplay }
                 config.colorSpaceName = CGColorSpace.sRGB
                 config.showsCursor = false
                 config.queueDepth = 3

@@ -31,6 +31,7 @@ final class FakeDisplay: StreamDisplay {
     var begun: [StreamConfig] = []
     var ended: [String] = []
     var tiles: [Data] = []
+    var presented: [Bool] = []
     var videoFrames = 0
     var log: [String] = []
     /// Set to hold showTiles until signalled
@@ -56,18 +57,19 @@ final class FakeDisplay: StreamDisplay {
     func prepare(config: StreamConfig) { record { log.append("prepare") } }
     func releaseDecodeResources() { record { log.append("release") } }
     func end(reason: String) { record { ended.append(reason) } }
-    func showTiles(_ frame: TileFrame) -> Bool {
+    func showTiles(_ frame: TileFrame, present: Bool) -> Bool {
         guard let raw = try? frame.decodeAll() else { return false }
-        record { tiles.append(raw); log.append("tiles") }
+        record { tiles.append(raw); presented.append(present); log.append("tiles") }
         tileGate?.wait()
         return true
     }
-    func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool { record { log.append("params") }; return true }
+    func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool { record { log.append("params") }; return true }
     func decodeVideo(avcc: Data) -> Bool { record { videoFrames += 1; log.append("video") }; return true }
     var brightness: Double? = 0.4
     var brightnessSet: [Double] = []
+    var cursors: [Float] = []
     func setBrightness(_ level: Double) { record { brightnessSet.append(level) } }
-    func cursor(x: Float, y: Float, visible: Bool) {}
+    func cursor(x: Float, y: Float, visible: Bool) { record { cursors.append(x) } }
     func cursorImage(_ image: CursorImage) {}
 }
 
@@ -95,6 +97,8 @@ final class ReceiverSessionTests: XCTestCase {
         listener = try Listener()
         let accepted = expectation(description: "accept")
         listener.onAccept = { [unowned self] c in
+            // As the app does: a connection during a session may be its cursor channel
+            if let session = session { return session.offerChannel(c) }
             session = ReceiverSession(connection: c, hardware: welcome, display: display, idleTimeout: 1.5)
             session.start()
             accepted.fulfill()
@@ -148,7 +152,10 @@ final class ReceiverSessionTests: XCTestCase {
             client.send(try! JSONWire.message(.hello, Hello(protocolVersion: AfterscreenProtocol.version, name: "MBP", model: "Mac17,1", osVersion: "27")))
         }
         XCTAssertEqual(replies.first?.type, .welcome)
-        XCTAssertEqual(try JSONWire.decode(Welcome.self, from: replies[0].payload), welcome)
+        var got = try JSONWire.decode(Welcome.self, from: replies[0].payload)
+        XCTAssertNotEqual(got.channelToken, 0, "each session hands out a cursor channel token")
+        got.channelToken = 0
+        XCTAssertEqual(got, welcome)
     }
 
     func testVersionMismatchSaysBye() throws {
@@ -175,7 +182,21 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(display.tiles.first, frame.raw)
     }
 
-    func testBrightnessMessageSetsThePanel() {
+    func testBrightnessBeforeTheHandshakeIsIgnored() throws {
+        client.send(Message(type: .brightness, payload: BrightnessWire.encode(0.1)))
+        _ = try token()
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertTrue(display.read { display.brightnessSet.isEmpty })
+    }
+
+    func testStopOnTheReceiverAsksTheSenderNotToReconnect() throws {
+        let replies = expectReply { session.stop(reason: "Stopped on the receiver", pause: true) }
+        let bye = try JSONWire.decode(Bye.self, from: try XCTUnwrap(replies.first).payload)
+        XCTAssertEqual(bye, Bye(reason: "Stopped on the receiver", pause: true))
+    }
+
+    func testBrightnessMessageSetsThePanel() throws {
+        _ = try token()
         client.send(Message(type: .brightness, payload: BrightnessWire.encode(0.8)))
         waitForDisplay { [display] in !display.brightnessSet.isEmpty }
         XCTAssertEqual(display.read { display.brightnessSet.first } ?? 0, 0.8, accuracy: 1e-6)
@@ -193,6 +214,52 @@ final class ReceiverSessionTests: XCTestCase {
         client.send(try! JSONWire.message(.config, tileConfig))
         wait(for: [e], timeout: 3)
         XCTAssertEqual(stats?.brightness, 0.4)
+    }
+
+    private func token() throws -> UInt32 {
+        let replies = expectReply {
+            client.send(try! JSONWire.message(.hello, Hello(protocolVersion: AfterscreenProtocol.version, name: "MBP", model: "Mac17,1", osVersion: "27")))
+        }
+        return try JSONWire.decode(Welcome.self, from: try XCTUnwrap(replies.first).payload).channelToken
+    }
+
+    private func channel(_ token: UInt32) throws -> Connection {
+        var c: Connection?
+        let connected = expectation(description: "channel")
+        Connection.connect(host: "127.0.0.1", port: listener.port, interfaceName: nil, timeout: 2) { c = try? $0.get(); connected.fulfill() }
+        wait(for: [connected], timeout: 3)
+        let channel = try XCTUnwrap(c)
+        channel.start(queue: queue)
+        channel.send(Message(type: .cursorChannel, payload: ChannelWire.encode(token)))
+        return channel
+    }
+
+    func testCursorChannelDeliversWhileFramesBackUp() throws {
+        let channel = try channel(try token())
+        defer { channel.close(reason: "test end") }
+        let g = TileGeometry(width: 256, height: 128)
+        let gate = DispatchSemaphore(value: 0)
+        display.tileGate = gate
+        client.send(try! JSONWire.message(.config, tileConfig))
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload
+        for _ in 0..<10 { client.send(Message(type: .tileFrame, payload: frame)) }
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        // The main connection is held behind the blocked screen; the cursor is not
+        channel.send(Message(type: .cursorPos, payload: CursorWire.pos(x: 0.25, y: 0.5, visible: true)))
+        waitForDisplay { [display] in display.cursors == [0.25] }
+        XCTAssertEqual(display.read { display.tiles.count }, 1)
+        display.tileGate = nil
+        for _ in 0..<10 { gate.signal() }
+    }
+
+    func testChannelWithAnotherTokenIsRefused() throws {
+        let good = try token()
+        let channel = try channel(good &+ 1)
+        let closed = expectation(description: "closed")
+        channel.onClose = { _ in closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+        channel.send(Message(type: .cursorPos, payload: CursorWire.pos(x: 0.75, y: 0.5, visible: true)))
+        XCTAssertTrue(display.read { display.cursors.isEmpty })
     }
 
     func testPingEchoesAsPong() throws {
@@ -291,6 +358,22 @@ final class ReceiverSessionTests: XCTestCase {
         waitForDisplay { [display] in display.tiles.count == 10 }
     }
 
+    func testFramesWithMoreBehindThemUploadWithoutPresenting() {
+        let g = TileGeometry(width: 256, height: 128)
+        let gate = DispatchSemaphore(value: 0)
+        display.tileGate = gate
+        client.send(try! JSONWire.message(.config, tileConfig))
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload
+        for _ in 0..<3 { client.send(Message(type: .tileFrame, payload: frame)) }
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        Thread.sleep(forTimeInterval: 0.2)
+        display.tileGate = nil
+        for _ in 0..<3 { gate.signal() }
+        waitForDisplay { [display] in display.tiles.count == 3 }
+        // The display presents at its refresh rate; a frame with others queued behind it only updates the texture
+        XCTAssertEqual(display.read { Array(display.presented.suffix(2)) }, [false, true])
+    }
+
     func testSessionEndingWithFramesInFlightIsReleasedCleanly() {
         let g = TileGeometry(width: 256, height: 128)
         let gate = DispatchSemaphore(value: 0)
@@ -356,6 +439,13 @@ final class HardwareInfoTests: XCTestCase {
         XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 4096, height: 2304)), PixelSize(width: 2048, height: 1152))
         XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 2560, height: 1440)), PixelSize(width: 2560, height: 1440))
         XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 3600, height: 2338)), PixelSize(width: 1800, height: 1169))
+    }
+
+    func testMain10ProbeFindsTheHardwareDecoder() {
+        #if arch(arm64)
+        XCTAssertTrue(HardwareInfo.hevcMain10Decode, "every Apple silicon Mac decodes Main10")
+        #endif
+        XCTAssertEqual(HardwareInfo.welcome(name: "test").hevcMain10Decode, HardwareInfo.hevcMain10Decode)
     }
 
     func testWelcomeDescribesThisMac() {

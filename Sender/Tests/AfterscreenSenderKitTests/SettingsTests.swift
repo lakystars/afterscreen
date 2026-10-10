@@ -18,6 +18,29 @@ final class DisplaySizeTests: XCTestCase {
     }
 }
 
+final class StatusTitleTests: XCTestCase {
+    private let figure = "\u{2007}"
+
+    func testThroughputKeepsFourCharactersSoTheMenuBarItemHoldsItsWidth() {
+        XCTAssertEqual(Format.compactGbps(3.2e9), "3.2G")
+        XCTAssertEqual(Format.compactGbps(329e6), "329M")
+        XCTAssertEqual(Format.compactGbps(33e6), figure + "33M")
+        XCTAssertEqual(Format.compactGbps(5e6), figure + figure + "5M")
+        XCTAssertEqual(Format.compactGbps(12.5e9), figure + "12G")
+    }
+
+    func testIconOnlyUnlessStatsAreOn() {
+        var s = SenderSnapshot()
+        XCTAssertEqual(StatusTitle.text(s, stats: true), "▭")
+        s.isStreaming = true
+        s.link = .usb
+        s.sentFPS = 9
+        s.throughputBitsPerSecond = 33e6
+        XCTAssertEqual(StatusTitle.text(s, stats: false), "▭ ⌁")
+        XCTAssertEqual(StatusTitle.text(s, stats: true), "▭ ⌁ " + figure + "9fps · " + figure + "33M")
+    }
+}
+
 final class SenderSettingsTests: XCTestCase {
     private var defaults: UserDefaults!
 
@@ -37,12 +60,20 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertEqual(again.displaySize, .more)
         XCTAssertFalse(again.autoConnect)
         XCTAssertEqual(again.lastReceiver, "iMac")
+        XCTAssertNil(again.link, "automatic by default")
+        XCTAssertFalse(again.menuBarStats, "icon only by default")
+        again.menuBarStats = true
+        XCTAssertTrue(SenderSettings(defaults: defaults).menuBarStats)
+        again.link = .ethernet
+        XCTAssertEqual(SenderSettings(defaults: defaults).link, .ethernet)
+        again.link = nil
+        XCTAssertNil(SenderSettings(defaults: defaults).link)
     }
 }
 
 final class AutoConnectTests: XCTestCase {
     private func receiver(_ name: String) -> DiscoveredReceiver {
-        DiscoveredReceiver(name: name, model: "", panel: "", port: 1, addresses: ["192.168.1.2"])
+        DiscoveredReceiver(name: name, model: "", panel: "", port: 1, host: "", addresses: ["192.168.1.2"])
     }
 
     func testConnectsToTheLastReceiverWhenItAppears() {
@@ -63,3 +94,4 @@ final class AutoConnectTests: XCTestCase {
         XCTAssertEqual(rule.nextRetryDelay(), 3)
     }
 }
+

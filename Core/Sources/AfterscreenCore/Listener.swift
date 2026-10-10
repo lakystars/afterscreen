@@ -1,14 +1,19 @@
 import Darwin
 import Foundation
 
-/// Socket options for both ends: no SIGPIPE, no Nagle, 4 MiB buffers
-func configure(_ fd: Int32) {
-    var one: Int32 = 1
+/// 4 MiB buffers. Set before connect or listen (accepted sockets inherit them): the window scale is fixed
+/// at the handshake, and buffers resized after it can leave the peer's FIN undelivered
+func sizeBuffers(_ fd: Int32) {
     var buffer: Int32 = 4 << 20
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer, socklen_t(MemoryLayout<Int32>.size))
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, socklen_t(MemoryLayout<Int32>.size))
+}
+
+/// No SIGPIPE, no Nagle
+func configure(_ fd: Int32) {
+    var one: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
 }
 
 /// Dual-stack TCP listener; accepts on a dedicated thread
@@ -25,6 +30,7 @@ public final class Listener {
         var zero: Int32 = 0, one: Int32 = 1
         setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        sizeBuffers(fd)
         var addr = sockaddr_in6()
         addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
         addr.sin6_family = sa_family_t(AF_INET6)

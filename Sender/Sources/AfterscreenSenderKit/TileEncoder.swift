@@ -50,7 +50,8 @@ public final class TileEncoder {
     private var candidates: [Bool]
     /// Seconds within which a tile must change again to count as moving
     public static let motionWindow: TimeInterval = 0.05
-    /// On a link-bound stream: a tile changed in consecutive frames this close together is moving (≥ 2 fps)
+    /// On a link-bound stream: a tile changed in consecutive frames this close together is moving (≥ 2 fps);
+    /// under sustained congestion, within 1.5 frame intervals when frames are further apart than that
     public static let congestedMotionWindow: TimeInterval = 0.5
     /// Seconds a BC1 tile stays unchanged before its BC7 reference is sent
     public static let settleDelay: TimeInterval = 0.1
@@ -58,6 +59,8 @@ public final class TileEncoder {
     /// Encode count at each tile's last change; a link-bound stream compares frames, not time
     private var lastFrame: [Int]
     private var encodes = 0
+    private var lastEncode = -TimeInterval.infinity
+    private var lastCongested = false
     /// The receiver holds the BC1 version of these tiles, or shows the video layer
     private var lossy: [Bool]
     /// Gather mode per tile: 0 BC7 from cur, 1 BC7 from ref, 2 BC1 from the texture, 3 reference only
@@ -146,8 +149,7 @@ public final class TileEncoder {
     }
 
     /// Synchronous. `dirty` is the capture's changed regions in stream pixels; nil encodes every tile.
-    /// `congested`: the link held frames back, so a tile that also changed in the previous frame is moving
-    /// however far apart the frames are. Settled BC1 tiles ride along as BC7.
+    /// `congested`: the stream runs behind its source, so a tile that also changed in the previous frame is moving. Settled BC1 tiles ride along as BC7.
     /// nil when nothing is to be sent, or when every upload buffer stayed in use for a second
     public func encode(texture: MTLTexture, forceAll: Bool, dirty: [CGRect]?,
                        now: TimeInterval = ProcessInfo.processInfo.systemUptime, congested: Bool = false) -> EncodedFrame? {
@@ -194,12 +196,17 @@ public final class TileEncoder {
 
         if forceAll { flags.update(repeating: 1) }
         encodes += 1
+        // A long gap after an uncongested frame is a pause, not a slow link; a full frame is the slowest to send
+        let congestedWindow = lastCongested ? max(TileEncoder.congestedMotionWindow, 1.5 * (now - lastEncode)) : TileEncoder.congestedMotionWindow
+        lastEncode = now
+        lastCongested = congested || forceAll
         var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = []
         for t in 0..<geometry.tileCount {
             if flags[t] != 0 {
                 let since = now - lastChange[t]
-                let moving = !forceAll && (since < TileEncoder.motionWindow
-                    || (congested && lastFrame[t] == encodes - 1 && since < TileEncoder.congestedMotionWindow))
+                // A lossy tile keeps moving until it stays still for the settle delay
+                let moving = !forceAll && (since < TileEncoder.motionWindow || (lossy[t] && since < TileEncoder.settleDelay)
+                    || (congested && lastFrame[t] == encodes - 1 && since < congestedWindow))
                 lastChange[t] = now
                 lastFrame[t] = encodes
                 if moving && motion == .video {

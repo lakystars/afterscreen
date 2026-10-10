@@ -10,7 +10,7 @@ let package = Package(
         .target(name: "PrivateAPI", path: "Sources/PrivateAPI"),
         .target(name: "AfterscreenSenderKit",
                 dependencies: ["PrivateAPI", .product(name: "AfterscreenCore", package: "Core")]),
-        .executableTarget(name: "AfterscreenSender", dependencies: ["AfterscreenSenderKit"]),
+        .executableTarget(name: "AfterscreenSender", dependencies: ["AfterscreenSenderKit", .product(name: "AfterscreenCore", package: "Core")]),
         .testTarget(name: "AfterscreenSenderKitTests",
                     dependencies: ["AfterscreenSenderKit", .product(name: "AfterscreenCore", package: "Core")]),
     ]

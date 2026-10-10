@@ -44,6 +44,8 @@ public final class SenderSettings: ObservableObject {
         static let displaySize = "displaySize"
         static let autoConnect = "autoConnect"
         static let lastReceiver = "lastReceiver"
+        static let link = "link"
+        static let menuBarStats = "menuBarStats"
     }
 
     @Published public var displaySize: DisplaySize {
@@ -52,6 +54,19 @@ public final class SenderSettings: ObservableObject {
     @Published public var autoConnect: Bool {
         didSet { defaults.set(autoConnect, forKey: Key.autoConnect) }
     }
+    /// Frame rate and throughput next to the menu bar icon
+    @Published public var menuBarStats: Bool {
+        didSet { defaults.set(menuBarStats, forKey: Key.menuBarStats) }
+    }
+    /// Link to use; nil picks the fastest that answers
+    public var link: LinkKind? {
+        get { defaults.string(forKey: Key.link).flatMap(LinkKind.init(rawValue:)) }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue?.rawValue, forKey: Key.link)
+        }
+    }
+
     /// Receiver last connected by hand; the auto-connect target
     public var lastReceiver: String? {
         get { defaults.string(forKey: Key.lastReceiver) }
@@ -64,6 +79,7 @@ public final class SenderSettings: ObservableObject {
         self.defaults = defaults
         displaySize = DisplaySize(rawValue: defaults.string(forKey: Key.displaySize) ?? "") ?? .standard
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
+        menuBarStats = defaults.bool(forKey: Key.menuBarStats)
     }
 
     /// Login item state lives in ServiceManagement, not in the defaults

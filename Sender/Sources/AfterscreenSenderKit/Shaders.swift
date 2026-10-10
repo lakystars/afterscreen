@@ -38,13 +38,19 @@ enum Shaders {
         return err;
     }
 
+    // 4×4 ordered dither thresholds in (0, 1): a 10-bit capture keeps its in-between levels as a fixed pattern;
+    // an 8-bit capture lands on whole levels and passes through unchanged
+    constant float kBayer[16] = { 0.5/16, 8.5/16, 2.5/16, 10.5/16, 12.5/16, 4.5/16, 14.5/16, 6.5/16,
+                                  3.5/16, 11.5/16, 1.5/16, 9.5/16, 15.5/16, 7.5/16, 13.5/16, 5.5/16 };
+
     // Pixels of block `blk` and its endpoints along the principal axis (power iteration)
     static void fitBlock(texture2d<float, access::read> src, uint2 blk, constant Params &p,
                          thread int3 *px, thread float3 &ep0, thread float3 &ep1) {
         float3 mean = 0.0;
         for (uint i = 0; i < 16; i++) {
             uint2 c = min(blk * 4 + uint2(i & 3u, i >> 2), uint2(p.width - 1, p.height - 1));
-            px[i] = int3(round(saturate(src.read(c).rgb) * 255.0));
+            // An 8-bit level read back as float can sit a hair below the whole number
+            px[i] = int3(min(floor(saturate(src.read(c).rgb) * 255.0 + 0.0001 + kBayer[(c.y & 3u) * 4 + (c.x & 3u)]), 255.0));
             mean += float3(px[i]);
         }
         mean /= 16.0;

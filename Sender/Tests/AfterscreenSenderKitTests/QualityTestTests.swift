@@ -30,6 +30,14 @@ final class QualityTestTests: XCTestCase {
         XCTAssertNil(QualityTest.verdict([QualityTest.Stage(size: PixelSize(width: 1920, height: 1080), fps: 30, gbps: 0.1)]))
     }
 
+    func testWarmUpCoversTwoLosslessFramesOnSlowLinks() {
+        XCTAssertEqual(QualityTest.warmup(stage: PixelSize(width: 5120, height: 2880), capacityGbps: 3.77), 1.06, accuracy: 0.01)
+        // 14.7 MB of BC7 twice at 0.14 Gb/s
+        XCTAssertEqual(QualityTest.warmup(stage: PixelSize(width: 5120, height: 2880), capacityGbps: 0.14), 2.69, accuracy: 0.01)
+        XCTAssertEqual(QualityTest.warmup(stage: PixelSize(width: 5120, height: 2880), capacityGbps: 0.01), 5)
+        XCTAssertEqual(QualityTest.warmup(stage: PixelSize(width: 1920, height: 1080), capacityGbps: nil), 5)
+    }
+
     func testPatternChangesEveryTileEveryFrame() throws {
         let pattern = try XCTUnwrap(TestPattern())
         let size = PixelSize(width: 256, height: 128)

@@ -18,8 +18,18 @@ enum FrameStreamerError: Error, CustomStringConvertible {
     var description: String { "Metal tile encoder unavailable" }
 }
 
-/// Captured frames → gate → tile encoder (and the hybrid path's video layer) → connection, on its own queue
+/// Captured frames → gate → tile encoder (and the hybrid path's video layer) → outbox → connection, on its own queue
 final class FrameStreamer {
+    /// A tile frame waiting for its turn; on the hybrid path also for its video picture
+    private struct Outgoing {
+        var frame: EncodedFrame?
+        var refinement = false
+        var waitsForVideo = false
+        var video: VideoEncoder.Output?
+        var gpuMs = 0.0
+        var created = ProcessInfo.processInfo.systemUptime
+    }
+
     let sent = RateCounter()
     let drops = RateCounter(window: 60)
     let gpuMeter = GPUTimeMeter()
@@ -35,10 +45,14 @@ final class FrameStreamer {
     private var compression: CompressionPolicy
     /// Hybrid path: shows tiles in motion; nil on the tile path, or after it failed (motion falls back to BC1)
     private var video: VideoEncoder?
+    private var videoCodec = VideoCodec.hevc
     private var videoKeyframe = true
+    /// Frames leave in capture order: a frame whose video is still encoding holds back the ones after it
+    private var outbox: [Outgoing] = []
     private let lock = NSLock()
     private var keyframeRequested = true
-    /// The send queue held a frame back since the last encoded frame
+    /// The send queue held a frame back, or a newer capture replaced an unsent one, since the last encoded frame:
+    /// the stream runs behind its source, so a tile changed in consecutive frames is moving
     private var queueWasFull = false
     /// A refinement waits for the link to drain
     private var refinePending = false
@@ -55,26 +69,14 @@ final class FrameStreamer {
         }
         tile = (encoder, textureCache, TilePacker())
         if let layer = config.video, let video = VideoEncoder(layer: layer) {
-            video.onParams = { [connection] codec, sets in
-                connection.send(Message(type: .videoParams, payload: VideoWire.params(codec: codec, sets: sets)))
-            }
-            video.onFrame = { [weak self] keyframe, avcc in
-                guard let self = self else { return }
-                let payload = VideoWire.frame(keyframe: keyframe, avcc: avcc)
-                self.connection.send(Message(type: .videoFrame, payload: payload))
-                self.count(FrameCounters(bytes: payload.count))
-            }
+            videoCodec = layer.codec
             encoder.motion = .video
             encoder.settleLimit = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes)
             self.video = video
         }
         // A written frame frees the link: retry the held frame then instead of polling
         connection.onFrameWritten = { [weak self] in
-            guard let self = self else { return }
-            self.queue.async {
-                self.pump()
-                if self.refinePending { self.refine() }
-            }
+            self?.queue.async { self?.wake() }
         }
         pumpTimer = makeTimer { [weak self] in self?.pump() }
         refineTimer = makeTimer { [weak self] in self?.refine() }
@@ -93,7 +95,10 @@ final class FrameStreamer {
         queue.async { [self] in
             var frame = frame
             if let unsent = gate.pending { frame.dirty = CapturedFrame.merge(unsent.dirty, into: frame.dirty) }
-            if gate.offer(frame) { drops.tick() }
+            if gate.offer(frame) {
+                drops.tick()
+                queueWasFull = true
+            }
             pump()
         }
     }
@@ -112,6 +117,7 @@ final class FrameStreamer {
             refineTimer?.cancel()
             refineTimer = nil
             gate = FrameGate(interval: gate.interval)
+            outbox = []
             tile = nil
             video = nil
             completion?()
@@ -129,16 +135,21 @@ final class FrameStreamer {
 
     // MARK: - Frame queue
 
-    /// Sends the held frame once the gate opens; a busy link wakes it when a frame is written.
+    private func wake() {
+        pump()
+        if refinePending { refine() }
+    }
+
+    /// Two frames on the wire or still encoding is enough to keep the link and the encoder busy
+    private var inFlight: Int { connection.queuedFrames + outbox.count }
+
+    /// Sends the held frame once the gate opens; a busy link or encoder wakes it when a frame leaves.
     /// No timer runs while nothing is held
     private func pump() {
         guard !connection.isClosed, gate.pending != nil else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        let busy = connection.queuedFrames >= 2
-        if busy {
-            queueWasFull = true
-            return
-        }
+        if connection.queuedFrames >= 2 { queueWasFull = true }
+        guard inFlight < 2 else { return }
         if let frame = gate.take(now: now, busy: false) {
             process(frame)
         } else {
@@ -155,37 +166,65 @@ final class FrameStreamer {
         let pixelBuffer = captured.pixelBuffer
         guard let tile = tile else { return }
         var cvTexture: CVMetalTexture?
-        CVMetalTextureCacheCreateTextureFromImage(nil, tile.cache, pixelBuffer, nil, .bgra8Unorm,
+        let format: MTLPixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_ARGB2101010LEPacked ? .bgr10a2Unorm : .bgra8Unorm
+        CVMetalTextureCacheCreateTextureFromImage(nil, tile.cache, pixelBuffer, nil, format,
                                                   CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), 0, &cvTexture)
         guard let cvt = cvTexture, let texture = CVMetalTextureGetTexture(cvt) else { return }
-        let frame = tile.encoder.encode(texture: texture, forceAll: forceKey, dirty: captured.dirty, congested: queueWasFull)
+        var out = Outgoing(frame: tile.encoder.encode(texture: texture, forceAll: forceKey, dirty: captured.dirty, congested: queueWasFull))
+        out.gpuMs = tile.encoder.lastGPUSeconds * 1000
         gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
-        // The video picture goes out first; the tile frame after it presents both
-        var videoMs = 0.0, presents = false
         if let video = video, tile.encoder.lossyTiles > 0 {
-            presents = video.encode(pixelBuffer, time: ProcessInfo.processInfo.systemUptime, forceKeyframe: videoKeyframe)
-            videoMs = video.lastEncodeMs
-            if presents {
-                videoKeyframe = false
-            } else {
-                // Lossy tiles settle to BC7, and motion continues as BC1
-                tile.encoder.motion = .bc1
-                self.video = nil
+            out.waitsForVideo = video.encode(pixelBuffer, time: out.created, forceKeyframe: videoKeyframe) { [weak self] output in
+                self?.queue.async { self?.videoDone(output) }
             }
+            if out.waitsForVideo { videoKeyframe = false } else { fallBackToBC1() }
         }
-        if let frame = frame ?? (presents ? EncodedFrame(runs: [], data: Data()) : nil) {
-            send(frame, tile.encoder, tile.packer, refinement: false, extraMs: videoMs)
-        }
+        if out.frame != nil || out.waitsForVideo { outbox.append(out) }
+        drain()
         scheduleRefine()
+    }
+
+    /// Encoder outputs arrive in submission order
+    private func videoDone(_ output: VideoEncoder.Output) {
+        guard tile != nil, let i = outbox.firstIndex(where: { $0.waitsForVideo }) else { return }
+        outbox[i].waitsForVideo = false
+        outbox[i].video = output
+        if case .failed = output { fallBackToBC1() }
+        drain()
+        wake()
+    }
+
+    /// Lossy tiles settle to BC7, and motion continues as BC1
+    private func fallBackToBC1() {
+        tile?.encoder.motion = .bc1
+        video = nil
+    }
+
+    /// Sends ready frames in order: the video picture, then the tile frame that presents it
+    private func drain() {
+        guard let tile = tile else { return }
+        while let first = outbox.first, !first.waitsForVideo {
+            outbox.removeFirst()
+            var videoBytes = 0
+            if case let .frame(keyframe, avcc, sets)? = first.video {
+                if keyframe { connection.send(Message(type: .videoParams, payload: VideoWire.params(codec: videoCodec, sets: sets))) }
+                let payload = VideoWire.frame(keyframe: keyframe, avcc: avcc)
+                connection.send(Message(type: .videoFrame, payload: payload))
+                videoBytes = payload.count
+            }
+            guard let frame = first.frame ?? (videoBytes > 0 ? EncodedFrame(runs: [], data: Data()) : nil) else { continue }
+            send(frame, tile.encoder, tile.packer, first, videoBytes: videoBytes)
+        }
     }
 
     private func refine() {
         guard let tile = tile, !connection.isClosed else { return }
-        refinePending = connection.queuedFrames >= 2
+        refinePending = inFlight >= 2
         guard !refinePending else { return }
         if let frame = tile.encoder.refine() {
             gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
-            send(frame, tile.encoder, tile.packer, refinement: true)
+            outbox.append(Outgoing(frame: frame, refinement: true, gpuMs: tile.encoder.lastGPUSeconds * 1000))
+            drain()
         }
         scheduleRefine()
     }
@@ -195,20 +234,22 @@ final class FrameStreamer {
         refineTimer?.schedule(deadline: .now() + due)
     }
 
-    /// Refinements re-send settled tiles; they count as bytes, not as frames. `extraMs`: video encode time
-    private func send(_ frame: EncodedFrame, _ encoder: TileEncoder, _ packer: TilePacker, refinement: Bool, extraMs: Double = 0) {
+    /// Refinements re-send settled tiles; they count as bytes, not as frames.
+    /// Encode time spans capture to send, which on the hybrid path includes the video encoder
+    private func send(_ frame: EncodedFrame, _ encoder: TileEncoder, _ packer: TilePacker, _ out: Outgoing, videoBytes: Int) {
         let g = encoder.geometry
         let packed = packer.pack(frame, geometry: g, compression: compression.next(rawBytes: frame.data.count, queueWasFull: queueWasFull))
         compression.record(rawBytes: packed.lz4In, wireBytes: packed.lz4Out)
         queueWasFull = false
         connection.send(.tileFrame, parts: packed.parts)
-        if refinement {
-            count(FrameCounters(bytes: packed.wireBytes, encodeMs: encoder.lastGPUSeconds * 1000))
+        let encodeMs = out.video == nil ? out.gpuMs : (ProcessInfo.processInfo.systemUptime - out.created) * 1000
+        if out.refinement {
+            count(FrameCounters(bytes: packed.wireBytes, encodeMs: encodeMs))
             return
         }
         sent.tick()
-        count(FrameCounters(bytes: packed.wireBytes, rawTileBytes: frame.data.count, dirtyTiles: frame.tileCount,
-                            totalTiles: g.tileCount, encodeMs: encoder.lastGPUSeconds * 1000 + extraMs))
+        count(FrameCounters(bytes: packed.wireBytes + videoBytes, rawTileBytes: frame.data.count, dirtyTiles: frame.tileCount,
+                            totalTiles: g.tileCount, encodeMs: encodeMs))
     }
 
     private func count(_ c: FrameCounters) {
@@ -221,3 +262,4 @@ final class FrameStreamer {
         lock.unlock()
     }
 }
+

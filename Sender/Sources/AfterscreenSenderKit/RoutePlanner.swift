@@ -1,11 +1,24 @@
 import Darwin
+import Foundation
 import AfterscreenCore
+import dnssd
 
 public struct LocalInterface: Equatable {
     public var name: String
     public var ip: String
     public var netmask: String
     public var kind: LinkKind
+}
+
+/// A receiver address and, when mDNS reported it, the local interface it answered on
+public struct RemoteAddress: Equatable {
+    public var ip: String
+    public var via: String?
+
+    public init(_ ip: String, via: String? = nil) {
+        self.ip = ip
+        self.via = via
+    }
 }
 
 public struct Route: Equatable {
@@ -18,21 +31,74 @@ public struct Route: Equatable {
 public enum RoutePlanner {
     private static let priority: [LinkKind] = [.thunderbolt, .usb, .ethernet, .wifi]
 
-    public static func plan(local: [LocalInterface], remote: [String]) -> [Route] {
-        let remoteV4 = remote.filter { ipv4($0) != nil }
-        if remoteV4.contains(where: { r in local.contains { $0.ip == r } }) {
+    /// An address that answered on a known interface only routes there: link-local subnets repeat on every cable
+    public static func plan(local: [LocalInterface], remote: [RemoteAddress]) -> [Route] {
+        let remoteV4 = remote.filter { ipv4($0.ip) != nil }
+        if remoteV4.contains(where: { r in local.contains { $0.ip == r.ip } }) {
             return [Route(interface: "lo0", address: "127.0.0.1", kind: .loopback)]
         }
         var routes: [Route] = []
         for kind in priority {
             for iface in local where iface.kind == kind {
                 guard let ip = ipv4(iface.ip), let mask = ipv4(iface.netmask) else { continue }
-                if let match = remoteV4.first(where: { ipv4($0).map { $0 & mask == ip & mask } ?? false }) {
-                    routes.append(Route(interface: iface.name, address: match, kind: kind))
+                let match = remoteV4.first { r in
+                    r.via.map { $0 == iface.name } ?? (ipv4(r.ip).map { $0 & mask == ip & mask } ?? false)
                 }
+                if let match = match { routes.append(Route(interface: iface.name, address: match.ip, kind: kind)) }
             }
         }
         return routes
+    }
+
+    /// Links in route order, each once
+    public static func kinds(_ routes: [Route]) -> [LinkKind] {
+        routes.reduce(into: []) { if !$0.contains($1.kind) { $0.append($1.kind) } }
+    }
+
+    /// Routes over the chosen link; all routes (the fastest first) when nil or when that link is gone
+    public static func select(_ routes: [Route], prefer: LinkKind?) -> (routes: [Route], fellBack: Bool) {
+        guard let prefer = prefer else { return (routes, false) }
+        let chosen = routes.filter { $0.kind == prefer }
+        return chosen.isEmpty ? (routes, true) : (chosen, false)
+    }
+
+    /// Routes to a receiver over every link that answers now
+    public static func routes(to receiver: DiscoveredReceiver, completion: @escaping ([Route]) -> Void) {
+        let local = currentInterfaces().filter { $0.kind != .unsupported }
+        lookup(host: receiver.host, on: local.map(\.name)) { found in
+            completion(plan(local: local, remote: found + receiver.addresses.map { RemoteAddress($0) }))
+        }
+    }
+
+    /// IPv4 addresses of an mDNS host on each of `interfaces`, gathered for `wait` seconds.
+    /// A Bonjour resolve reports one interface, and a lookup on all interfaces stops at the first
+    /// that answers (often Wi-Fi), so each cable is asked on its own
+    public static func lookup(host: String, on interfaces: [String], wait: TimeInterval = 0.5,
+                              completion: @escaping ([RemoteAddress]) -> Void) {
+        final class Found { var addresses: [RemoteAddress] = [] }
+        let found = Found()
+        let context = Unmanaged.passRetained(found).toOpaque()
+        let queue = DispatchQueue(label: "afterscreen.lookup")
+        let services: [DNSServiceRef] = host.isEmpty ? [] : interfaces.compactMap { name in
+            var ref: DNSServiceRef?
+            let error = DNSServiceGetAddrInfo(&ref, 0, if_nametoindex(name), DNSServiceProtocol(kDNSServiceProtocol_IPv4), host, { _, flags, index, error, _, address, _, context in
+            guard error == kDNSServiceErr_NoError, flags & DNSServiceFlags(kDNSServiceFlagsAdd) != 0,
+                  let address = address, let context = context else { return }
+            var ip = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+            guard getnameinfo(address, socklen_t(MemoryLayout<sockaddr_in>.size), &ip, socklen_t(ip.count), nil, 0, NI_NUMERICHOST) == 0,
+                  if_indextoname(index, &name) != nil else { return }
+            Unmanaged<Found>.fromOpaque(context).takeUnretainedValue().addresses.append(RemoteAddress(String(cString: ip), via: String(cString: name)))
+            }, context)
+            guard error == kDNSServiceErr_NoError, let service = ref else { return nil }
+            DNSServiceSetDispatchQueue(service, queue)
+            return service
+        }
+        queue.asyncAfter(deadline: .now() + (services.isEmpty ? 0 : wait)) {
+            services.forEach(DNSServiceRefDeallocate)
+            Unmanaged<Found>.fromOpaque(context).release()
+            completion(found.addresses)
+        }
     }
 
     /// Up IPv4 interfaces with their link kind

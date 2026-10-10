@@ -24,8 +24,8 @@ final class VideoEncoderTests: XCTestCase {
         return buffer
     }
 
-    /// Decodes one HEVC sample to NV12; returns its size and the luma at the centre
-    private func decode(params: [Data], sample: Data) throws -> (width: Int, height: Int, centreY: Int) {
+    /// Decodes one HEVC sample to 4:2:0 (16-bit planes for Main10); returns its size and the centre luma code
+    private func decode(params: [Data], sample: Data, tenBit: Bool = false) throws -> (width: Int, height: Int, centreY: Int) {
         var format: CMVideoFormatDescription?
         let pointers = params.map { d -> UnsafePointer<UInt8> in
             let p = UnsafeMutablePointer<UInt8>.allocate(capacity: d.count)
@@ -38,7 +38,8 @@ final class VideoEncoderTests: XCTestCase {
                                                                            nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &format), noErr)
         let desc = try XCTUnwrap(format)
         var session: VTDecompressionSession?
-        let attrs = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] as CFDictionary
+        let attrs = [kCVPixelBufferPixelFormatTypeKey: tenBit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                                                              : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] as CFDictionary
         XCTAssertEqual(VTDecompressionSessionCreate(allocator: nil, formatDescription: desc, decoderSpecification: nil,
                                                     imageBufferAttributes: attrs, outputCallback: nil, decompressionSessionOut: &session), noErr)
         let decoder = try XCTUnwrap(session)
@@ -60,31 +61,55 @@ final class VideoEncoderTests: XCTestCase {
         CVPixelBufferLockBaseAddress(out, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(out, .readOnly) }
         let w = CVPixelBufferGetWidthOfPlane(out, 0), h = CVPixelBufferGetHeightOfPlane(out, 0)
-        let luma = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(out, 0)).assumingMemoryBound(to: UInt8.self)
-        return (w, h, Int(luma[(h / 2) * CVPixelBufferGetBytesPerRowOfPlane(out, 0) + w / 2]))
+        let base = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(out, 0)) + (h / 2) * CVPixelBufferGetBytesPerRowOfPlane(out, 0)
+        // 10-bit samples sit in the high bits of 16
+        let y = tenBit ? Int(base.assumingMemoryBound(to: UInt16.self)[w / 2] >> 6) : Int(base.assumingMemoryBound(to: UInt8.self)[w / 2])
+        return (w, h, y)
     }
 
-    func testScalesTheCaptureToTheLayerSynchronouslyInBT709VideoRange() throws {
+    func testPipelinedFramesComeBackInOrderScaledToTheLayerInBT709VideoRange() throws {
         let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 100_000_000)
         let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
-        var params: [Data] = []
-        var frames: [(keyframe: Bool, avcc: Data)] = []
-        encoder.onParams = { _, sets in params = sets }
-        encoder.onFrame = { frames.append(($0, $1)) }
         let source = try frame(width: 5120, height: 2880, bgra: (40, 120, 200))
+        let lock = NSLock()
+        var outputs: [(index: Int, keyframe: Bool, avcc: Data, sets: [Data])] = []
+        let done = expectation(description: "outputs")
+        // The HEVC encoder's default keys every 30 frames
+        done.expectedFulfillmentCount = 40
+        for i in 0..<40 {
+            XCTAssertTrue(encoder.encode(source, time: 10 + Double(i) / 60, forceKeyframe: i == 0) { output in
+                guard case let .frame(keyframe, avcc, sets) = output else { return XCTFail("\(output)") }
+                lock.lock()
+                outputs.append((i, keyframe, avcc, sets))
+                lock.unlock()
+                done.fulfill()
+            })
+        }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(outputs.map(\.index), Array(0..<40), "outputs follow submission order")
+        XCTAssertTrue(outputs[0].keyframe)
+        XCTAssertFalse(outputs[0].sets.isEmpty)
+        XCTAssertFalse(outputs[1...].contains { $0.keyframe }, "no periodic keyframes")
 
-        XCTAssertTrue(encoder.encode(source, time: 10, forceKeyframe: true))
-        XCTAssertEqual(frames.count, 1, "the frame arrives before encode returns")
-        XCTAssertTrue(frames[0].keyframe)
-        XCTAssertFalse(params.isEmpty)
-        XCTAssertTrue(encoder.encode(source, time: 10 + 1.0 / 60, forceKeyframe: false))
-        XCTAssertEqual(frames.count, 2)
-        XCTAssertFalse(frames[1].keyframe, "no periodic keyframes")
-
-        let picture = try decode(params: params, sample: frames[0].avcc)
+        let picture = try decode(params: outputs[0].sets, sample: outputs[0].avcc)
         XCTAssertEqual(picture.width, 3840)
         XCTAssertEqual(picture.height, 2160)
         // BT.709 video range: 16 + 219 × (0.2126 R + 0.7152 G + 0.0722 B) / 255
         XCTAssertEqual(picture.centreY, 129, accuracy: 4)
+    }
+
+    func testMain10LayerKeepsTenBitsThroughTheEncoder() throws {
+        let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: true)
+        let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+        let source = try frame(width: 2560, height: 1440, bgra: (40, 120, 200))
+        var output: VideoEncoder.Output?
+        let done = expectation(description: "frame")
+        XCTAssertTrue(encoder.encode(source, time: 1, forceKeyframe: true) { output = $0; done.fulfill() })
+        wait(for: [done], timeout: 5)
+        guard case let .frame(_, avcc, sets)? = output else { return XCTFail("\(String(describing: output))") }
+        XCTAssertEqual(sets[1][3] & 0x1F, 2, "SPS general_profile_idc: Main10")
+        let picture = try decode(params: sets, sample: avcc, tenBit: true)
+        // 10-bit video range: 64 + 876 × luma
+        XCTAssertEqual(picture.centreY, 515, accuracy: 8)
     }
 }

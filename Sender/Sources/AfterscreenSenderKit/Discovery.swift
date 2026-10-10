@@ -7,6 +7,9 @@ public struct DiscoveredReceiver: Identifiable, Equatable {
     public var model: String
     public var panel: String
     public var port: UInt16
+    /// mDNS host name; looked up again on connect, when every link answers
+    public var host: String
+    /// From the Bonjour resolve, which answers on one interface only
     public var addresses: [String]
 }
 
@@ -43,8 +46,8 @@ final class Discovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
         let txt = sender.txtRecordData().map(NetService.dictionary(fromTXTRecord:)) ?? [:]
         func text(_ key: String) -> String { txt[key].flatMap { String(data: $0, encoding: .utf8) } ?? "" }
         let addresses = (sender.addresses ?? []).compactMap(Discovery.ip(from:))
-        resolved[sender.name] = DiscoveredReceiver(name: sender.name, model: text("model"), panel: text("panel"),
-                                                   port: UInt16(sender.port), addresses: addresses)
+        resolved[sender.name] = DiscoveredReceiver(name: sender.name, model: text("model"), panel: text("panel"), port: UInt16(sender.port),
+                                                   host: sender.hostName ?? "", addresses: addresses)
         publish()
     }
 

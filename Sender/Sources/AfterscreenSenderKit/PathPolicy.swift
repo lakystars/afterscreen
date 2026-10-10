@@ -3,8 +3,11 @@ import AfterscreenCore
 /// Chooses the tile or hybrid path from link, probe and receiver capabilities
 public enum PathPolicy {
     public static let tileCapacityGbps = 2.5
-    public static let videoMax = PixelSize(width: 3840, height: 2160)
-    public static let h264Max = PixelSize(width: 4096, height: 2304)
+    /// Video layer sizes, largest first. 4K is what the sender's encoder pipelines at 60 fps;
+    /// H.264 stops at 1440p (level 5.1): 4K60 needs level 5.2, past the HEVC-less 2014–2015 iMac decoders
+    static let videoSizes = [PixelSize(width: 3840, height: 2160), PixelSize(width: 2560, height: 1440), PixelSize(width: 1920, height: 1080)]
+    /// Bits per pixel per frame a layer size needs at 60 fps; Apple's 75 Mbps for 4K screen sharing
+    static let minBitsPerPixel = 0.15
 
     /// Panel sizes a receiver may report (up to 8K, whose raw frame fits one message); anything else is a bad peer
     static let widthRange = 640...7680
@@ -17,7 +20,9 @@ public enum PathPolicy {
         if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps { return tiles }
         guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
         let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
-        let video = VideoLayer(codec: codec, pixels: videoPixels(panel, codec: codec), bitrate: bitrate(capacityGbps: capacityGbps))
+        let rate = bitrate(capacityGbps: capacityGbps)
+        let video = VideoLayer(codec: codec, pixels: videoPixels(panel, bitrate: rate, codec: codec), bitrate: rate,
+                               tenBit: codec == .hevc && welcome.hevcMain10Decode)
         return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link)
     }
 
@@ -25,13 +30,17 @@ public enum PathPolicy {
     static func stage(_ config: StreamConfig, size: PixelSize) -> StreamConfig {
         var c = config
         c.streamPixels = size
-        c.video?.pixels = videoPixels(size, codec: config.video?.codec ?? .hevc)
+        c.video.map { c.video?.pixels = videoPixels(size, bitrate: $0.bitrate, codec: $0.codec) }
         c.test = true
         return c
     }
 
-    static func videoPixels(_ stream: PixelSize, codec: VideoCodec) -> PixelSize {
-        fit(stream, within: codec == .hevc ? videoMax : h264Max)
+    /// The largest layer the bitrate fills at `minBitsPerPixel`; hard content past that runs the encoder
+    /// into its quality floor, overshooting the link
+    static func videoPixels(_ stream: PixelSize, bitrate: Int, codec: VideoCodec) -> PixelSize {
+        let sizes = codec == .hevc ? videoSizes : Array(videoSizes.dropFirst())
+        let size = sizes.first { Double(bitrate) / 60 / Double($0.pixelCount) >= minBitsPerPixel } ?? sizes[sizes.count - 1]
+        return fit(stream, within: size)
     }
 
     static func isPlausible(_ w: Welcome) -> Bool {
