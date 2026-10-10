@@ -48,7 +48,13 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
 
         screen = ReceiverScreen(windowed: CommandLine.arguments.contains("--windowed"))
         screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
-        screen?.hudText = { [weak self] in self?.hudText() ?? "" }
+        screen?.onSettingsRequest = { [weak self] in self?.openSettings(overStream: true) }
+        screen?.hudContent = { [weak self] in self?.hudContent() }
+        screen?.hudPlacement = (settings.hudCorner, settings.hudCollapsed)
+        screen?.onHUDChange = { [weak self] corner, collapsed in
+            self?.settings.hudCorner = corner
+            self?.settings.hudCollapsed = collapsed
+        }
         guard screen != nil else {
             state("Metal is unavailable on this Mac", "이 Mac에서는 Metal을 쓸 수 없습니다")
             return
@@ -88,6 +94,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         let link = connection.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
         guard settings.accepts(link) else { return refuse(connection, L10n.t("This receiver accepts Thunderbolt, USB and Ethernet only",
                                                                               "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다")) }
+        screen.presentation = settings.presentation
         let session = ReceiverSession(connection: connection, hardware: hardware, display: screen)
         session.onPeer = { [weak self] hello in
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
@@ -115,29 +122,9 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         session.start()
     }
 
-    private func hudText() -> String {
-        guard let session = session, let config = session.config, let screen = screen else { return "" }
-        let link: String
-        switch config.linkKind {
-        case .thunderbolt: link = "ϟ Thunderbolt"
-        case .usb: link = "⌁ USB"
-        case .ethernet: link = L10n.t("⇄ Ethernet", "⇄ 이더넷")
-        case .wifi: link = "≋ Wi-Fi"
-        case .loopback: link = L10n.t("Loopback", "루프백")
-        case .unsupported: link = L10n.t("Unsupported", "지원 안 함")
-        }
-        let path = config.video.map { v in
-            L10n.t("tiles + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") \(v.pixels.width)×\(v.pixels.height)",
-                   "타일 + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10비트" : "") \(v.pixels.width)×\(v.pixels.height)")
-        } ?? L10n.t("tiles (BC7)", "타일(BC7)")
-        let title = config.test ? L10n.t("Afterscreen quality test", "Afterscreen 품질 테스트") : "Afterscreen"
-        return """
-         \(title)  \(link)
-         \(config.streamPixels.width)×\(config.streamPixels.height) \(path)
-         \(L10n.t("shown", "표시")) \(String(format: "%.0f", screen.displayedFPS)) fps · \(L10n.t("late", "지연")) \(screen.lateFrames)
-         upload \(Format.ms(screen.uploadMs)) · GPU \(Format.percent(screen.gpuMeter.lastPercent))
-         \(L10n.t("⌥⌘I hide · Esc Esc stop", "⌥⌘I 숨김 · Esc 두 번 중지"))
-        """
+    private func hudContent() -> HUDContent? {
+        guard let session = session, let config = session.config else { return nil }
+        return HUDContent.make(peer: session.peer?.name, config: config, telemetry: session.telemetry)
     }
 
     // MARK: - Menu
@@ -178,14 +165,22 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     }
 
     @objc private func showSettings() {
+        openSettings(overStream: false)
+    }
+
+    /// `overStream`: opened from the stream's menu, so it sits above a stream that covers the screen
+    private func openSettings(overStream: Bool) {
         if settingsWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(rootView: ReceiverSettingsView(settings: settings)))
             window.title = L10n.t("Afterscreen Receiver Settings", "Afterscreen Receiver 설정")
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
+            // Opened from the stream's menu, it shows in the stream's full-screen Space
+            window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
             window.center()
             settingsWindow = window
         }
+        settingsWindow?.level = overStream ? NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 2) : .normal
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }

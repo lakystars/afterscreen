@@ -16,50 +16,6 @@ enum LinkMenu {
     }
 }
 
-/// How the tile path sends moving areas; the hybrid path has its own video row
-enum MotionLabel {
-    static func text(path: StreamPath, lossyTiles: Int) -> String? {
-        guard path == .tile else { return nil }
-        return lossyTiles == 0 ? L10n.t("BC7, sharp", "BC7 (선명)") : L10n.t("BC1 on \(lossyTiles) tiles", "BC1 · 타일 \(lossyTiles)개")
-    }
-}
-
-enum DebandLabel {
-    static func name(_ level: Deband) -> String {
-        switch level {
-        case .off: return L10n.t("Off", "끄기")
-        case .weak: return L10n.t("Low", "약하게")
-        case .normal: return L10n.t("Medium", "보통")
-        case .strong: return L10n.t("High", "강하게")
-        }
-    }
-}
-
-enum LinkLabel {
-    static func glyph(_ kind: LinkKind?) -> String {
-        switch kind {
-        case .thunderbolt?: return "ϟ"
-        case .usb?: return "⌁"
-        case .ethernet?: return "⇄"
-        case .wifi?: return "≋"
-        case .loopback?: return "↺"
-        default: return "?"
-        }
-    }
-
-    static func name(_ kind: LinkKind?) -> String {
-        switch kind {
-        case .thunderbolt?: return "Thunderbolt"
-        case .usb?: return "USB"
-        case .ethernet?: return L10n.t("Ethernet", "이더넷")
-        case .wifi?: return "Wi-Fi"
-        case .loopback?: return L10n.t("Loopback (same Mac)", "루프백(같은 Mac)")
-        case .unsupported?: return L10n.t("Unsupported", "지원 안 함")
-        case nil: return "—"
-        }
-    }
-}
-
 extension Format {
     /// Four characters, left-padded with figure spaces: a changing digit count would move the status item and its open popover
     static func compactGbps(_ bitsPerSecond: Double) -> String {
@@ -346,7 +302,12 @@ public struct PopoverView: View {
 
     private var streamingBody: some View {
         let s = model.snapshot
-        let scoreColor: Color = (s.cableScore ?? 100) >= 80 ? .green : ((s.cableScore ?? 100) >= 50 ? .yellow : .red)
+        let scoreColor: Color
+        switch ScoreBand(s.cableScore) {
+        case .good: scoreColor = .green
+        case .fair: scoreColor = .yellow
+        case .poor: scoreColor = .red
+        }
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(s.peer?.marketingName ?? model.activeReceiver ?? L10n.t("Receiver", "수신기")).font(.headline)
@@ -398,7 +359,7 @@ public struct PopoverView: View {
                     help: L10n.t("100 minus penalties for retransmits, jitter and a capacity below what the stream needs",
                                  "100점에서 재전송, 지연 변동, 부족한 링크 속도만큼 깎은 점수"))
                 if let mtu = s.mtu {
-                    let advice = LinkMetrics.mtuAdvice(mtu: mtu, link: s.link)
+                    let advice = LinkLabel.mtuAdvice(mtu: mtu, link: s.link)
                     Row("MTU", advice.map { "\(mtu) · \($0)" } ?? "\(mtu)", color: advice == nil ? .primary : .orange,
                         help: L10n.t("Packet size; 9000 (jumbo frames) lowers CPU on Thunderbolt and USB",
                                      "패킷 크기. Thunderbolt·USB에서는 9000(점보 프레임)이 CPU를 덜 씁니다"))
@@ -420,7 +381,7 @@ public struct PopoverView: View {
                     }
                     if let v = c.video {
                         Row(L10n.t("Moving areas", "움직이는 영역"),
-                            "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps",
+                            MotionLabel.video(v),
                             help: L10n.t("On slower links, areas in motion go out as video", "느린 링크에서는 움직이는 영역을 비디오로 보냅니다"))
                     }
                     Row(L10n.t("Changed area", "바뀐 영역"), String(format: "%.0f%%", s.dirtyPercent),

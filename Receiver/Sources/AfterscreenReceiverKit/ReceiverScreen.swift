@@ -6,8 +6,21 @@ import AfterscreenCore
 /// StreamDisplay backed by the fullscreen window and Metal renderer
 public final class ReceiverScreen: StreamDisplay {
     public var onExitRequest: (() -> Void)?
-    public var hudText: (() -> String)? {
-        didSet { window.hudText = hudText }
+    /// Main queue: Settings… from the stream's right-click menu
+    public var onSettingsRequest: (() -> Void)?
+    var hudContent: (() -> HUDContent?)? {
+        didSet { window.hudContent = hudContent }
+    }
+    /// Main queue: HUD corner and fold, reported back on change for the settings
+    var hudPlacement: (corner: ReceiverSettings.HUDCorner, collapsed: Bool) {
+        get { (window.hudCorner, window.hudCollapsed) }
+        set {
+            window.hudCorner = newValue.corner
+            window.hudCollapsed = newValue.collapsed
+        }
+    }
+    var onHUDChange: ((ReceiverSettings.HUDCorner, Bool) -> Void)? {
+        didSet { window.onHUDChange = onHUDChange }
     }
 
     private let renderer: StreamRenderer
@@ -28,6 +41,11 @@ public final class ReceiverScreen: StreamDisplay {
         snapshotSignal = snapshot
         window = StreamWindow(renderer: renderer, windowed: windowed)
         window.onExitRequest = { [weak self] in self?.onExitRequest?() }
+        window.onSettingsRequest = { [weak self] in self?.onSettingsRequest?() }
+        window.onVisibilityChange = { [weak self] visible in
+            self?.renderer.setVisible(visible)
+            if visible { self?.onRedrawNeeded?() }
+        }
     }
 
     public var gpuMeter: GPUTimeMeter { renderer.gpuMeter }
@@ -45,6 +63,18 @@ public final class ReceiverScreen: StreamDisplay {
             awake = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated],
                                                           reason: "Showing a Afterscreen stream")
         }
+    }
+
+    /// Main queue: applies from the next session
+    public var presentation: ReceiverSettings.Presentation {
+        get { window.presentation }
+        set { window.presentation = newValue }
+    }
+
+    public var onRedrawNeeded: (() -> Void)?
+
+    public func redraw() {
+        renderer.redraw()
     }
 
     public func prepare(config: StreamConfig) {

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 6
+    public static let version = 7
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -153,6 +153,54 @@ public struct ReceiverStats: Codable, Equatable {
         self.audioBufferMs = audioBufferMs
         self.volume = volume
         self.audioUnderruns = audioUnderruns
+    }
+}
+
+/// What the sender measures, once a second, so the receiver's HUD shows what the popover does
+public struct SenderStats: Codable, Equatable {
+    public var interface: String?
+    public var mtu: Int?
+    /// Probe result at session start
+    public var capacityGbps: Double?
+    public var throughputBitsPerSecond: Double
+    public var latencyMs: Double?
+    public var jitterMs: Double
+    public var retransmitPercent: Double
+    public var cableScore: Int?
+    public var captureFPS: Double
+    public var sentFPS: Double
+    public var droppedPerMinute: Int
+    public var dirtyPercent: Double
+    public var compressionRatio: Double
+    public var encodeMs: Double
+    /// Tiles shown lossy after the latest frame
+    public var lossyTiles: Int
+    public var cpuPercent: Double
+    public var memoryBytes: UInt64
+    public var gpuPercent: Double
+
+    public init(interface: String?, mtu: Int?, capacityGbps: Double?, throughputBitsPerSecond: Double,
+                latencyMs: Double?, jitterMs: Double, retransmitPercent: Double, cableScore: Int?,
+                captureFPS: Double, sentFPS: Double, droppedPerMinute: Int, dirtyPercent: Double, compressionRatio: Double,
+                encodeMs: Double, lossyTiles: Int, cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double) {
+        self.interface = interface
+        self.mtu = mtu
+        self.capacityGbps = capacityGbps
+        self.throughputBitsPerSecond = throughputBitsPerSecond
+        self.latencyMs = latencyMs
+        self.jitterMs = jitterMs
+        self.retransmitPercent = retransmitPercent
+        self.cableScore = cableScore
+        self.captureFPS = captureFPS
+        self.sentFPS = sentFPS
+        self.droppedPerMinute = droppedPerMinute
+        self.dirtyPercent = dirtyPercent
+        self.compressionRatio = compressionRatio
+        self.encodeMs = encodeMs
+        self.lossyTiles = lossyTiles
+        self.cpuPercent = cpuPercent
+        self.memoryBytes = memoryBytes
+        self.gpuPercent = gpuPercent
     }
 }
 

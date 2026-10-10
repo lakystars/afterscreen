@@ -4,9 +4,11 @@ import AfterscreenCore
 import SwiftUI
 
 /// Status item with a SwiftUI popover
-public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
+public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    /// Clicks in other apps while the popover is open
+    private var outsideClicks: Any?
     private let model = AppModel()
     private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
@@ -20,6 +22,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(toggle)
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = NSHostingController(rootView: PopoverView(model: model) { [weak self] in self?.showSettings() })
         // Published fires before the change is stored, so the title is read on the next run loop turn
         model.$snapshot.map { _ in () }.merge(with: model.settings.$menuBarStats.map { _ in () })
@@ -43,9 +46,20 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
         } else {
             model.screenRecordingGranted = CGPreflightScreenCaptureAccess()
             model.refreshLinks()
+            // A menu bar app is not active on its own: the first click inside would activate it and dismiss
+            // the menu it opened, and a transient popover closes on deactivation it would never see
+            NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                self?.popover.performClose(nil)
+            }
         }
+    }
+
+    public func popoverDidClose(_ notification: Notification) {
+        if let monitor = outsideClicks { NSEvent.removeMonitor(monitor) }
+        outsideClicks = nil
     }
 
     private func showSettings() {

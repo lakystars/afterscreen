@@ -37,6 +37,15 @@ public struct SenderSnapshot {
     public var soundOnReceiver = false
 
     public init() {}
+
+    /// The numbers the receiver's HUD shows
+    public var wireStats: SenderStats {
+        SenderStats(interface: interface, mtu: mtu, capacityGbps: capacityGbps, throughputBitsPerSecond: throughputBitsPerSecond,
+                    latencyMs: latencyMs, jitterMs: jitterMs, retransmitPercent: retransmitPercent, cableScore: cableScore,
+                    captureFPS: captureFPS, sentFPS: sentFPS, droppedPerMinute: droppedPerMinute, dirtyPercent: dirtyPercent,
+                    compressionRatio: compressionRatio, encodeMs: encodeMs, lossyTiles: lossyTiles, cpuPercent: cpuPercent,
+                    memoryBytes: memoryBytes, gpuPercent: gpuPercent)
+    }
 }
 
 /// One connection to a receiver: route, handshake, probe, then a virtual display with capture and encode,
@@ -510,6 +519,7 @@ public final class SenderSession {
             $0.memoryBytes = m.memoryBytes
             $0.gpuPercent = streamer?.gpuMeter.percentSinceLastRead() ?? 0
         }
+        send(.senderStats, snapshot.wireStats)
         if SenderSession.logStats { logLine() }
     }
 

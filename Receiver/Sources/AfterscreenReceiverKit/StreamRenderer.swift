@@ -45,6 +45,11 @@ final class StreamRenderer {
     private var debandRange = Deband.normal.rangePixels
     /// The next draw also goes to a PNG in /tmp
     private var snapshotRequested = false
+    /// False while the window is on another Space or covered: tiles still upload, nothing draws,
+    /// so no wait for a drawable the compositor does not hand out
+    private var isVisible = true
+    /// Decode queue: the stream size, for redraws
+    private var lastGeometry: TileGeometry?
 
     static let shaders = """
     #include <metal_stdlib>
@@ -219,6 +224,19 @@ final class StreamRenderer {
         sizeLock.unlock()
     }
 
+    /// Any queue
+    func setVisible(_ visible: Bool) {
+        sizeLock.lock()
+        isVisible = visible
+        sizeLock.unlock()
+    }
+
+    /// Decode queue: the current picture again, when the window shows after being hidden
+    func redraw() {
+        guard let g = lastGeometry, let cb = queue.makeCommandBuffer() else { return }
+        encodePicture(cb, geometry: g)
+    }
+
     /// Any queue: applies from the next draw
     func setDeband(_ level: Deband) {
         sizeLock.lock()
@@ -232,6 +250,7 @@ final class StreamRenderer {
         format = nil
         video = nil
         mask.reset()
+        lastGeometry = nil
         statsLock.lock()
         stats = (0, 0, 0)
         statsLock.unlock()
@@ -264,11 +283,24 @@ final class StreamRenderer {
         statsLock.unlock()
         mask.apply(frame.runs, geometry: frame.geometry)
         debandCache?.mark(frame.runs, geometry: frame.geometry)
-        guard present, let texture = tileTexture.texture else {
+        lastGeometry = frame.geometry
+        sizeLock.lock()
+        let visible = isVisible
+        sizeLock.unlock()
+        guard present, visible else {
             cb.commit()
             return true
         }
-        let g = frame.geometry
+        encodePicture(cb, geometry: frame.geometry)
+        return true
+    }
+
+    /// Draws the tile picture, with the video layer in masked tiles, and commits `cb`
+    private func encodePicture(_ cb: MTLCommandBuffer, geometry g: TileGeometry) {
+        guard let texture = tileTexture.texture else {
+            cb.commit()
+            return
+        }
         let content = CGSize(width: g.width, height: g.height)
         sizeLock.lock()
         let range = debandRange
@@ -292,7 +324,6 @@ final class StreamRenderer {
                 enc.setFragmentTexture(image, index: 0)
             }
         }
-        return true
     }
 
     /// The current mask in the next ring buffer

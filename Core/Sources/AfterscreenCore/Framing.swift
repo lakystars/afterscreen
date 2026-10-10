@@ -20,6 +20,8 @@ public enum MessageType: UInt8, CaseIterable {
     case ping = 0x40
     case pong = 0x41
     case stats = 0x50
+    /// Sender-side numbers for the receiver's HUD
+    case senderStats = 0x51
     case keyRequest = 0x60
     case bye = 0x7F
 }

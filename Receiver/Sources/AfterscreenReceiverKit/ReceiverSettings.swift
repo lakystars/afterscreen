@@ -10,6 +10,19 @@ public final class ReceiverSettings: ObservableObject {
         case wired
     }
 
+    /// Where the stream shows
+    public enum Presentation: String, CaseIterable {
+        /// A full-screen Space of its own: the iMac's desktops stay a Control-arrow away
+        case space
+        /// Above everything, menu bar and Dock included: the iMac is only a display
+        case cover
+    }
+
+    /// Screen corner the HUD snaps to
+    public enum HUDCorner: String, CaseIterable {
+        case topLeft, topRight, bottomLeft, bottomRight
+    }
+
     public enum OnDisconnect: String, CaseIterable {
         case showDesktop
         case sleepDisplay
@@ -19,6 +32,9 @@ public final class ReceiverSettings: ObservableObject {
         static let accept = "accept"
         static let onDisconnect = "onDisconnect"
         static let language = "language"
+        static let presentation = "presentation"
+        static let hudCorner = "hudCorner"
+        static let hudCollapsed = "hudCollapsed"
     }
 
     public static let agentLabel = "io.github.lakystars.afterscreen.receiver"
@@ -28,6 +44,16 @@ public final class ReceiverSettings: ObservableObject {
     }
     @Published public var onDisconnect: OnDisconnect {
         didSet { defaults.set(onDisconnect.rawValue, forKey: Key.onDisconnect) }
+    }
+    @Published public var presentation: Presentation {
+        didSet { defaults.set(presentation.rawValue, forKey: Key.presentation) }
+    }
+    public var hudCorner: HUDCorner {
+        didSet { defaults.set(hudCorner.rawValue, forKey: Key.hudCorner) }
+    }
+    /// The HUD folded to one line
+    public var hudCollapsed: Bool {
+        didSet { defaults.set(hudCollapsed, forKey: Key.hudCollapsed) }
     }
     @Published public var language: Language {
         didSet {
@@ -49,6 +75,9 @@ public final class ReceiverSettings: ObservableObject {
         accept = Accept(rawValue: defaults.string(forKey: Key.accept) ?? "") ?? .any
         onDisconnect = OnDisconnect(rawValue: defaults.string(forKey: Key.onDisconnect) ?? "") ?? .showDesktop
         language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
+        presentation = Presentation(rawValue: defaults.string(forKey: Key.presentation) ?? "") ?? .space
+        hudCorner = HUDCorner(rawValue: defaults.string(forKey: Key.hudCorner) ?? "") ?? .topRight
+        hudCollapsed = defaults.bool(forKey: Key.hudCollapsed)
         L10n.language = language
     }
 

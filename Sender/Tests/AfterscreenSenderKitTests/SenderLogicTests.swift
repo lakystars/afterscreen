@@ -48,10 +48,31 @@ final class PopoverLabelTests: XCTestCase {
         XCTAssertTrue(LinkMenu.choices(available: [], pinned: nil).isEmpty)
     }
 
-    func testMotionFormatShowsOnTheTilePathOnly() {
-        XCTAssertEqual(MotionLabel.text(path: .tile, lossyTiles: 0), "BC7, sharp")
-        XCTAssertEqual(MotionLabel.text(path: .tile, lossyTiles: 12), "BC1 on 12 tiles")
-        XCTAssertNil(MotionLabel.text(path: .hybrid, lossyTiles: 3))
+    func testWireStatsCarryThePopoverNumbers() {
+        var s = SenderSnapshot()
+        s.interface = "bridge0"
+        s.mtu = 1500
+        s.capacityGbps = 12.4
+        s.throughputBitsPerSecond = 754e6
+        s.latencyMs = 1
+        s.jitterMs = 0.2
+        s.retransmitPercent = 0.5
+        s.cableScore = 97
+        s.captureFPS = 60
+        s.sentFPS = 59
+        s.droppedPerMinute = 3
+        s.dirtyPercent = 11
+        s.compressionRatio = 1.4
+        s.encodeMs = 2.6
+        s.lossyTiles = 4
+        s.cpuPercent = 13
+        s.memoryBytes = 196 << 20
+        s.gpuPercent = 16
+        XCTAssertEqual(s.wireStats, SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
+                                                latencyMs: 1, jitterMs: 0.2, retransmitPercent: 0.5, cableScore: 97,
+                                                captureFPS: 60, sentFPS: 59, droppedPerMinute: 3, dirtyPercent: 11,
+                                                compressionRatio: 1.4, encodeMs: 2.6, lossyTiles: 4, cpuPercent: 13,
+                                                memoryBytes: 196 << 20, gpuPercent: 16))
     }
 }
 
@@ -346,17 +367,10 @@ final class CursorMoveTests: XCTestCase {
     }
 }
 
-final class MTUAdviceTests: XCTestCase {
+final class USBFallbackAdviceTests: XCTestCase {
     private var saved = L10n.language
     override func setUp() { saved = L10n.language; L10n.language = .english }
     override func tearDown() { L10n.language = saved }
-
-    func testJumboFramesAreAdvisedOnWiredLinks() {
-        XCTAssertEqual(LinkMetrics.mtuAdvice(mtu: 1500, link: .thunderbolt), "9000 recommended")
-        XCTAssertNil(LinkMetrics.mtuAdvice(mtu: 9000, link: .thunderbolt))
-        XCTAssertNil(LinkMetrics.mtuAdvice(mtu: 1500, link: .wifi))
-        XCTAssertNil(LinkMetrics.mtuAdvice(mtu: nil, link: .usb))
-    }
 
     func testUSBLinkSuggestsReplugForThunderbolt() {
         XCTAssertEqual(LinkMetrics.usbFallbackAdvice(link: .usb),

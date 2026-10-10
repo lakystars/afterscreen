@@ -10,6 +10,10 @@ public protocol StreamDisplay: AnyObject {
     func prepare(config: StreamConfig)
     /// Decode queue, after the session ends: free textures and staging buffers
     func releaseDecodeResources()
+    /// Set by the session: asks for `redraw` on its decode queue, e.g. when a hidden stream shows again
+    var onRedrawNeeded: (() -> Void)? { get set }
+    /// Decode queue: draws the current picture again without new tiles
+    func redraw()
     func end(reason: String)
     /// false when the tile data fails to decode. `present`: draw to the screen; a frame with more queued
     /// behind it only updates the texture, so the display's refresh rate never limits how fast frames are taken in
@@ -54,6 +58,13 @@ public final class ReceiverSession {
     }
     private let configLock = NSLock()
     private var currentConfig: StreamConfig?
+    /// Read on main by the HUD, written on the session queue
+    public var telemetry: HUDTelemetry {
+        telemetryLock.lock(); defer { telemetryLock.unlock() }
+        return currentTelemetry
+    }
+    private let telemetryLock = NSLock()
+    private var currentTelemetry = HUDTelemetry()
 
     private let connection: Connection
     /// Second connection carrying only the cursor, so it never waits behind frames
@@ -91,6 +102,7 @@ public final class ReceiverSession {
         self.hardware = hardware
         self.display = display
         self.idleTimeout = idleTimeout
+        display.onRedrawNeeded = { [weak self] in self?.decodeQueue.async { self?.display?.redraw() } }
         for _ in 0..<ReceiverSession.maxFramesInFlight { frameSlots.signal() }
     }
 
@@ -210,7 +222,15 @@ public final class ReceiverSession {
             DispatchQueue.main.async { [weak self] in self?.display?.setVolume(level) }
         case .deband:
             guard peer != nil, let level = try? DebandWire.decode(m.payload) else { return }
+            record { $0.deband = level }
             display?.setDeband(level)
+        case .senderStats:
+            guard peer != nil, let stats = try? JSONWire.decode(SenderStats.self, from: m.payload) else { return }
+            record {
+                $0.sender = stats
+                $0.throughput.push(stats.throughputBitsPerSecond)
+                if let ms = stats.latencyMs { $0.latency.push(ms) }
+            }
         case .brightness:
             guard peer != nil, let level = try? LevelWire.decode(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(level) }
@@ -305,7 +325,17 @@ public final class ReceiverSession {
                                   gpuPercent: display.gpuMeter.percentSinceLastRead(), brightness: display.brightness,
                                   audioBufferMs: display.audioBuffered.map { $0 * 1000 }, volume: display.volume,
                                   audioUnderruns: display.audioUnderruns)
+        record {
+            $0.receiver = stats
+            $0.shownFPS.push(stats.displayedFPS)
+        }
         send(.stats, stats)
+    }
+
+    private func record(_ change: (inout HUDTelemetry) -> Void) {
+        telemetryLock.lock()
+        change(&currentTelemetry)
+        telemetryLock.unlock()
     }
 
     private func send<T: Encodable>(_ type: MessageType, _ value: T) {

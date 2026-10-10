@@ -76,6 +76,8 @@ final class FakeDisplay: StreamDisplay {
     func setVolume(_ level: Double) { record { volumeSet.append(level) } }
     var debandSet: [Deband] = []
     func setDeband(_ level: Deband) { record { debandSet.append(level) } }
+    var onRedrawNeeded: (() -> Void)?
+    func redraw() { record { log.append("redraw") } }
     var audioBuffered: Double? { nil }
     var audioUnderruns: Int { 0 }
     func cursor(x: Float, y: Float, visible: Bool) { record { cursors.append(x) } }
@@ -205,11 +207,34 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(display.read { display.volumeSet.first } ?? 0, 0.3, accuracy: 1e-6)
     }
 
+    func testARedrawRequestDrawsOnTheDecodeQueue() throws {
+        _ = try token()
+        let request = try XCTUnwrap(display.onRedrawNeeded, "the session asks the display for redraws")
+        request()
+        waitForDisplay { [display] in display.log.contains("redraw") }
+    }
+
     func testDebandMessageSetsTheSmoothing() throws {
         _ = try token()
         client.send(Message(type: .deband, payload: DebandWire.encode(.strong)))
         waitForDisplay { [display] in !display.debandSet.isEmpty }
         XCTAssertEqual(display.read { display.debandSet }, [.strong])
+        XCTAssertEqual(session.telemetry.deband, .strong, "the HUD shows the level in use")
+    }
+
+    func testSenderStatsReachTheHUD() throws {
+        _ = try token()
+        let stats = SenderStats(interface: "bridge0", mtu: 9000, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
+                                latencyMs: 1, jitterMs: 0, retransmitPercent: 0, cableScore: 100,
+                                captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 11, compressionRatio: 1,
+                                encodeMs: 2.6, lossyTiles: 0, cpuPercent: 13, memoryBytes: 1 << 20, gpuPercent: 16)
+        client.send(try JSONWire.message(.senderStats, stats))
+        let deadline = Date().addingTimeInterval(3)
+        while session.telemetry.sender == nil && Date() < deadline { usleep(10_000) }
+        let t = session.telemetry
+        XCTAssertEqual(t.sender, stats)
+        XCTAssertEqual(t.throughput.values, [754e6])
+        XCTAssertEqual(t.latency.values, [1])
     }
 
     func testStopOnTheReceiverAsksTheSenderNotToReconnect() throws {
@@ -238,6 +263,8 @@ final class ReceiverSessionTests: XCTestCase {
         wait(for: [e], timeout: 3)
         XCTAssertEqual(stats?.brightness, 0.4)
         XCTAssertEqual(stats?.volume, 0.6)
+        XCTAssertEqual(session.telemetry.receiver, stats, "the HUD shows what the sender is told")
+        XCTAssertEqual(session.telemetry.shownFPS.values.count, 1)
     }
 
     private func token() throws -> UInt32 {

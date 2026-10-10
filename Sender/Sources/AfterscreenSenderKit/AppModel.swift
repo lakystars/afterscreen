@@ -72,10 +72,15 @@ public final class AppModel: ObservableObject {
     public func refreshLinks() {
         for receiver in receivers {
             RoutePlanner.routes(to: receiver) { [weak self] routes in
-                DispatchQueue.main.async { self?.links[receiver.name] = RoutePlanner.kinds(routes) }
+                DispatchQueue.main.async {
+                    // Only a real change: an open link menu closes when its items are rebuilt
+                    let kinds = RoutePlanner.kinds(routes)
+                    if self?.links[receiver.name] != kinds { self?.links[receiver.name] = kinds }
+                }
             }
         }
-        links = links.filter { name, _ in receivers.contains { $0.name == name } }
+        let kept = links.filter { name, _ in receivers.contains { $0.name == name } }
+        if kept != links { links = kept }
     }
 
     /// The chosen link if it reaches `receiver` now, else nil (automatic)

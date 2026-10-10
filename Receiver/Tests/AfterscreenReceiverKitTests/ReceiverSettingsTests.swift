@@ -1,3 +1,4 @@
+import AppKit
 import AfterscreenCore
 import XCTest
 @testable import AfterscreenReceiverKit
@@ -28,6 +29,55 @@ final class ReceiverSettingsTests: XCTestCase {
         let again = settings()
         XCTAssertEqual(again.accept, .wired)
         XCTAssertEqual(again.onDisconnect, .sleepDisplay)
+        XCTAssertEqual(again.presentation, .space, "a desktop of its own by default")
+        again.presentation = .cover
+        XCTAssertEqual(settings().presentation, .cover)
+    }
+
+    func testHUDPlacementIsRemembered() {
+        let s = settings()
+        XCTAssertEqual(s.hudCorner, .topRight)
+        XCTAssertFalse(s.hudCollapsed)
+        s.hudCorner = .bottomLeft
+        s.hudCollapsed = true
+        XCTAssertEqual(settings().hudCorner, .bottomLeft)
+        XCTAssertTrue(settings().hudCollapsed)
+    }
+
+    func testASpaceStartsFromAWindowSoFullScreenAnimatesAsUsual() {
+        let screen = NSRect(x: 0, y: 0, width: 2560, height: 1440)
+        let space = StreamWindow.Style(presentation: .space, windowed: false).initialFrame(in: screen)
+        XCTAssertEqual(space.width, 1536, accuracy: 1)
+        XCTAssertEqual(space.midX, screen.midX, accuracy: 1)
+        XCTAssertEqual(space.midY, screen.midY, accuracy: 1)
+        XCTAssertEqual(StreamWindow.Style(presentation: .cover, windowed: false).initialFrame(in: screen), screen)
+    }
+
+    func testStreamMenuAndPointer() {
+        let saved = L10n.language
+        L10n.language = .english
+        defer { L10n.language = saved }
+        let menu = StreamWindow.makeMenu(hudShown: false, target: nil)
+        XCTAssertEqual(menu.items.map(\.title), ["Stop the stream", "Show the HUD", "", "Settings…"])
+        XCTAssertEqual(StreamWindow.makeMenu(hudShown: true, target: nil).items[1].title, "Hide the HUD")
+        let pointer = StreamWindow.localPointer
+        XCTAssertEqual(pointer.image.size, NSSize(width: 24, height: 24))
+        XCTAssertEqual(pointer.hotSpot, NSPoint(x: 12, y: 12))
+    }
+
+    func testPresentationStyles() {
+        let space = StreamWindow.Style(presentation: .space, windowed: false)
+        XCTAssertTrue(space.mask.contains(.titled))
+        XCTAssertTrue(space.behavior.contains(.fullScreenPrimary))
+        XCTAssertEqual(space.level, .normal)
+        XCTAssertTrue(space.fullScreen)
+        let cover = StreamWindow.Style(presentation: .cover, windowed: false)
+        XCTAssertEqual(cover.mask, .borderless)
+        XCTAssertGreaterThan(cover.level.rawValue, NSWindow.Level.mainMenu.rawValue, "above the menu bar and Dock")
+        XCTAssertFalse(cover.fullScreen)
+        let windowed = StreamWindow.Style(presentation: .space, windowed: true)
+        XCTAssertTrue(windowed.mask.contains(.resizable))
+        XCTAssertFalse(windowed.fullScreen)
     }
 
     func testWiredOnlyRefusesWiFi() {

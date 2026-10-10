@@ -22,6 +22,14 @@ final class MessagesTests: XCTestCase {
                                     cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: 0.7))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
                                     cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: nil))
+        try roundTrip(SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
+                                  latencyMs: 1.0, jitterMs: 0.1, retransmitPercent: 0, cableScore: 100,
+                                  captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 11, compressionRatio: 1,
+                                  encodeMs: 2.6, lossyTiles: 0, cpuPercent: 13, memoryBytes: 196 << 20, gpuPercent: 16))
+        try roundTrip(SenderStats(interface: nil, mtu: nil, capacityGbps: nil, throughputBitsPerSecond: 0,
+                                  latencyMs: nil, jitterMs: 0, retransmitPercent: 0, cableScore: nil,
+                                  captureFPS: 0, sentFPS: 0, droppedPerMinute: 0, dirtyPercent: 0, compressionRatio: 0,
+                                  encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0))
         try roundTrip(Bye(reason: "user"))
         try roundTrip(Bye(reason: "Stopped on the receiver", pause: true))
         try roundTrip(ProbeResult(bytes: 1 << 20, seconds: 0.3))

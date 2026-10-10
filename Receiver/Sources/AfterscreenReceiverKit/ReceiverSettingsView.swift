@@ -19,6 +19,19 @@ struct ReceiverSettingsView: View {
                 .labelsHidden()
             }
             VStack(alignment: .leading, spacing: 4) {
+                Text(L10n.t("Show the stream", "스트림 표시 방식")).font(.headline)
+                Picker("", selection: $settings.presentation) {
+                    Text(L10n.t("A desktop of its own (Control-arrow switches to this Mac's)", "별도 데스크톱 (Control + 화살표로 이 Mac 데스크톱과 전환)"))
+                        .tag(ReceiverSettings.Presentation.space)
+                    Text(L10n.t("Cover the whole screen, menu bar and Dock included", "화면 전체 덮기 (메뉴 막대와 Dock 포함)"))
+                        .tag(ReceiverSettings.Presentation.cover)
+                }
+                .pickerStyle(RadioGroupPickerStyle())
+                .labelsHidden()
+                Text(L10n.t("Applies from the next connection.", "다음 연결부터 적용됩니다."))
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.t("When the sender disconnects", "송신기 연결이 끊기면")).font(.headline)
                 Picker("", selection: $settings.onDisconnect) {
                     Text(L10n.t("Show this Mac's desktop", "이 Mac의 데스크톱 보기")).tag(ReceiverSettings.OnDisconnect.showDesktop)
