@@ -32,7 +32,13 @@ final class MessagesTests: XCTestCase {
                                   encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0))
         try roundTrip(Bye(reason: "user"))
         try roundTrip(Bye(reason: "Stopped on the receiver", pause: true))
+        try roundTrip(Bye(reason: "Switching to Ethernet", relink: true))
         try roundTrip(ProbeResult(bytes: 1 << 20, seconds: 0.3))
+    }
+
+    func testByeWithoutRelinkReadsAsAnEnd() throws {
+        let bye = try JSONWire.decode(Bye.self, from: Data(#"{"reason":"x","pause":false}"#.utf8))
+        XCTAssertFalse(bye.relink)
     }
 
     func testCursorWireRoundTrip() throws {

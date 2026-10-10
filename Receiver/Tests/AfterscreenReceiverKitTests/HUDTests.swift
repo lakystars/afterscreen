@@ -33,7 +33,8 @@ final class HUDContentTests: XCTestCase {
         let c = HUDContent.make(peer: "MacBook Pro", config: tiles, telemetry: telemetry())
         XCTAssertEqual(c.title, "MacBook Pro")
         XCTAssertEqual(c.sections.map(\.title), ["Connection", "Picture", "Resources"])
-        XCTAssertEqual(row(c, "Link")?.value, "ϟ Thunderbolt · bridge0")
+        XCTAssertEqual(row(c, "Link")?.value, "Thunderbolt · bridge0")
+        XCTAssertEqual(row(c, "Link")?.link, .thunderbolt, "drawn as the link's symbol")
         XCTAssertEqual(row(c, "Throughput")?.value, "754 Mbps")
         XCTAssertEqual(row(c, "Throughput")?.graph, [700e6, 754e6])
         XCTAssertEqual(row(c, "Measured link speed")?.value, "12.98 Gbps")
@@ -58,7 +59,8 @@ final class HUDContentTests: XCTestCase {
         let hybrid = StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 4096, height: 2304), video: layer, linkKind: .wifi)
         let c = HUDContent.make(peer: nil, config: hybrid, telemetry: telemetry())
         XCTAssertEqual(row(c, "Moving areas")?.value, "HEVC 10-bit 2560×1440 · 160 Mbps")
-        XCTAssertEqual(row(c, "Link")?.value, "≋ Wi-Fi · bridge0")
+        XCTAssertEqual(row(c, "Link")?.value, "Wi-Fi · bridge0")
+        XCTAssertEqual(row(c, "Link")?.link, .wifi)
     }
 
     func testWithoutSenderStatsTheReceiverNumbersStillShow() {

@@ -63,6 +63,7 @@ struct HUDView: View {
         HStack(spacing: 6) {
             Text(r.label).font(.system(size: 12)).foregroundColor(HUDView.dim).lineLimit(1)
             Spacer(minLength: 4)
+            if r.link != nil { LinkMark(kind: r.link).foregroundColor(color(r.tone)) }
             Text(r.value).font(.system(size: 12, design: .monospaced)).foregroundColor(color(r.tone)).lineLimit(1)
             if r.graph != nil {
                 HUDSparkline(values: r.graph ?? [], color: color(r.graphColor)).frame(width: 52, height: 14)
@@ -84,6 +85,21 @@ struct HUDView: View {
         case .green: return Color(red: 0.3, green: 0.85, blue: 0.45)
         case .blue: return Color(red: 0.35, green: 0.65, blue: 1)
         case .purple: return Color(red: 0.75, green: 0.55, blue: 1)
+        }
+    }
+}
+
+/// The link's SF Symbol from macOS 11, its text glyph before
+private struct LinkMark: View {
+    var kind: LinkKind?
+
+    var body: some View {
+        Group {
+            if #available(macOS 11, *) {
+                Image(systemName: LinkLabel.symbol(kind) ?? "questionmark").font(.system(size: 11))
+            } else {
+                Text(LinkLabel.glyph(kind)).font(.system(size: 12))
+            }
         }
     }
 }

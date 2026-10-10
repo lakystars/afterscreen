@@ -232,9 +232,10 @@ public final class SenderSession {
                            osVersion: "\(os.majorVersion).\(os.minorVersion)"))
     }
 
-    public func stop(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다")) {
+    /// `relink`: a new session follows at once, so the receiver keeps its picture up
+    public func stop(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다"), relink: Bool = false) {
         guard let c = connection, !ended else { return end(reason) }
-        send(.bye, Bye(reason: reason))
+        send(.bye, Bye(reason: reason, relink: relink))
         c.closeAfterFlush(reason: reason)
     }
 

@@ -32,6 +32,18 @@ struct ReceiverSettingsView: View {
                     .font(.caption).foregroundColor(.secondary)
             }
             VStack(alignment: .leading, spacing: 4) {
+                Text(L10n.t("Connection effect", "연결 효과")).font(.headline)
+                Picker("", selection: $settings.effect) {
+                    Text(L10n.t("Tile wave", "타일 웨이브")).tag(ReceiverSettings.Effect.tiles)
+                    Text(L10n.t("Picture tube", "브라운관")).tag(ReceiverSettings.Effect.crt)
+                    Text(L10n.t("None", "없음")).tag(ReceiverSettings.Effect.none)
+                }
+                .pickerStyle(RadioGroupPickerStyle())
+                .labelsHidden()
+                Text(L10n.t("Applies from the next connection.", "다음 연결부터 적용됩니다."))
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.t("When the sender disconnects", "송신기 연결이 끊기면")).font(.headline)
                 Picker("", selection: $settings.onDisconnect) {
                     Text(L10n.t("Show this Mac's desktop", "이 Mac의 데스크톱 보기")).tag(ReceiverSettings.OnDisconnect.showDesktop)

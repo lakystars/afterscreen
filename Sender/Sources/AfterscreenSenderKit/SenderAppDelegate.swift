@@ -3,6 +3,57 @@ import Combine
 import AfterscreenCore
 import SwiftUI
 
+/// Status button changes, applied only when they differ: each assignment lays out the item again,
+/// and the popover anchored to it closes the menu it has open
+enum StatusButton {
+    @discardableResult
+    static func show(_ button: NSButton, image: NSImage, title: String) -> Bool {
+        guard button.image !== image || button.title != title else { return false }
+        if button.image !== image { button.image = image }
+        if button.title != title { button.title = title }
+        return true
+    }
+}
+
+/// Gives an open popover its focus back after the displays change. A virtual display coming or going
+/// moves focus off the menu bar app, and the next click inside only re-activates it, closing the menu it opened.
+/// Plain deactivation is left alone: that is the user switching apps
+final class PopoverFocusKeeper {
+    var isShown: () -> Bool = { false }
+    var isFocused: () -> Bool = { true }
+    var restore: () -> Void = {}
+    /// Display changes settle over a few hundred milliseconds, and focus moves late in them
+    static let checks: [TimeInterval] = [0.1, 0.5, 1.0]
+    private let center: NotificationCenter
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private var observer: NSObjectProtocol?
+
+    init(center: NotificationCenter = .default,
+         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, check in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: check)
+         }) {
+        self.center = center
+        self.schedule = schedule
+        observer = center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.displaysChanged()
+        }
+    }
+
+    deinit {
+        observer.map(center.removeObserver)
+    }
+
+    /// Also called as a stream starts: its virtual display is the change
+    func displaysChanged() {
+        for delay in PopoverFocusKeeper.checks {
+            schedule(delay) { [weak self] in
+                guard let self = self, self.isShown(), !self.isFocused() else { return }
+                self.restore()
+            }
+        }
+    }
+}
+
 /// Status item with a SwiftUI popover
 public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
@@ -12,31 +63,46 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     private let model = AppModel()
     private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
+    private let focusKeeper = PopoverFocusKeeper()
+    private var wasStreaming = false
 
     public override init() {}
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        statusItem.button?.imagePosition = .imageLeading
+        statusItem.button?.image = model.statusIcon
         statusItem.button?.title = model.statusTitle
         statusItem.button?.target = self
         statusItem.button?.action = #selector(toggle)
         popover.behavior = .transient
         popover.delegate = self
+        focusKeeper.isShown = { [weak self] in self?.popover.isShown ?? false }
+        focusKeeper.isFocused = { [weak self] in NSApp.isActive && self?.popover.contentViewController?.view.window?.isKeyWindow == true }
+        focusKeeper.restore = { [weak self] in
+            NSApp.activate(ignoringOtherApps: true)
+            self?.popover.contentViewController?.view.window?.makeKey()
+        }
         popover.contentViewController = NSHostingController(rootView: PopoverView(model: model) { [weak self] in self?.showSettings() })
         // Published fires before the change is stored, so the title is read on the next run loop turn
         model.$snapshot.map { _ in () }.merge(with: model.settings.$menuBarStats.map { _ in () })
             .receive(on: RunLoop.main).sink { [weak self] in
                 guard let self = self else { return }
-                self.statusItem.button?.title = self.model.statusTitle
-                self.statusItem.length = self.model.settings.menuBarStats && self.model.snapshot.isStreaming ? self.statsWidth : NSStatusItem.variableLength
+                if self.model.snapshot.isStreaming && !self.wasStreaming { self.focusKeeper.displaysChanged() }
+                self.wasStreaming = self.model.snapshot.isStreaming
+                guard let button = self.statusItem.button else { return }
+                StatusButton.show(button, image: self.model.statusIcon, title: self.model.statusTitle)
+                let length = self.model.settings.menuBarStats && self.model.snapshot.isStreaming ? self.statsWidth : NSStatusItem.variableLength
+                if self.statusItem.length != length { self.statusItem.length = length }
             }.store(in: &cancellables)
     }
 
-    /// The widest stats title: M is wider than G, and digits wider than "."
+    /// The icon and the widest stats title: M is wider than G, and digits wider than "."
     private lazy var statsWidth: CGFloat = {
         let font = statusItem.button?.font ?? NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        return ceil(("▭ ⇄ 60fps · 888M" as NSString).size(withAttributes: [.font: font]).width) + 12
+        let text = ceil(("60fps · 888M" as NSString).size(withAttributes: [.font: font]).width)
+        return ceil(StatusIcon.image(link: nil).size.width) + 4 + text + 12
     }()
 
     @objc private func toggle() {

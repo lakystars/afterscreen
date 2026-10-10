@@ -14,7 +14,8 @@ public protocol StreamDisplay: AnyObject {
     var onRedrawNeeded: (() -> Void)? { get set }
     /// Decode queue: draws the current picture again without new tiles
     func redraw()
-    func end(reason: String)
+    /// `relink`: the sender reconnects at once; the picture stays up for its next session
+    func end(reason: String, relink: Bool)
     /// false when the tile data fails to decode. `present`: draw to the screen; a frame with more queued
     /// behind it only updates the texture, so the display's refresh rate never limits how fast frames are taken in
     func showTiles(_ frame: TileFrame, present: Bool) -> Bool
@@ -51,6 +52,10 @@ public final class ReceiverSession {
     public var onEnd: ((String) -> Void)?
     public var onPeer: ((Hello) -> Void)?
     public private(set) var peer: Hello?
+    /// The sender said it reconnects at once. Read on main once the session has ended
+    public var relinking: Bool { peerBye?.relink ?? false }
+    /// The sender's bye: the close right behind it would otherwise report only "closed by peer"
+    private var peerBye: Bye?
     /// Read on main by the HUD, written on the session queue
     public var config: StreamConfig? {
         configLock.lock(); defer { configLock.unlock() }
@@ -247,8 +252,9 @@ public final class ReceiverSession {
         case .ping:
             connection.send(Message(type: .pong, payload: m.payload))
         case .bye:
-            let reason = (try? JSONWire.decode(Bye.self, from: m.payload))?.reason ?? "sender stopped"
-            connection.close(reason: reason)
+            let bye = (try? JSONWire.decode(Bye.self, from: m.payload)) ?? Bye(reason: "sender stopped")
+            peerBye = bye
+            connection.close(reason: bye.reason)
         case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel:
             break
         }
@@ -351,6 +357,8 @@ public final class ReceiverSession {
     private func finish(reason: String) {
         guard !ended else { return }
         ended = true
+        let reason = peerBye?.reason ?? reason
+        let relink = relinking
         statsTimer?.cancel()
         statsTimer = nil
         cursorChannel?.close(reason: reason)
@@ -358,7 +366,7 @@ public final class ReceiverSession {
         decodeQueue.async { [weak self] in self?.display?.releaseDecodeResources() }
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.display?.end(reason: reason)
+            self.display?.end(reason: reason, relink: relink)
             self.onEnd?(reason)
         }
     }

@@ -34,6 +34,14 @@ final class ReceiverSettingsTests: XCTestCase {
         XCTAssertEqual(settings().presentation, .cover)
     }
 
+    func testConnectionEffectDefaultsToTheTileWave() {
+        let s = settings()
+        XCTAssertEqual(s.effect, .tiles)
+        s.effect = .crt
+        XCTAssertEqual(settings().effect, .crt)
+        XCTAssertEqual(ReceiverSettings.Effect.allCases, [.tiles, .crt, .none])
+    }
+
     func testHUDPlacementIsRemembered() {
         let s = settings()
         XCTAssertEqual(s.hudCorner, .topRight)
@@ -42,6 +50,13 @@ final class ReceiverSettingsTests: XCTestCase {
         s.hudCollapsed = true
         XCTAssertEqual(settings().hudCorner, .bottomLeft)
         XCTAssertTrue(settings().hudCollapsed)
+    }
+
+    func testThePointerJumpsToItsNewHotSpot() {
+        // A new cursor shape moves the layer's anchor to its hot spot; an implicit animation would slide it there.
+        // Implicit actions only resolve in a window's layer tree, so the check is on the table that turns them off
+        let changed: Set<String> = ["anchorPoint", "position", "bounds", "contents", "hidden"]
+        XCTAssertTrue(changed.isSubset(of: StreamWindow.cursorActions.keys), "\(changed.subtracting(StreamWindow.cursorActions.keys))")
     }
 
     func testASpaceStartsFromAWindowSoFullScreenAnimatesAsUsual() {

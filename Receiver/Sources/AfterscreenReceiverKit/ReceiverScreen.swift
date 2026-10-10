@@ -42,6 +42,7 @@ public final class ReceiverScreen: StreamDisplay {
         window = StreamWindow(renderer: renderer, windowed: windowed)
         window.onExitRequest = { [weak self] in self?.onExitRequest?() }
         window.onSettingsRequest = { [weak self] in self?.onSettingsRequest?() }
+        window.onWaveRedraw = { [weak self] in self?.onRedrawNeeded?() }
         window.onVisibilityChange = { [weak self] visible in
             self?.renderer.setVisible(visible)
             if visible { self?.onRedrawNeeded?() }
@@ -71,6 +72,19 @@ public final class ReceiverScreen: StreamDisplay {
         set { window.presentation = newValue }
     }
 
+    /// Main queue: applies from the next session. Read on the decode queue as a session ends
+    public var effect: ReceiverSettings.Effect {
+        get { effectLock.lock(); defer { effectLock.unlock() }; return chosenEffect }
+        set {
+            effectLock.lock()
+            chosenEffect = newValue
+            effectLock.unlock()
+            window.effect = newValue
+        }
+    }
+    private let effectLock = NSLock()
+    private var chosenEffect = ReceiverSettings.Effect.tiles
+
     public var onRedrawNeeded: (() -> Void)?
 
     public func redraw() {
@@ -78,16 +92,21 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     public func prepare(config: StreamConfig) {
+        renderer.dropFarewell()
         renderer.reset()
     }
 
     public func releaseDecodeResources() {
+        // The tile wave closes over the last picture, after the textures behind it are gone
+        if effect == .tiles { renderer.keepFarewell() }
         renderer.releaseResources()
     }
 
-    public func end(reason: String) {
-        window.hide()
+    public func end(reason: String, relink: Bool) {
         audio.stop()
+        // A link or size change: the next session takes over the same window, without the power effects
+        guard !relink else { return window.hold(for: StreamWindow.relinkWait) }
+        window.hide()
         if let a = awake { ProcessInfo.processInfo.endActivity(a) }
         awake = nil
     }

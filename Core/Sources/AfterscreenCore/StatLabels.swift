@@ -24,6 +24,19 @@ public enum LinkLabel {
         }
     }
 
+    /// SF Symbol for the link; Ethernet's arrows are the ones macOS Network settings show
+    public static func symbol(_ kind: LinkKind?) -> String? {
+        switch kind {
+        case .thunderbolt?: return "bolt.fill"
+        case .usb?: return "cable.connector"
+        case .ethernet?: return "arrow.left.arrow.right"
+        case .wifi?: return "wifi"
+        case .loopback?: return "arrow.triangle.2.circlepath"
+        case .unsupported?: return "questionmark"
+        case nil: return nil
+        }
+    }
+
     /// Jumbo frames cut the packets per second a Thunderbolt or USB link must carry about sixfold
     public static func mtuAdvice(mtu: Int?, link: LinkKind?) -> String? {
         guard let mtu = mtu, mtu < 9000, link == .thunderbolt || link == .usb else { return nil }

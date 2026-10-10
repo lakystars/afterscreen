@@ -21,6 +21,8 @@ struct HUDContent: Equatable {
     struct Row: Equatable {
         var label: String
         var value: String
+        /// Drawn as the link's symbol before the value
+        var link: LinkKind?
         var tone = Tone.plain
         var graph: [Double]?
         var graphColor = GraphColor.green
@@ -49,8 +51,7 @@ struct HUDContent: Equatable {
         }
 
         var connection = [
-            Row(label: L10n.t("Link", "링크"),
-                value: "\(LinkLabel.glyph(config.linkKind)) \(LinkLabel.name(config.linkKind)) · \(s?.interface ?? dash)"),
+            Row(label: L10n.t("Link", "링크"), value: "\(LinkLabel.name(config.linkKind)) · \(s?.interface ?? dash)", link: config.linkKind),
             Row(label: L10n.t("Throughput", "전송량"),
                 value: s.map { Format.gbps(bytesPerSecond: $0.throughputBitsPerSecond / 8) } ?? dash,
                 graph: s == nil ? nil : t.throughput.values, graphColor: .green),

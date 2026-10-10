@@ -92,14 +92,14 @@ public final class AppModel: ObservableObject {
               let target = link ?? links[receiver.name]?.first, snapshot.link != target else { return }
         reconnect = receiver
         let name = link.map { LinkLabel.name($0) } ?? L10n.t("the fastest link", "가장 빠른 링크")
-        session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"))
+        session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"), relink: true)
     }
 
     /// A new transfer resolution takes a new session
     private func restartForResolution() {
         guard let session = session, !isTesting, let receiver = receivers.first(where: { $0.name == activeReceiver }) else { return }
         reconnect = receiver
-        session.stop(reason: L10n.t("Changing the resolution", "해상도를 바꾸는 중"))
+        session.stop(reason: L10n.t("Changing the resolution", "해상도를 바꾸는 중"), relink: true)
     }
 
     private func start(_ receiver: DiscoveredReceiver, manual: Bool) {
@@ -220,4 +220,5 @@ public final class AppModel: ObservableObject {
     }
 
     public var statusTitle: String { StatusTitle.text(snapshot, stats: settings.menuBarStats) }
+    public var statusIcon: NSImage { StatusIcon.image(link: StatusTitle.mark(snapshot)) }
 }

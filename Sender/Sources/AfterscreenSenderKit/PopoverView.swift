@@ -29,14 +29,29 @@ extension Format {
     }
 }
 
-/// Menu bar item text: the icon, the link glyph while streaming, and optionally fps and throughput at a fixed width
+/// Menu bar item: the icon's link mark while streaming, and optionally fps and throughput at a fixed width
 enum StatusTitle {
+    static func mark(_ s: SenderSnapshot) -> LinkKind? {
+        s.isStreaming ? s.link : nil
+    }
+
     static func text(_ s: SenderSnapshot, stats: Bool) -> String {
-        guard s.isStreaming else { return "▭" }
-        let glyph = "▭ \(LinkLabel.glyph(s.link))"
-        guard stats else { return glyph }
+        guard s.isStreaming, stats else { return "" }
         let fps = String(Int(s.sentFPS.rounded()))
-        return glyph + " " + String(repeating: "\u{2007}", count: max(0, 2 - fps.count)) + fps + "fps · " + Format.compactGbps(s.throughputBitsPerSecond)
+        return String(repeating: "\u{2007}", count: max(0, 2 - fps.count)) + fps + "fps · " + Format.compactGbps(s.throughputBitsPerSecond)
+    }
+}
+
+/// The link's symbol before its name
+struct LinkName: View {
+    var kind: LinkKind?
+    var suffix = ""
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let symbol = LinkLabel.symbol(kind) { Image(systemName: symbol) }
+            Text(LinkLabel.name(kind) + suffix)
+        }
     }
 }
 
@@ -64,6 +79,8 @@ struct Sparkline: View {
 private struct Row<Trailing: View>: View {
     var label: String
     var value: String
+    /// SF Symbol drawn before the value
+    var symbol: String?
     var valueColor: Color = .primary
     var help: String?
     @ViewBuilder var trailing: () -> Trailing
@@ -72,6 +89,7 @@ private struct Row<Trailing: View>: View {
         HStack(spacing: 8) {
             Text(label).foregroundStyle(.secondary)
             Spacer()
+            if let symbol = symbol { Image(systemName: symbol).foregroundStyle(valueColor) }
             Text(value).font(.system(.body, design: .monospaced)).foregroundStyle(valueColor)
             trailing()
         }
@@ -157,8 +175,8 @@ private struct LinkPicker: View {
         Picker(L10n.t("Link", "연결"), selection: Binding(get: { model.settings.link }, set: { model.setLink($0) })) {
             Text(L10n.t("Automatic", "자동")).tag(LinkKind?.none)
             ForEach(LinkMenu.choices(available: model.links[receiver] ?? [], pinned: model.settings.link), id: \.kind) { choice in
-                Text("\(LinkLabel.glyph(choice.kind)) \(LinkLabel.name(choice.kind))"
-                     + (choice.reachable ? "" : L10n.t(" (not reachable now)", " (지금 연결 안 됨)")))
+                // Names only: menus draw item symbols dimmer than their text
+                Text(LinkLabel.name(choice.kind) + (choice.reachable ? "" : L10n.t(" (not reachable now)", " (지금 연결 안 됨)")))
                     .tag(LinkKind?.some(choice.kind))
             }
         }
@@ -183,7 +201,7 @@ private struct QualityCard: View {
                     .font(.system(size: 15, weight: .semibold))
             }
             if report.link != nil {
-                Text("\(LinkLabel.glyph(report.link)) \(LinkLabel.name(report.link)) · \(report.path)")
+                LinkName(kind: report.link, suffix: " · \(report.path)")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             ForEach(report.stages.indices, id: \.self) { i in stageRow(report.stages[i]) }
@@ -326,10 +344,12 @@ public struct PopoverView: View {
                 }
             }
             Card(title: L10n.t("Connection", "연결")) {
-                Row(label: L10n.t("Link", "링크"), value: "\(LinkLabel.glyph(s.link)) \(LinkLabel.name(s.link)) · \(s.interface ?? "—")",
-                    help: L10n.t("The link carrying the stream, and the local interface", "스트림이 지나는 링크와 이 Mac의 인터페이스")) {
+                Row(label: L10n.t("Link", "링크"), value: LinkLabel.name(s.link), symbol: LinkLabel.symbol(s.link),
+                    help: L10n.t("The link carrying the stream", "스트림이 지나는 링크")) {
                     if let receiver = model.activeReceiver { LinkPicker(model: model, receiver: receiver) }
                 }
+                Row(L10n.t("Interface", "인터페이스"), s.interface ?? "—",
+                    help: L10n.t("This Mac's network interface on that link", "그 링크에 쓰이는 이 Mac의 네트워크 인터페이스"))
                 if let missing = s.missingLink {
                     Text(L10n.t("\(LinkLabel.name(missing)) does not reach the receiver; using the fastest link",
                                 "\(LinkLabel.name(missing))(으)로는 수신기에 닿지 않아 가장 빠른 링크를 씁니다"))

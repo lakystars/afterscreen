@@ -31,13 +31,57 @@ final class StatusTitleTests: XCTestCase {
 
     func testIconOnlyUnlessStatsAreOn() {
         var s = SenderSnapshot()
-        XCTAssertEqual(StatusTitle.text(s, stats: true), "▭")
-        s.isStreaming = true
         s.link = .usb
+        XCTAssertEqual(StatusTitle.text(s, stats: true), "")
+        XCTAssertNil(StatusTitle.mark(s), "no link mark until streaming")
+        s.isStreaming = true
         s.sentFPS = 9
         s.throughputBitsPerSecond = 33e6
-        XCTAssertEqual(StatusTitle.text(s, stats: false), "▭ ⌁")
-        XCTAssertEqual(StatusTitle.text(s, stats: true), "▭ ⌁ " + figure + "9fps · " + figure + "33M")
+        XCTAssertEqual(StatusTitle.mark(s), .usb)
+        XCTAssertEqual(StatusTitle.text(s, stats: false), "")
+        XCTAssertEqual(StatusTitle.text(s, stats: true), figure + "9fps · " + figure + "33M")
+    }
+}
+
+final class StatusButtonTests: XCTestCase {
+    func testTheButtonIsTouchedOnlyWhenSomethingChanges() {
+        // Each assignment lays out the item again, and the popover anchored to it closes its open menus
+        let button = NSButton()
+        let idle = StatusIcon.image(link: nil)
+        XCTAssertTrue(StatusButton.show(button, image: idle, title: ""))
+        XCTAssertFalse(StatusButton.show(button, image: StatusIcon.image(link: nil), title: ""))
+        XCTAssertTrue(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt), title: ""))
+        XCTAssertTrue(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt), title: "60fps"))
+        XCTAssertFalse(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt), title: "60fps"))
+    }
+}
+
+final class PopoverFocusKeeperTests: XCTestCase {
+    private let center = NotificationCenter()
+
+    private func keeper(shown: Bool, focused: Bool, restored: @escaping () -> Void) -> PopoverFocusKeeper {
+        let k = PopoverFocusKeeper(center: center) { _, check in check() }
+        k.isShown = { shown }
+        k.isFocused = { focused }
+        k.restore = restored
+        return k
+    }
+
+    func testAnOpenPopoverGetsFocusBackAfterTheDisplaysChange() {
+        var restores = 0
+        let k = keeper(shown: true, focused: false) { restores += 1 }
+        center.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        XCTAssertGreaterThan(restores, 0)
+        withExtendedLifetime(k) {}
+    }
+
+    func testFocusIsLeftAloneWhenClosedOrStillFocused() {
+        var restores = 0
+        let closed = keeper(shown: false, focused: false) { restores += 1 }
+        let focused = keeper(shown: true, focused: true) { restores += 1 }
+        center.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        XCTAssertEqual(restores, 0)
+        withExtendedLifetime((closed, focused)) {}
     }
 }
 

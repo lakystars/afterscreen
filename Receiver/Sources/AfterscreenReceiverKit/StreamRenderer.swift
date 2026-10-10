@@ -50,6 +50,52 @@ final class StreamRenderer {
     private var isVisible = true
     /// Decode queue: the stream size, for redraws
     private var lastGeometry: TileGeometry?
+    /// Power effect over the picture; nil draws it as sent. Under `sizeLock`
+    private var wave: Wave?
+    /// The last picture, kept past its session for a closing wave. Under `sizeLock`
+    private var farewell: (texture: MTLTexture, tilePixels: Int)?
+    /// When a picture last went to the screen, so effect redraws skip frames the stream already drew. Under `statsLock`
+    private var lastDraw: CFTimeInterval = 0
+
+    /// Tile wave: black, opening from the centre out, or closing from the corners in
+    enum Wave: Equatable {
+        case hidden
+        case opening(start: CFTimeInterval, duration: CFTimeInterval)
+        case closing(start: CFTimeInterval, duration: CFTimeInterval)
+
+        /// `Wave` in the shaders
+        struct Parameters {
+            var progress: Float
+            var active: Float
+            var closing: Float
+            var tilePixels: Float
+            var size: SIMD2<Float>
+        }
+
+        /// The picture as sent
+        static let still = Parameters(progress: 0, active: 0, closing: 0, tilePixels: 64, size: SIMD2(1, 1))
+
+        /// 0…1 through the wave; nil once an opening is over. Closed stays closed until the window goes
+        func progress(at now: CFTimeInterval) -> Float? {
+            switch self {
+            case .hidden:
+                return 0
+            case let .opening(start, duration):
+                let p = (now - start) / max(duration, 0.001)
+                return p >= 1 ? nil : Float(max(0, p))
+            case let .closing(start, duration):
+                return Float(min(1, max(0, (now - start) / max(duration, 0.001))))
+            }
+        }
+
+        func parameters(at now: CFTimeInterval, tilePixels: Int, size: CGSize) -> Parameters {
+            guard let p = progress(at: now) else { return Wave.still }
+            var closing: Float = 0
+            if case .closing = self { closing = 1 }
+            return Parameters(progress: p, active: 1, closing: closing, tilePixels: Float(tilePixels),
+                              size: SIMD2(Float(size.width), Float(size.height)))
+        }
+    }
 
     static let shaders = """
     #include <metal_stdlib>
@@ -154,25 +200,63 @@ final class StreamRenderer {
         return up ? catmullRom(tex, uv).rgb : tex.sample(s, uv).rgb;
     }
 
+    // Power effect. Each tile of the stream opens after a delay set by its distance from the centre,
+    // jittered a little per tile: it grows from 60% with a slight overshoot and brightens from black.
+    // Closing runs from the corners in and shrinks tiles to black. active 0: the picture as sent
+    struct Wave { float progress; float active; float closing; float tilePixels; float2 size; };
+    // Share of the wave one tile takes; the rest is the spread from first tile to last
+    constant float kWaveTile = 0.32;
+
+    // The uv to sample, and the brightness `k` of the pixel
+    static float2 waveUV(float2 uv, constant Wave &w, thread float &k) {
+        k = 1.0;
+        if (w.active == 0.0) return uv;
+        float2 px = uv * w.size;
+        float2 t = floor(px / w.tilePixels);
+        float2 c = (t + 0.5) / ceil(w.size / w.tilePixels) - 0.5;
+        float aspect = w.size.x / w.size.y;
+        float d = length(float2(c.x * aspect, c.y)) / length(float2(0.5 * aspect, 0.5));
+        d = saturate(d * 0.92 + hash01(uint2(t), 7u) * 0.08);
+        if (w.closing > 0.0) d = 1.0 - d;
+        float local = saturate((w.progress - d * (1.0 - kWaveTile)) / kWaveTile);
+        float open = w.closing > 0.0 ? 1.0 - local : local;
+        if (open <= 0.0) { k = 0.0; return uv; }
+        // Ease-out-back for the size, ease-out for the light
+        float x = open - 1.0;
+        float scale = mix(0.6, 1.0, 1.0 + 2.2 * x * x * x + 1.2 * x * x);
+        k = 1.0 - x * x;
+        float2 s = (px / w.tilePixels - t - 0.5) / scale + 0.5;
+        if (any(s < 0.0) || any(s > 1.0)) { k = 0.0; return uv; }
+        return (t + s) * w.tilePixels / w.size;
+    }
+
     // BC7 picture, or its debanded copy; alpha is not part of the stream
-    fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
-        return float4(picture(tex, in.uv, scalingUp(tex, in.uv)), 1.0);
+    fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Wave &w [[buffer(2)]]) {
+        bool up = scalingUp(tex, in.uv);
+        float k;
+        float2 uv = waveUV(in.uv, w, k);
+        if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
+        return float4(picture(tex, uv, up) * k, 1.0);
     }
 
     // grid: tiles per row, tile edge in pixels, stream width and height.
     // Masked tiles show the video picture (NV12, BT.709 video range), the rest the BC7 picture
     fragment float4 hybridFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                                    texture2d<float> luma [[texture(1)]], texture2d<float> chroma [[texture(2)]],
-                                   device const uchar *mask [[buffer(0)]], constant uint4 &grid [[buffer(1)]]) {
+                                   device const uchar *mask [[buffer(0)]], constant uint4 &grid [[buffer(1)]],
+                                   constant Wave &w [[buffer(2)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         bool up = scalingUp(tex, in.uv), videoUp = scalingUp(luma, in.uv);
-        uint2 p = min(uint2(in.uv * float2(grid.zw)), grid.zw - uint2(1));
-        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) return float4(picture(tex, in.uv, up), 1.0);
+        float k;
+        float2 uv = waveUV(in.uv, w, k);
+        if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
+        uint2 p = min(uint2(uv * float2(grid.zw)), grid.zw - uint2(1));
+        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) return float4(picture(tex, uv, up) * k, 1.0);
         // Luma carries the detail: Catmull-Rom when scaled up; chroma at half resolution stays bilinear
-        float y = ((videoUp ? catmullRom(luma, in.uv).r : luma.sample(s, in.uv).r) - 16.0 / 255.0) * (255.0 / 219.0);
-        float2 c = (chroma.sample(s, in.uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
+        float y = ((videoUp ? catmullRom(luma, uv).r : luma.sample(s, uv).r) - 16.0 / 255.0) * (255.0 / 219.0);
+        float2 c = (chroma.sample(s, uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
-        return float4(saturate(rgb), 1.0);
+        return float4(saturate(rgb) * k, 1.0);
     }
     """
 
@@ -231,10 +315,65 @@ final class StreamRenderer {
         sizeLock.unlock()
     }
 
-    /// Decode queue: the current picture again, when the window shows after being hidden
+    /// Decode queue: the current picture again, when the window shows after being hidden or an effect runs.
+    /// Skipped if the stream drew one within the last few milliseconds
     func redraw() {
-        guard let g = lastGeometry, let cb = queue.makeCommandBuffer() else { return }
+        statsLock.lock()
+        let recent = CACurrentMediaTime() - lastDraw < 0.008
+        statsLock.unlock()
+        guard !recent, let g = lastGeometry, let cb = queue.makeCommandBuffer() else { return }
         encodePicture(cb, geometry: g)
+    }
+
+    /// Any queue: applies from the next draw
+    func setWave(_ wave: Wave?) {
+        sizeLock.lock()
+        self.wave = wave
+        sizeLock.unlock()
+    }
+
+    /// Decode queue, before `releaseResources`: the current picture, kept at stream size for a closing wave
+    func keepFarewell() {
+        guard let g = lastGeometry, let cb = queue.makeCommandBuffer(), let bind = pictureBind(cb, geometry: g) else { return }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: StreamRenderer.drawableFormat, width: g.width, height: g.height, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        guard let target = device.makeTexture(descriptor: desc) else { return cb.commit() }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return cb.commit() }
+        enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(g.width), height: Double(g.height), znear: 0, zfar: 1))
+        bind(enc)
+        var still = Wave.still
+        enc.setFragmentBytes(&still, length: MemoryLayout<Wave.Parameters>.stride, index: 2)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.commit()
+        sizeLock.lock()
+        farewell = (target, g.tilePixels)
+        sizeLock.unlock()
+    }
+
+    /// Any queue: the kept picture under the current wave
+    func drawFarewell() {
+        sizeLock.lock()
+        let kept = farewell
+        sizeLock.unlock()
+        guard let kept = kept, let cb = queue.makeCommandBuffer() else { return }
+        let content = CGSize(width: kept.texture.width, height: kept.texture.height)
+        encodeDraw(cb, content: content, tilePixels: kept.tilePixels) { [tilePipeline] enc in
+            enc.setRenderPipelineState(tilePipeline)
+            enc.setFragmentTexture(kept.texture, index: 0)
+        }
+    }
+
+    /// Any queue
+    func dropFarewell() {
+        sizeLock.lock()
+        farewell = nil
+        sizeLock.unlock()
     }
 
     /// Any queue: applies from the next draw
@@ -297,11 +436,13 @@ final class StreamRenderer {
 
     /// Draws the tile picture, with the video layer in masked tiles, and commits `cb`
     private func encodePicture(_ cb: MTLCommandBuffer, geometry g: TileGeometry) {
-        guard let texture = tileTexture.texture else {
-            cb.commit()
-            return
-        }
-        let content = CGSize(width: g.width, height: g.height)
+        guard let bind = pictureBind(cb, geometry: g) else { return cb.commit() }
+        encodeDraw(cb, content: CGSize(width: g.width, height: g.height), tilePixels: g.tilePixels, bind: bind)
+    }
+
+    /// Pipeline and inputs for the current picture; the deband pass, if due, goes into `cb` first
+    private func pictureBind(_ cb: MTLCommandBuffer, geometry g: TileGeometry) -> ((MTLRenderCommandEncoder) -> Void)? {
+        guard let texture = tileTexture.texture else { return nil }
         sizeLock.lock()
         let range = debandRange
         sizeLock.unlock()
@@ -309,8 +450,9 @@ final class StreamRenderer {
         if mask.shown > 0, let picture = video, let luma = CVMetalTextureGetTexture(picture.luma),
            let chroma = CVMetalTextureGetTexture(picture.chroma), let maskBuffer = nextMaskBuffer() {
             cb.addCompletedHandler { _ in _ = picture }
-            var grid = [UInt32(g.tilesX), UInt32(g.tilePixels), UInt32(g.width), UInt32(g.height)]
-            encodeDraw(cb, content: content) { enc in
+            let grid = [UInt32(g.tilesX), UInt32(g.tilePixels), UInt32(g.width), UInt32(g.height)]
+            return { [hybridPipeline] enc in
+                var grid = grid
                 enc.setRenderPipelineState(hybridPipeline)
                 enc.setFragmentTexture(image, index: 0)
                 enc.setFragmentTexture(luma, index: 1)
@@ -318,11 +460,10 @@ final class StreamRenderer {
                 enc.setFragmentBuffer(maskBuffer, offset: 0, index: 0)
                 enc.setFragmentBytes(&grid, length: 16, index: 1)
             }
-        } else {
-            encodeDraw(cb, content: content) { enc in
-                enc.setRenderPipelineState(tilePipeline)
-                enc.setFragmentTexture(image, index: 0)
-            }
+        }
+        return { [tilePipeline] enc in
+            enc.setRenderPipelineState(tilePipeline)
+            enc.setFragmentTexture(image, index: 0)
         }
     }
 
@@ -410,10 +551,21 @@ final class StreamRenderer {
 
     // MARK: - Draw
 
-    private func encodeDraw(_ cb: MTLCommandBuffer, content: CGSize, bind: (MTLRenderCommandEncoder) -> Void) {
+    private func encodeDraw(_ cb: MTLCommandBuffer, content: CGSize, tilePixels: Int, bind picture: @escaping (MTLRenderCommandEncoder) -> Void) {
         sizeLock.lock()
         let size = drawableSize
+        let current = wave
         sizeLock.unlock()
+        var params = current?.parameters(at: CACurrentMediaTime(), tilePixels: tilePixels, size: content) ?? Wave.still
+        if case .opening? = current, params.active == 0 {
+            sizeLock.lock()
+            if wave == current { wave = nil }
+            sizeLock.unlock()
+        }
+        let bind = { (enc: MTLRenderCommandEncoder) in
+            picture(enc)
+            enc.setFragmentBytes(&params, length: MemoryLayout<Wave.Parameters>.stride, index: 2)
+        }
         let meter = gpuMeter
         cb.addCompletedHandler { cb in meter.add(seconds: cb.gpuEndTime - cb.gpuStartTime) }
         guard size.width > 0, let drawable = layer.nextDrawable() else {
@@ -444,6 +596,9 @@ final class StreamRenderer {
         sizeLock.unlock()
         if snapshot { encodeSnapshot(cb, content: content, videoTiles: mask.shown > 0 ? mask.bytes : [], bind: bind) }
         cb.present(drawable)
+        statsLock.lock()
+        lastDraw = CACurrentMediaTime()
+        statsLock.unlock()
         let counter = displayed
         cb.addCompletedHandler { _ in counter.tick() }
         cb.commit()

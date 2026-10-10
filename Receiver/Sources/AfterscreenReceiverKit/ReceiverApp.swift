@@ -40,8 +40,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             }
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "▭"
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        showStatus(link: nil)
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -95,10 +95,11 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         guard settings.accepts(link) else { return refuse(connection, L10n.t("This receiver accepts Thunderbolt, USB and Ethernet only",
                                                                               "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다")) }
         screen.presentation = settings.presentation
+        screen.effect = settings.effect
         let session = ReceiverSession(connection: connection, hardware: hardware, display: screen)
         session.onPeer = { [weak self] hello in
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
-            self?.statusItem.button?.title = "▭ ●"
+            self?.showStatus(link: link)
         }
         session.onEnd = { [weak self] reason in
             guard let self = self else { return }
@@ -107,19 +108,33 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self.lastSummary = L10n.t("Last session: \(peer), \(duration / 60)m \(duration % 60)s — \(reason)",
                                       "마지막 연결: \(peer), \(duration / 60)분 \(duration % 60)초 — \(reason)")
             // Only after a session that showed a stream: early failures would put the display to sleep on every retry
-            if let config = self.session?.config, !config.test, self.settings.onDisconnect == .sleepDisplay && !self.stoppedHere {
-                ReceiverAppDelegate.sleepDisplay()
+            if let config = self.session?.config, !config.test, self.session?.relinking == false,
+               self.settings.onDisconnect == .sleepDisplay && !self.stoppedHere {
+                // After the power-off and the Space's slide back; a new session keeps the display on
+                DispatchQueue.main.asyncAfter(deadline: .now() + StreamWindow.longestOff + 1) { [weak self] in
+                    if self?.session == nil { ReceiverAppDelegate.sleepDisplay() }
+                }
             }
             self.stoppedHere = false
             self.session = nil
             FileHandle.standardError.write(Data("[receiver] Session ended: \(reason)\n".utf8))
             self.state("Waiting for a sender", "송신기를 기다리는 중")
-            self.statusItem.button?.title = "▭"
+            self.showStatus(link: nil)
         }
         self.session = session
         startedAt = Date()
         state("Connecting…", "연결하는 중…")
         session.start()
+    }
+
+    /// The display icon with the link's mark while streaming; text on macOS 10.15, which has no SF Symbols
+    private func showStatus(link: LinkKind?) {
+        if #available(macOS 11, *) {
+            statusItem.button?.image = StatusIcon.image(link: link)
+            statusItem.button?.title = ""
+        } else {
+            statusItem.button?.title = link == nil ? "▭" : "▭ ●"
+        }
     }
 
     private func hudContent() -> HUDContent? {

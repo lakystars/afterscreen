@@ -208,10 +208,20 @@ public struct Bye: Codable, Equatable {
     public var reason: String
     /// The receiver's user stopped the stream: the sender does not reconnect on its own
     public var pause: Bool
+    /// The sender reconnects at once, over another link or at another size: the receiver keeps its picture up
+    public var relink: Bool
 
-    public init(reason: String, pause: Bool = false) {
+    public init(reason: String, pause: Bool = false, relink: Bool = false) {
         self.reason = reason
         self.pause = pause
+        self.relink = relink
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reason = try c.decode(String.self, forKey: .reason)
+        pause = try c.decodeIfPresent(Bool.self, forKey: .pause) ?? false
+        relink = try c.decodeIfPresent(Bool.self, forKey: .relink) ?? false
     }
 }
 

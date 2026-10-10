@@ -29,7 +29,7 @@ final class RenderGeometryTests: XCTestCase {
 final class FakeDisplay: StreamDisplay {
     let lock = NSLock()
     var begun: [StreamConfig] = []
-    var ended: [String] = []
+    var ended: [(reason: String, relink: Bool)] = []
     var tiles: [Data] = []
     var presented: [Bool] = []
     var videoFrames = 0
@@ -56,7 +56,7 @@ final class FakeDisplay: StreamDisplay {
     func begin(config: StreamConfig) { record { begun.append(config); log.append("begin") } }
     func prepare(config: StreamConfig) { record { log.append("prepare") } }
     func releaseDecodeResources() { record { log.append("release") } }
-    func end(reason: String) { record { ended.append(reason) } }
+    func end(reason: String, relink: Bool) { record { ended.append((reason, relink)) } }
     func showTiles(_ frame: TileFrame, present: Bool) -> Bool {
         guard let raw = try? frame.decodeAll() else { return false }
         record { tiles.append(raw); presented.append(present); log.append("tiles") }
@@ -235,6 +235,30 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(t.sender, stats)
         XCTAssertEqual(t.throughput.values, [754e6])
         XCTAssertEqual(t.latency.values, [1])
+    }
+
+    private func endBySender(_ bye: Bye) throws -> String? {
+        _ = try token()
+        let ended = expectation(description: "ended")
+        var reason: String?
+        session.onEnd = { reason = $0; ended.fulfill() }
+        // As the sender stops: the bye, then the close right behind it
+        client.send(try JSONWire.message(.bye, bye))
+        client.closeAfterFlush(reason: "test")
+        wait(for: [ended], timeout: 3)
+        return reason
+    }
+
+    func testTheSendersReasonSurvivesItsClose() throws {
+        XCTAssertEqual(try endBySender(Bye(reason: "Stopped on this Mac")), "Stopped on this Mac")
+        XCTAssertFalse(session.relinking)
+        XCTAssertEqual(display.read { display.ended.map(\.relink) }, [false])
+    }
+
+    func testALinkSwitchKeepsThePictureForTheNextSession() throws {
+        XCTAssertEqual(try endBySender(Bye(reason: "Switching to Ethernet", relink: true)), "Switching to Ethernet")
+        XCTAssertTrue(session.relinking)
+        XCTAssertEqual(display.read { display.ended.map(\.relink) }, [true])
     }
 
     func testStopOnTheReceiverAsksTheSenderNotToReconnect() throws {
@@ -737,6 +761,8 @@ final class StreamRendererTests: XCTestCase {
         enc.setFragmentTexture(chroma, index: 2)
         enc.setFragmentBuffer(mask, offset: 0, index: 0)
         enc.setFragmentBytes(&grid, length: 16, index: 1)
+        var still = StreamRenderer.Wave.still
+        enc.setFragmentBytes(&still, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()
@@ -778,6 +804,8 @@ final class UpscaleTests: XCTestCase {
         let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
         enc.setRenderPipelineState(pipeline)
         enc.setFragmentTexture(source, index: 0)
+        var still = StreamRenderer.Wave.still
+        enc.setFragmentBytes(&still, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()
@@ -831,6 +859,8 @@ final class UpscaleTests: XCTestCase {
         enc.setFragmentTexture(chroma, index: 2)
         enc.setFragmentBuffer(mask, offset: 0, index: 0)
         enc.setFragmentBytes(&grid, length: 16, index: 1)
+        var still = StreamRenderer.Wave.still
+        enc.setFragmentBytes(&still, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()

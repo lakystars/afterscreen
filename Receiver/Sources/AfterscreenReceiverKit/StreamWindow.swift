@@ -7,7 +7,7 @@ private final class KeyWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
-/// Layer-hosting view: Metal picture, cursor and hint layers
+/// Layer-hosting view: the tube's picture and beam layers, and the hint
 private final class StreamView: NSView {
     var onLayout: ((CGRect, CGFloat) -> Void)?
     var menuProvider: (() -> NSMenu?)?
@@ -30,6 +30,24 @@ private final class StreamView: NSView {
 
     override func resetCursorRects() {
         if let pointer = pointer { addCursorRect(bounds, cursor: pointer) }
+    }
+}
+
+/// Whether a window's picture is up: each window powers on once and off once
+struct PowerSequence {
+    private(set) var on = false
+
+    /// false if already on
+    mutating func powerOn() -> Bool {
+        guard !on else { return false }
+        on = true
+        return true
+    }
+
+    /// true: play `effect`'s power-off before the window closes. Off either way, so the next window powers on
+    mutating func powerOff(effect: ReceiverSettings.Effect) -> Bool {
+        defer { on = false }
+        return on && effect != .none
     }
 }
 
@@ -128,6 +146,18 @@ final class StreamWindow {
     var onVisibilityChange: ((Bool) -> Void)?
     /// Applies at the next session's first show
     var presentation = ReceiverSettings.Presentation.space
+    /// Applies at the next session's first show
+    var effect = ReceiverSettings.Effect.tiles
+    /// Main queue: a live redraw while the tile wave opens
+    var onWaveRedraw: (() -> Void)? {
+        get { wave.requestRedraw }
+        set { wave.requestRedraw = newValue }
+    }
+    /// The stream's pointer follows at once; an animated anchor would slide each new shape onto its hot spot
+    static let cursorActions: [String: CAAction] = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "hidden": NSNull(),
+                                                    "anchorPoint": NSNull()]
+    /// The longest power-off, for steps that wait it out
+    static let longestOff = max(CRTEffect.offDuration, TileWave.offDuration)
 
     private var window: KeyWindow?
     /// Holds the stream view and the HUD above it: a layer-hosting view takes no subviews
@@ -137,6 +167,21 @@ final class StreamWindow {
     private let cursorLayer = CALayer()
     private let hud = HUDHostView(rootView: HUDView(content: .empty, collapsed: false))
     private let hintLayer = CATextLayer()
+    private let tube = CRTTube()
+    private let wave: TileWave
+    /// The effect of the window on screen
+    private var shownEffect = ReceiverSettings.Effect.tiles
+    /// The stream's pointer waits for the tile wave: over black it would float alone
+    private var cursorSuppressed = false
+    private var power = PowerSequence()
+    /// Bumped per window, so a delayed step of an earlier session does nothing
+    private var generation = 0
+    /// The window closing once its power-off has played
+    private var closing: (window: KeyWindow, work: DispatchWorkItem)?
+    /// Power-off due if the sender does not come back after switching links
+    private var held: DispatchWorkItem?
+    /// How long a sender switching links has to reconnect
+    static let relinkWait: TimeInterval = 8
     private var keyMonitor: Any?
     private var hudTimer: Timer?
     private var lastEscape = Date.distantPast
@@ -156,15 +201,15 @@ final class StreamWindow {
     /// `windowed` opens a normal resizable window (development on one Mac)
     init(renderer: StreamRenderer, windowed: Bool) {
         self.windowed = windowed
+        wave = TileWave(renderer: renderer)
         view.layer = root
         view.wantsLayer = true
         root.backgroundColor = CGColor(gray: 0, alpha: 1)
-        root.addSublayer(renderer.layer)
 
         cursorLayer.isHidden = true
-        cursorLayer.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "hidden": NSNull()]
+        cursorLayer.actions = StreamWindow.cursorActions
         cursorLayer.magnificationFilter = .linear
-        root.addSublayer(cursorLayer)
+        tube.install(in: root, holding: [renderer.layer, cursorLayer])
 
         hintLayer.opacity = 0
         hintLayer.backgroundColor = CGColor(gray: 0.08, alpha: 0.8)
@@ -199,6 +244,7 @@ final class StreamWindow {
         }
         hud.menuProvider = view.menuProvider
         view.onLayout = { [weak self, weak renderer] bounds, scale in
+            self?.tube.layout(bounds: bounds)
             renderer?.layout(bounds: bounds, scale: scale)
             self?.hintLayer.contentsScale = scale
             self?.placeCursor()
@@ -209,6 +255,8 @@ final class StreamWindow {
 
     /// Called again for each new config of a session (quality test stages)
     func show(config: StreamConfig) {
+        held?.cancel()
+        held = nil
         contentPixels = CGSize(width: config.streamPixels.width, height: config.streamPixels.height)
         if config.test && hud.isHidden {
             hud.isHidden = false
@@ -219,6 +267,23 @@ final class StreamWindow {
             refreshHUD()
             return
         }
+        closeNow()
+        generation += 1
+        // Nothing carries over from an earlier window's effect
+        shownEffect = effect
+        cursorSuppressed = shownEffect == .tiles
+        switch shownEffect {
+        case .crt:
+            wave.finish()
+            tube.darken()
+        case .tiles:
+            tube.restore()
+            wave.prepare()
+        case .none:
+            wave.finish()
+            tube.restore()
+        }
+        hud.alphaValue = 0
         let style = Style(presentation: presentation, windowed: windowed)
         let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let window = makeWindow(style, frame: style.initialFrame(in: screen))
@@ -230,7 +295,9 @@ final class StreamWindow {
         }
         window.makeKeyAndOrderFront(nil)
         if style.fullScreen {
+            // The tube powers on once the Space has slid in
             window.toggleFullScreen(nil)
+            retryFullScreen(window)
             NSCursor.setHiddenUntilMouseMoves(true)
             mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDown]) { [weak self] event in
                 self?.scheduleCursorHide()
@@ -242,9 +309,34 @@ final class StreamWindow {
         }
         hudTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshHUD() }
         view.needsLayout = true
+        if !style.fullScreen { powerOn() }
+    }
+
+    /// The sender is switching links: everything stays up for its next session, which `show` picks up.
+    /// If none comes, the usual power-off
+    func hold(for seconds: TimeInterval) {
+        held?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.held = nil
+            self?.hide()
+        }
+        held = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    /// Full screen fails while another Space is still sliding away; one more try once it has
+    private func retryFullScreen(_ window: KeyWindow) {
+        let session = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak window] in
+            guard let self = self, let window = window, self.generation == session, self.keyMonitor != nil,
+                  !window.styleMask.contains(.fullScreen) else { return }
+            window.toggleFullScreen(nil)
+        }
     }
 
     func hide() {
+        held?.cancel()
+        held = nil
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
         keyMonitor = nil
         hudTimer?.invalidate()
@@ -261,9 +353,66 @@ final class StreamWindow {
         idleTimer?.invalidate()
         idleTimer = nil
         guard let window = window else { return }
+        generation += 1
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            hud.animator().alphaValue = 0
+        }
+        guard power.powerOff(effect: shownEffect) else { return close(window) }
+        view.layoutSubtreeIfNeeded()
+        switch shownEffect {
+        case .crt: tube.powerOff()
+        case .tiles: wave.powerOff()
+        case .none: break
+        }
+        let work = DispatchWorkItem { [weak self] in self?.close(window) }
+        closing = (window, work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: false), execute: work)
+    }
+
+    private func duration(on: Bool) -> CFTimeInterval {
+        switch shownEffect {
+        case .crt: return on ? CRTEffect.onDuration : CRTEffect.offDuration
+        case .tiles: return on ? TileWave.onDuration : TileWave.offDuration
+        case .none: return 0
+        }
+    }
+
+    /// The picture comes up with the session's effect; the HUD and, in a Space, the hint follow once it is up
+    private func powerOn() {
+        guard keyMonitor != nil, power.powerOn() else { return }
+        view.layoutSubtreeIfNeeded()
+        switch shownEffect {
+        case .crt: tube.powerOn()
+        case .tiles: wave.powerOn()
+        case .none: break
+        }
+        let session = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: true)) { [weak self] in
+            guard let self = self, self.generation == session else { return }
+            self.cursorSuppressed = false
+            self.placeCursor()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.25
+                self.hud.animator().alphaValue = 1
+            }
+            if self.window?.styleMask.contains(.fullScreen) == true { self.showHint() }
+        }
+    }
+
+    private func close(_ window: KeyWindow) {
+        if closing?.window === window { closing = nil }
+        if shownEffect == .tiles { wave.finish() }
         // Closing a full-screen window leaves its Space with the system's own transition back
         if window.styleMask.contains(.fullScreen) { window.close() } else { window.orderOut(nil) }
         if !windowed { NSApp.presentationOptions = [] }
+    }
+
+    /// A new session while the last one powers off: that window closes at once
+    private func closeNow() {
+        guard let pending = closing else { return }
+        pending.work.cancel()
+        close(pending.window)
     }
 
     private func makeWindow(_ style: Style, frame: NSRect) -> KeyWindow {
@@ -292,7 +441,7 @@ final class StreamWindow {
                 self?.onVisibilityChange?(window.occlusionState.contains(.visible))
             },
             center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
-                self?.showHint()
+                self?.powerOn()
             },
         ]
         self.window = window
@@ -352,9 +501,12 @@ final class StreamWindow {
 
     func setCursorImage(_ image: CursorImage) {
         cursorImage = image
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         cursorLayer.contents = NSImage(data: image.png)
         let w = max(1, CGFloat(image.width)), h = max(1, CGFloat(image.height))
         cursorLayer.anchorPoint = CGPoint(x: CGFloat(image.hotX) / w, y: 1 - CGFloat(image.hotY) / h)
+        CATransaction.commit()
         placeCursor()
     }
 
@@ -375,7 +527,7 @@ final class StreamWindow {
         cursorLayer.bounds = CGRect(x: 0, y: 0, width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
         cursorLayer.position = CGPoint(x: rect.minX + CGFloat(cursorNormalized.x) * rect.width,
                                        y: rect.maxY - CGFloat(cursorNormalized.y) * rect.height)
-        cursorLayer.isHidden = !cursorNormalized.visible
+        cursorLayer.isHidden = !cursorNormalized.visible || cursorSuppressed
         CATransaction.commit()
     }
 

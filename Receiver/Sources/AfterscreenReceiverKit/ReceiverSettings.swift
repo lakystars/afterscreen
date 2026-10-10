@@ -18,6 +18,15 @@ public final class ReceiverSettings: ObservableObject {
         case cover
     }
 
+    /// How the stream comes and goes
+    public enum Effect: String, CaseIterable {
+        /// Tiles open from the centre out and close from the corners in
+        case tiles
+        /// A picture tube switching on and off
+        case crt
+        case none
+    }
+
     /// Screen corner the HUD snaps to
     public enum HUDCorner: String, CaseIterable {
         case topLeft, topRight, bottomLeft, bottomRight
@@ -33,6 +42,7 @@ public final class ReceiverSettings: ObservableObject {
         static let onDisconnect = "onDisconnect"
         static let language = "language"
         static let presentation = "presentation"
+        static let effect = "effect"
         static let hudCorner = "hudCorner"
         static let hudCollapsed = "hudCollapsed"
     }
@@ -47,6 +57,10 @@ public final class ReceiverSettings: ObservableObject {
     }
     @Published public var presentation: Presentation {
         didSet { defaults.set(presentation.rawValue, forKey: Key.presentation) }
+    }
+    /// Applies from the next connection
+    @Published public var effect: Effect {
+        didSet { defaults.set(effect.rawValue, forKey: Key.effect) }
     }
     public var hudCorner: HUDCorner {
         didSet { defaults.set(hudCorner.rawValue, forKey: Key.hudCorner) }
@@ -76,6 +90,7 @@ public final class ReceiverSettings: ObservableObject {
         onDisconnect = OnDisconnect(rawValue: defaults.string(forKey: Key.onDisconnect) ?? "") ?? .showDesktop
         language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
         presentation = Presentation(rawValue: defaults.string(forKey: Key.presentation) ?? "") ?? .space
+        effect = Effect(rawValue: defaults.string(forKey: Key.effect) ?? "") ?? .tiles
         hudCorner = HUDCorner(rawValue: defaults.string(forKey: Key.hudCorner) ?? "") ?? .topRight
         hudCollapsed = defaults.bool(forKey: Key.hudCollapsed)
         L10n.language = language
