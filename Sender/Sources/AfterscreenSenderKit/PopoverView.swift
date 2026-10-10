@@ -272,6 +272,32 @@ public struct PopoverView: View {
                 Text(s.isStreaming ? "● " + L10n.t("Streaming", "스트리밍 중") : s.state).font(.system(size: 11))
                     .foregroundStyle(s.isStreaming ? .green : .secondary)
             }
+            if s.soundOnReceiver, let level = model.volume {
+                Card(title: L10n.t("iMac sound", "iMac 소리")) {
+                    HStack(spacing: 8) {
+                        Image(systemName: level > 0 ? "speaker.wave.1" : "speaker.slash").foregroundStyle(.secondary).frame(width: 18)
+                        Slider(value: Binding(get: { level }, set: { model.setVolume($0) }), in: 0...1)
+                        Image(systemName: "speaker.wave.3").foregroundStyle(.secondary)
+                    }
+                    .help(L10n.t("Volume of this Mac's sound on the iMac; the iMac's own volume applies on top",
+                                 "iMac에서 재생하는 이 Mac 소리의 음량. iMac 자체 음량도 함께 적용됩니다"))
+                    HStack {
+                        if let buffer = s.receiver?.audioBufferMs {
+                            Text(L10n.t("Sent to the iMac · \(Int(buffer)) ms buffered", "iMac으로 보내는 중 · 버퍼 \(Int(buffer))ms"))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        // A denied permission still yields a tap, of silence
+                        Button(L10n.t("No sound?", "소리가 안 나나요?")) {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!)
+                        }
+                        .buttonStyle(.link)
+                        .font(.system(size: 11))
+                        .help(L10n.t("Opens Privacy → System Audio Recording: Afterscreen needs it on",
+                                     "개인정보 보호 → 시스템 오디오 녹음을 엽니다. Afterscreen를 켜 두어야 합니다"))
+                    }
+                }
+            }
             if let level = model.brightness {
                 Card(title: L10n.t("iMac brightness", "iMac 밝기")) {
                     HStack(spacing: 8) {
@@ -291,13 +317,17 @@ public struct PopoverView: View {
                                 "\(LinkLabel.name(missing))(으)로는 수신기에 닿지 않아 가장 빠른 링크를 씁니다"))
                         .font(.system(size: 11)).foregroundStyle(.orange)
                 }
+                if let advice = LinkMetrics.usbFallbackAdvice(link: s.link) {
+                    Text(advice).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
                 Row(label: L10n.t("Throughput", "전송량"), value: Format.gbps(bytesPerSecond: s.throughputBitsPerSecond / 8),
                     help: L10n.t("Data sent to the iMac per second; it rises as more of the screen changes",
                                  "지금 iMac으로 보내는 초당 데이터 양입니다. 화면이 많이 바뀔수록 커집니다")) {
                     Sparkline(values: s.throughputHistory, color: .green)
                 }
-                Row(L10n.t("Link capacity", "링크 최대 속도"), s.capacityGbps.map { String(format: "%.2f Gbps", $0) } ?? "—",
-                    help: L10n.t("Measured when the session started", "연결할 때 측정한 링크의 최대 전송 속도"))
+                Row(L10n.t("Measured link speed", "링크 실측 속도"), s.capacityGbps.map { String(format: "%.2f Gbps", $0) } ?? "—",
+                    help: L10n.t("Data actually sent over this link in 0.3 s when the session started; not the cable's rated speed",
+                                 "연결할 때 0.3초 동안 실제로 보내 본 속도입니다. 케이블 규격 속도(예: Thunderbolt 40Gbps)가 아닙니다"))
                 Row(label: L10n.t("Latency", "지연"), value: s.latencyMs.map(Format.ms) ?? "—",
                     help: L10n.t("Round trip to the iMac and back over this link", "이 링크로 iMac까지 왕복하는 시간")) {
                     Sparkline(values: s.latencyHistory, color: .blue)

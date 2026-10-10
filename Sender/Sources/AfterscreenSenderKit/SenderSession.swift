@@ -31,6 +31,8 @@ public struct SenderSnapshot {
     public var qualityTest: QualityTest.Report?
     /// The chosen link did not answer, so the fastest one carries the stream
     public var missingLink: LinkKind?
+    /// This Mac's sound goes to the receiver
+    public var soundOnReceiver = false
 
     public init() {}
 }
@@ -53,9 +55,14 @@ public final class SenderSession {
     private let purpose: Purpose
     private let link: LinkKind?
     private var route: Route?
+    /// Routes over other links, tried when every route over the chosen link fails to connect
+    private var fallback: [Route] = []
     /// Carries only the cursor, so it never waits behind queued frames; the main connection is the fallback
     private var cursorConnection: Connection?
     private var displaySize: DisplaySize
+    private var sound: Bool
+    /// AudioTap, macOS 14.2 and later
+    private var audioTap: AnyObject?
     private var testRun: QualityTestRun?
     private var connection: Connection?
     private var display: VirtualDisplay?
@@ -79,16 +86,52 @@ public final class SenderSession {
     public static var logStats = false
 
     /// `link`: the link to use; nil, or a link that no longer answers, takes the fastest
-    public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil) {
+    public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
+                sound: Bool = false) {
         self.target = target
         self.purpose = purpose
         self.displaySize = displaySize
         self.link = link
+        self.sound = sound
+    }
+
+    /// Playback volume of this Mac's sound on the receiver, 0…1
+    public func setVolume(_ level: Double) {
+        connection?.send(Message(type: .volume, payload: LevelWire.encode(level)))
+    }
+
+    /// Main queue: starts or stops sending this Mac's sound while streaming
+    public func setSound(_ on: Bool) {
+        sound = on
+        guard snapshot.isStreaming else { return }
+        on ? startSound() : stopSound()
+    }
+
+    private func startSound() {
+        guard audioTap == nil, sound, snapshot.peer?.audioPlayback == true else { return }
+        // The cursor channel, opened at the handshake: sound never waits behind frames
+        guard let channel = cursorConnection ?? connection else { return }
+        if #available(macOS 14.2, *) {
+            audioTap = AudioTap(onSamples: { rate, channels, samples in
+                channel.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: rate, channels: channels, samples: samples)))
+            }, onChange: { [weak self] in
+                // A new output device or format: rebuild the tap
+                self?.stopSound()
+                self?.startSound()
+            })
+        }
+        update { $0.soundOnReceiver = audioTap != nil }
+    }
+
+    private func stopSound() {
+        if #available(macOS 14.2, *) { (audioTap as? AudioTap)?.stop() }
+        audioTap = nil
+        update { $0.soundOnReceiver = false }
     }
 
     /// Receiver panel brightness, 0…1
     public func setBrightness(_ level: Double) {
-        connection?.send(Message(type: .brightness, payload: BrightnessWire.encode(level)))
+        connection?.send(Message(type: .brightness, payload: LevelWire.encode(level)))
     }
 
     /// Main queue: switches the virtual display's "looks like" size while streaming
@@ -110,13 +153,22 @@ public final class SenderSession {
                 guard !chosen.routes.isEmpty else { return self.end(L10n.t("No Thunderbolt, USB, Ethernet or Wi-Fi route to \(self.target.name)",
                                                                                   "\(self.target.name)까지 Thunderbolt, USB, 이더넷, Wi-Fi 경로가 없습니다")) }
                 self.update { $0.missingLink = chosen.fellBack ? self.link : nil }
+                self.fallback = chosen.fellBack ? [] : routes.filter { $0.kind != self.link }
                 self.connect(chosen.routes)
             }
         }
     }
 
     private func connect(_ routes: [Route]) {
-        guard let route = routes.first else { return end(L10n.t("Could not reach \(target.name)", "\(target.name)에 연결할 수 없습니다")) }
+        guard let route = routes.first else {
+            guard fallback.isEmpty else {
+                update { $0.missingLink = link }
+                let others = fallback
+                fallback = []
+                return connect(others)
+            }
+            return end(L10n.t("Could not reach \(target.name)", "\(target.name)에 연결할 수 없습니다"))
+        }
         update { $0.state = L10n.t("Connecting via \(LinkLabel.name(route.kind))", "\(LinkLabel.name(route.kind))로 연결 중") }
         Connection.connect(host: route.address, port: target.port,
                            interfaceName: route.kind == .loopback ? nil : route.interface, timeout: 2) { [weak self] result in
@@ -181,6 +233,7 @@ public final class SenderSession {
         cursor = nil
         cursorConnection?.close(reason: reason)
         cursorConnection = nil
+        stopSound()
         display = nil
         connection?.close(reason: reason)
         update {
@@ -327,6 +380,7 @@ public final class SenderSession {
                     $0.isStreaming = true
                     $0.state = L10n.t("Streaming", "스트리밍 중")
                 }
+                self.startSound()
                 self.startTimers()
             }
         }
@@ -433,9 +487,10 @@ public final class SenderSession {
 
     private func logLine() {
         let s = snapshot, r = s.receiver
-        let line = String(format: "[sender] fps %.0f/%.0f/%.0f  %.3f Gb/s  encode %.1f ms  cpu %.1f%%  receiver cpu %.1f%% gpu %.0f%% late %d\n",
+        let line = String(format: "[sender] fps %.0f/%.0f/%.0f  %.3f Gb/s  encode %.1f ms  cpu %.1f%%  receiver cpu %.1f%% gpu %.0f%% late %d  sound %@\n",
                           s.captureFPS, s.sentFPS, r?.displayedFPS ?? 0, s.throughputBitsPerSecond / 1e9, s.encodeMs, s.cpuPercent,
-                          r?.cpuPercent ?? 0, r?.gpuPercent ?? 0, r?.lateFrames ?? 0)
+                          r?.cpuPercent ?? 0, r?.gpuPercent ?? 0, r?.lateFrames ?? 0,
+                          s.soundOnReceiver ? (r?.audioBufferMs.map { String(format: "%.0f ms, %d gaps", $0, r?.audioUnderruns ?? 0) } ?? "no data") : "off")
         FileHandle.standardError.write(Data(line.utf8))
     }
 

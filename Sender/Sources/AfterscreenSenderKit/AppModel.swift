@@ -19,6 +19,9 @@ public final class AppModel: ObservableObject {
     /// Receiver panel brightness; after a change, the slider's value until the receiver reports it
     @Published public private(set) var brightness: Double?
     private var brightnessSetAt = 0.0
+    /// Receiver playback volume, held the same way as brightness
+    @Published public private(set) var volume: Double?
+    private var volumeSetAt = 0.0
 
     public let settings: SenderSettings
     private var session: SenderSession?
@@ -42,6 +45,7 @@ public final class AppModel: ObservableObject {
         paths.pathUpdateHandler = { [weak self] _ in DispatchQueue.main.async { self?.refreshLinks() } }
         paths.start(queue: .global(qos: .utility))
         settings.$displaySize.dropFirst().sink { [weak self] size in self?.session?.setDisplaySize(size) }.store(in: &cancellables)
+        settings.$sound.dropFirst().sink { [weak self] on in self?.session?.setSound(on) }.store(in: &cancellables)
         // Text is picked at render time; a new language redraws the popover
         settings.$language.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         // Published fires before the new value is stored
@@ -80,8 +84,9 @@ public final class AppModel: ObservableObject {
     /// nil is automatic. A display session on another link reconnects over the new one
     public func setLink(_ link: LinkKind?) {
         settings.link = link
+        // Automatic before the links are known: no basis to switch
         guard let session = session, !isTesting, let receiver = receivers.first(where: { $0.name == activeReceiver }),
-              snapshot.link != (link ?? links[receiver.name]?.first) else { return }
+              let target = link ?? links[receiver.name]?.first, snapshot.link != target else { return }
         reconnect = receiver
         let name = link.map { LinkLabel.name($0) } ?? L10n.t("the fastest link", "가장 빠른 링크")
         session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"))
@@ -103,20 +108,24 @@ public final class AppModel: ObservableObject {
             auto = AutoConnect()
         }
         retry?.cancel()
-        let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link)
+        let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link, sound: settings.sound)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.snapshot = s
             if s.isStreaming { self.auto.streamed() }
-            if ProcessInfo.processInfo.systemUptime - self.brightnessSetAt > 1.5, self.brightness != s.receiver?.brightness {
-                self.brightness = s.receiver?.brightness
-            }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - self.brightnessSetAt > 1.5, self.brightness != s.receiver?.brightness { self.brightness = s.receiver?.brightness }
+            if now - self.volumeSetAt > 1.5, self.volume != s.receiver?.volume { self.volume = s.receiver?.volume }
         }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
             // A stop on the iMac counts as a Disconnect here
-            if session?.pausedByReceiver == true { self.auto.userDisconnected() }
+            if session?.pausedByReceiver == true {
+                self.auto.userDisconnected()
+                self.reconnect = nil
+            }
             self.brightness = nil
+            self.volume = nil
             self.session = nil
             self.activeReceiver = nil
             self.lastMessage = reason
@@ -136,6 +145,7 @@ public final class AppModel: ObservableObject {
     /// Pauses automatic connection until the receiver goes away
     public func disconnect() {
         auto.userDisconnected()
+        reconnect = nil
         session?.stop()
     }
 
@@ -143,6 +153,12 @@ public final class AppModel: ObservableObject {
         brightness = level
         brightnessSetAt = ProcessInfo.processInfo.systemUptime
         session?.setBrightness(level)
+    }
+
+    public func setVolume(_ level: Double) {
+        volume = level
+        volumeSetAt = ProcessInfo.processInfo.systemUptime
+        session?.setVolume(level)
     }
 
     public func stopTest() {

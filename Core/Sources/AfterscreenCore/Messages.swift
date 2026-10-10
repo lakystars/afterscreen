@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 4
+    public static let version = 5
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -56,12 +56,15 @@ public struct Welcome: Codable, Equatable {
     public var bc7: Bool
     /// Hardware HEVC Main10 (10-bit) decode, probed with a 4K stream
     public var hevcMain10Decode: Bool
+    /// Plays the sender's sound on its own speakers
+    public var audioPlayback: Bool
     /// Per session: a second connection presenting it carries the cursor, clear of queued frames
     public var channelToken: UInt32
 
     public init(protocolVersion: Int, name: String, modelID: String, marketingName: String, osVersion: String,
                 gpuNames: [String], panelPixels: PixelSize, panelPoints: PixelSize,
-                hevcDecode: Bool, h264Decode: Bool, bc7: Bool, hevcMain10Decode: Bool = false, channelToken: UInt32 = 0) {
+                hevcDecode: Bool, h264Decode: Bool, bc7: Bool, hevcMain10Decode: Bool = false, audioPlayback: Bool = false,
+                channelToken: UInt32 = 0) {
         self.protocolVersion = protocolVersion
         self.name = name
         self.modelID = modelID
@@ -74,6 +77,7 @@ public struct Welcome: Codable, Equatable {
         self.h264Decode = h264Decode
         self.bc7 = bc7
         self.hevcMain10Decode = hevcMain10Decode
+        self.audioPlayback = audioPlayback
         self.channelToken = channelToken
     }
 
@@ -127,9 +131,16 @@ public struct ReceiverStats: Codable, Equatable {
     public var gpuPercent: Double
     /// Panel brightness 0…1; nil when the receiver cannot read it
     public var brightness: Double?
+    /// Sound buffered for playback; nil while no sound arrives
+    public var audioBufferMs: Double?
+    /// Playback volume of the sender's sound, 0…1
+    public var volume: Double?
+    /// Times the sound buffer ran dry this session; each one is an audible gap
+    public var audioUnderruns: Int?
 
     public init(receivedFPS: Double, displayedFPS: Double, uploadMs: Double, decompressMs: Double, lateFrames: Int,
-                cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, brightness: Double?) {
+                cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, brightness: Double?, audioBufferMs: Double? = nil,
+                volume: Double? = nil, audioUnderruns: Int? = nil) {
         self.receivedFPS = receivedFPS
         self.displayedFPS = displayedFPS
         self.uploadMs = uploadMs
@@ -139,6 +150,9 @@ public struct ReceiverStats: Codable, Equatable {
         self.memoryBytes = memoryBytes
         self.gpuPercent = gpuPercent
         self.brightness = brightness
+        self.audioBufferMs = audioBufferMs
+        self.volume = volume
+        self.audioUnderruns = audioUnderruns
     }
 }
 
@@ -257,8 +271,46 @@ public enum ChannelWire {
     }
 }
 
-/// brightness: f32 panel brightness, 0…1
-public enum BrightnessWire {
+/// audio: u32 sample rate, u8 channels, u8 0, then interleaved 16-bit PCM; about 10 ms per packet
+public enum AudioWire {
+    public struct Packet {
+        public var sampleRate: Int
+        public var channels: Int
+        public var samples: [Int16]
+
+        public init(sampleRate: Int, channels: Int, samples: [Int16]) {
+            self.sampleRate = sampleRate
+            self.channels = channels
+            self.samples = samples
+        }
+    }
+
+    public static func encode(sampleRate: Int, channels: Int, samples: [Int16]) -> Data {
+        var w = ByteWriter(capacity: 6 + samples.count * 2)
+        w.u32(UInt32(sampleRate))
+        w.u8(UInt8(clamping: channels))
+        w.u8(0)
+        samples.withUnsafeBytes { w.bytes(Data($0)) }
+        return w.data
+    }
+
+    public static func decode(_ data: Data) throws -> Packet {
+        var r = ByteReader(data)
+        let rate = Int(try r.u32()), channels = Int(try r.u8())
+        _ = try r.u8()
+        let body = r.rest()
+        guard (8_000...192_000).contains(rate), (1...2).contains(channels), body.count % (2 * channels) == 0 else {
+            throw FramingError.invalid("audio packet")
+        }
+        // Copied out: the payload slice need not be 2-byte aligned
+        var samples = [Int16](repeating: 0, count: body.count / 2)
+        samples.withUnsafeMutableBytes { _ = body.copyBytes(to: $0) }
+        return Packet(sampleRate: rate, channels: channels, samples: samples)
+    }
+}
+
+/// brightness, volume: f32 level, 0…1
+public enum LevelWire {
     public static func encode(_ level: Double) -> Data {
         var w = ByteWriter(capacity: 4)
         w.f32(Float(level.isNaN ? 0 : min(1, max(0, level))))

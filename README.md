@@ -4,7 +4,8 @@ Use an older iMac (Late 2013 or newer) as an external display for an Apple Silic
 
 - 5120×2880 at 60 fps on 5K iMacs over Thunderbolt Bridge or USB networking, and over Gigabit Ethernet with moving regions as 4K video
 - Over Wi-Fi, still content stays lossless at native resolution; moving content goes out as video at the rate the link carries
-- Settings for display size, automatic connection and login items; iMac brightness from the Mac
+- Settings for display size, link, sound, menu bar and language (English, Korean); iMac brightness and volume from the Mac
+- The Mac's sound plays on the iMac's speakers (macOS 14.2 or newer on the sender)
 - A quality test that measures the highest resolution and frame rate the link sustains
 - Only Apple frameworks, no third-party dependencies
 
@@ -72,7 +73,7 @@ The iMac switches to a fullscreen picture of the new display. On the receiver:
 - ⌥⌘I toggles the HUD
 - Esc twice stops the session
 
-While streaming, the popover has a brightness slider for the iMac's panel.
+While streaming, the popover has sliders for the iMac's brightness and for the volume of the sound it plays.
 
 ### Settings
 
@@ -84,12 +85,16 @@ Sender (**Settings…** in the popover):
 | Connect automatically | Connects to the receiver you last connected to when it appears, after sleep, and after the link drops. **Disconnect** pauses it until that receiver goes away. |
 | Open at login | Starts Afterscreen at login. |
 | Arrange Displays… | Opens System Settings for arrangement, mirroring and the main display. |
+| Sound | Plays this Mac's sound on the iMac (on by default). The Mac stays silent meanwhile; asks once for System Audio Recording permission; about 1.5 Mbps. |
+| Menu bar | The icon only (default), or also the frame rate and throughput at a fixed width. |
+| Language | System (Korean when it comes first, else English), English or Korean. |
 
 Receiver (**Settings…** in its menu):
 
 | Setting | Choices |
 |---|---|
 | Open at login | Starts the receiver at login (a LaunchAgent, so it works on macOS 10.15). |
+| Language | System, English or Korean. |
 | Accept connections over | Any network, or cables only (Wi-Fi refused). |
 | When the sender disconnects | Show this Mac's desktop, or turn the display off. A stop from the receiver always shows the desktop. |
 

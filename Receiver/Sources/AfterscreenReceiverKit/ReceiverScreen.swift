@@ -12,6 +12,7 @@ public final class ReceiverScreen: StreamDisplay {
 
     private let renderer: StreamRenderer
     private let window: StreamWindow
+    private let audio = AudioPlayer()
     /// Held while a stream is shown: input arrives on the sender, so the iMac would idle into display sleep
     private var awake: NSObjectProtocol?
 
@@ -49,6 +50,7 @@ public final class ReceiverScreen: StreamDisplay {
 
     public func end(reason: String) {
         window.hide()
+        audio.stop()
         if let a = awake { ProcessInfo.processInfo.endActivity(a) }
         awake = nil
     }
@@ -74,6 +76,20 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     public var brightness: Double? { Brightness.level }
+
+    public func playAudio(_ packet: AudioWire.Packet) {
+        audio.play(packet)
+    }
+
+    public var audioBuffered: Double? { audio.bufferedSeconds }
+
+    public var audioUnderruns: Int { audio.underruns }
+
+    public var volume: Double { audio.volume }
+
+    public func setVolume(_ level: Double) {
+        audio.volume = level
+    }
 
     public func setBrightness(_ level: Double) {
         Brightness.set(level)

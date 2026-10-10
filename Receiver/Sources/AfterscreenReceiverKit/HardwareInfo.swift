@@ -103,7 +103,7 @@ public enum HardwareInfo {
                        gpuNames: gpuNames(), panelPixels: panel, panelPoints: points(forPanel: panel),
                        hevcDecode: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
                        h264Decode: VTIsHardwareDecodeSupported(kCMVideoCodecType_H264),
-                       bc7: true, hevcMain10Decode: hevcMain10Decode)
+                       bc7: true, hevcMain10Decode: hevcMain10Decode, audioPlayback: true)
     }
 }
 

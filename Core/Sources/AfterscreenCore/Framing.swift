@@ -10,8 +10,10 @@ public enum MessageType: UInt8, CaseIterable {
     case cursorPos = 0x20
     case cursorImage = 0x21
     case brightness = 0x22
-    /// First message on a second connection that carries only the cursor
+    /// First message on a second connection that carries the cursor and sound
     case cursorChannel = 0x23
+    case audio = 0x24
+    case volume = 0x25
     case probe = 0x30
     case probeResult = 0x31
     case ping = 0x40

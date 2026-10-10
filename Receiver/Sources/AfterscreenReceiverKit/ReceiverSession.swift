@@ -24,6 +24,15 @@ public protocol StreamDisplay: AnyObject {
     var brightness: Double? { get }
     /// Main queue
     func setBrightness(_ level: Double)
+    /// Any queue
+    func playAudio(_ packet: AudioWire.Packet)
+    /// Playback volume of the sender's sound, 0…1
+    var volume: Double { get }
+    /// Main queue
+    func setVolume(_ level: Double)
+    /// Sound buffered for playback in seconds; nil while none plays
+    var audioBuffered: Double? { get }
+    var audioUnderruns: Int { get }
     var gpuMeter: GPUTimeMeter { get }
     var displayedFPS: Double { get }
     var lateFrames: Int { get }
@@ -192,8 +201,13 @@ public final class ReceiverSession {
             }
         case .cursorPos, .cursorImage:
             cursor(m)
+        case .audio:
+            audio(m)
+        case .volume:
+            guard peer != nil, let level = try? LevelWire.decode(m.payload) else { return }
+            DispatchQueue.main.async { [weak self] in self?.display?.setVolume(level) }
         case .brightness:
-            guard peer != nil, let level = try? BrightnessWire.decode(m.payload) else { return }
+            guard peer != nil, let level = try? LevelWire.decode(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(level) }
         case .probe:
             if probeStart == nil { probeStart = Date() }
@@ -215,6 +229,11 @@ public final class ReceiverSession {
         }
     }
 
+    private func audio(_ m: Message) {
+        guard peer != nil, let packet = try? AudioWire.decode(m.payload) else { return }
+        display?.playAudio(packet)
+    }
+
     private func cursor(_ m: Message) {
         if m.type == .cursorPos, let pos = try? CursorWire.parsePos(m.payload) {
             DispatchQueue.main.async { [weak self] in self?.display?.cursor(x: pos.x, y: pos.y, visible: pos.visible) }
@@ -230,6 +249,7 @@ public final class ReceiverSession {
             guard let self = self, let c = c else { return }
             guard self.cursorChannel === c else { return self.adopt(c, first: m) }
             if m.type == .cursorPos || m.type == .cursorImage { self.cursor(m) }
+            if m.type == .audio { self.audio(m) }
         }
         c.start(queue: queue)
         // A connection that never presents the token does not linger
@@ -277,7 +297,9 @@ public final class ReceiverSession {
         let stats = ReceiverStats(receivedFPS: received.ratePerSecond(), displayedFPS: display.displayedFPS,
                                   uploadMs: display.uploadMs, decompressMs: display.decodeMs, lateFrames: display.lateFrames,
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
-                                  gpuPercent: display.gpuMeter.percentSinceLastRead(), brightness: display.brightness)
+                                  gpuPercent: display.gpuMeter.percentSinceLastRead(), brightness: display.brightness,
+                                  audioBufferMs: display.audioBuffered.map { $0 * 1000 }, volume: display.volume,
+                                  audioUnderruns: display.audioUnderruns)
         send(.stats, stats)
     }
 

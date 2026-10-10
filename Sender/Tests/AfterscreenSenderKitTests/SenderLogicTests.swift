@@ -281,6 +281,14 @@ final class MTUAdviceTests: XCTestCase {
         XCTAssertNil(LinkMetrics.mtuAdvice(mtu: 1500, link: .wifi))
         XCTAssertNil(LinkMetrics.mtuAdvice(mtu: nil, link: .usb))
     }
+
+    func testUSBLinkSuggestsReplugForThunderbolt() {
+        XCTAssertEqual(LinkMetrics.usbFallbackAdvice(link: .usb),
+                       "Connected as USB, not Thunderbolt. With a Thunderbolt cable, replug both ends; if it stays USB, sleep or restart either Mac.")
+        XCTAssertNil(LinkMetrics.usbFallbackAdvice(link: .thunderbolt))
+        XCTAssertNil(LinkMetrics.usbFallbackAdvice(link: .ethernet))
+        XCTAssertNil(LinkMetrics.usbFallbackAdvice(link: nil))
+    }
 }
 
 final class LinkMetricsTests: XCTestCase {

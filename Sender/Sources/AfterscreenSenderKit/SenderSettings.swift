@@ -47,6 +47,7 @@ public final class SenderSettings: ObservableObject {
         static let link = "link"
         static let menuBarStats = "menuBarStats"
         static let language = "language"
+        static let sound = "sound"
     }
 
     @Published public var displaySize: DisplaySize {
@@ -60,6 +61,10 @@ public final class SenderSettings: ObservableObject {
             defaults.set(language.rawValue, forKey: Key.language)
             L10n.language = language
         }
+    }
+    /// This Mac's sound plays on the receiver; its own output stays silent meanwhile
+    @Published public var sound: Bool {
+        didSet { defaults.set(sound, forKey: Key.sound) }
     }
     /// Frame rate and throughput next to the menu bar icon
     @Published public var menuBarStats: Bool {
@@ -87,6 +92,7 @@ public final class SenderSettings: ObservableObject {
         displaySize = DisplaySize(rawValue: defaults.string(forKey: Key.displaySize) ?? "") ?? .standard
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
+        sound = defaults.object(forKey: Key.sound) as? Bool ?? true
         language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
         L10n.language = language
     }

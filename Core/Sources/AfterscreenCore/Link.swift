@@ -33,6 +33,11 @@ public enum LinkClassifier {
     }
 
     public static func facts(for name: String) -> InterfaceFacts {
+        facts(for: name, ethernet: ethernetNames())
+    }
+
+    /// `ethernet`: BSD names SystemConfiguration types as Ethernet, listed once for many interfaces
+    public static func facts(for name: String, ethernet: Set<String>) -> InterfaceFacts {
         let chain = ioClassChain(bsdName: name)
         let isThunderboltIP: (String) -> Bool = { ioClassChain(bsdName: $0).contains { $0.contains("ThunderboltIP") } }
         var thunderbolt = chain.contains { $0.contains("ThunderboltIP") }
@@ -43,17 +48,17 @@ public enum LinkClassifier {
                               isThunderbolt: thunderbolt,
                               isUSBNCM: chain.contains { $0.contains("NCM") },
                               isWiFi: chain.contains { $0.contains("80211") || $0.contains("WLAN") },
-                              isEthernet: isEthernetType(name),
+                              isEthernet: ethernet.contains(name),
                               isLoopback: name.hasPrefix("lo"))
     }
 
     /// Wired Ethernet per SystemConfiguration; VM bridges and tunnels are not listed as Ethernet
-    static func isEthernetType(_ name: String) -> Bool {
+    public static func ethernetNames() -> Set<String> {
         let all = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface]) ?? []
-        return all.contains {
-            (SCNetworkInterfaceGetBSDName($0) as String?) == name
-                && (SCNetworkInterfaceGetInterfaceType($0) as String?) == (kSCNetworkInterfaceTypeEthernet as String)
-        }
+        return Set(all.compactMap { i -> String? in
+            guard (SCNetworkInterfaceGetInterfaceType(i) as String?) == (kSCNetworkInterfaceTypeEthernet as String) else { return nil }
+            return SCNetworkInterfaceGetBSDName(i) as String?
+        })
     }
 
     public static func bridgeMembers(ifconfigOutput: String) -> [String] {

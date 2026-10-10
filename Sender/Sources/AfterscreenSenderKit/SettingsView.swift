@@ -38,6 +38,12 @@ public struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle(L10n.t("Open at login", "로그인 시 열기"), isOn: Binding(get: { settings.launchAtLogin }, set: { settings.launchAtLogin = $0 }))
             }
+            Section(L10n.t("Sound", "사운드")) {
+                Toggle(L10n.t("Play this Mac's sound on the iMac", "이 Mac의 소리를 iMac에서 재생"), isOn: $settings.sound)
+                Text(L10n.t("This Mac stays silent while the iMac plays. Asks once for System Audio Recording permission. About 1.5 Mbps.",
+                            "iMac에서 재생하는 동안 이 Mac 스피커는 소리가 나지 않습니다. 처음 한 번 시스템 오디오 녹음 권한을 묻습니다. 약 1.5Mbps를 씁니다."))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section(L10n.t("Menu bar", "메뉴 막대")) {
                 Toggle(L10n.t("Show frame rate and throughput", "프레임과 전송량 표시"), isOn: $settings.menuBarStats)
                 Text(L10n.t("Off: the icon only.", "끄면 아이콘만 보입니다.")).font(.caption).foregroundStyle(.secondary)

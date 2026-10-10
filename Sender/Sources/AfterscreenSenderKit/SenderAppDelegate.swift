@@ -26,8 +26,15 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: RunLoop.main).sink { [weak self] in
                 guard let self = self else { return }
                 self.statusItem.button?.title = self.model.statusTitle
+                self.statusItem.length = self.model.settings.menuBarStats && self.model.snapshot.isStreaming ? self.statsWidth : NSStatusItem.variableLength
             }.store(in: &cancellables)
     }
+
+    /// The widest stats title: M is wider than G, and digits wider than "."
+    private lazy var statsWidth: CGFloat = {
+        let font = statusItem.button?.font ?? NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        return ceil(("▭ ⇄ 60fps · 888M" as NSString).size(withAttributes: [.font: font]).width) + 12
+    }()
 
     @objc private func toggle() {
         guard let button = statusItem.button else { return }

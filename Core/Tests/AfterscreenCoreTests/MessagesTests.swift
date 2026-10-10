@@ -47,12 +47,12 @@ final class MessagesTests: XCTestCase {
         XCTAssertThrowsError(try ChannelWire.decode(Data([1])))
     }
 
-    func testBrightnessWireClampsToTheUnitRange() throws {
-        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(0.25)), 0.25)
-        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(1.7)), 1)
-        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(-1)), 0)
-        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(.nan)), 0)
-        XCTAssertThrowsError(try BrightnessWire.decode(Data([1, 2])))
+    func testLevelWireClampsToTheUnitRange() throws {
+        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(0.25)), 0.25)
+        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(1.7)), 1)
+        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(-1)), 0)
+        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(.nan)), 0)
+        XCTAssertThrowsError(try LevelWire.decode(Data([1, 2])))
     }
 
     func testPingRoundTripAndTruncation() throws {
@@ -90,5 +90,24 @@ final class L10nTests: XCTestCase {
         XCTAssertEqual(L10n.t("Throughput", "전송량"), "전송량")
         L10n.language = .english
         XCTAssertEqual(L10n.t("Throughput", "전송량"), "Throughput")
+    }
+}
+
+final class AudioWireTests: XCTestCase {
+    func testPacketRoundTrip() throws {
+        let samples: [Int16] = [1, -1, 300, -300, 32767, -32768]
+        let packet = try AudioWire.decode(AudioWire.encode(sampleRate: 48_000, channels: 2, samples: samples))
+        XCTAssertEqual(packet.sampleRate, 48_000)
+        XCTAssertEqual(packet.channels, 2)
+        XCTAssertEqual(packet.samples, samples)
+    }
+
+    func testMalformedPacketsAreRejected() {
+        XCTAssertThrowsError(try AudioWire.decode(AudioWire.encode(sampleRate: 48_000, channels: 3, samples: [0, 0, 0])))
+        XCTAssertThrowsError(try AudioWire.decode(AudioWire.encode(sampleRate: 1_000, channels: 2, samples: [0, 0])))
+        var odd = AudioWire.encode(sampleRate: 48_000, channels: 2, samples: [0, 0])
+        odd.append(1)
+        XCTAssertThrowsError(try AudioWire.decode(odd), "half a sample")
+        XCTAssertThrowsError(try AudioWire.decode(AudioWire.encode(sampleRate: 48_000, channels: 2, samples: [0])), "half a frame")
     }
 }

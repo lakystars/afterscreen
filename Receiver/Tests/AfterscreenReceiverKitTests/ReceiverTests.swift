@@ -69,6 +69,13 @@ final class FakeDisplay: StreamDisplay {
     var brightnessSet: [Double] = []
     var cursors: [Float] = []
     func setBrightness(_ level: Double) { record { brightnessSet.append(level) } }
+    var audioPackets: [AudioWire.Packet] = []
+    func playAudio(_ packet: AudioWire.Packet) { record { audioPackets.append(packet) } }
+    var volume = 0.6
+    var volumeSet: [Double] = []
+    func setVolume(_ level: Double) { record { volumeSet.append(level) } }
+    var audioBuffered: Double? { nil }
+    var audioUnderruns: Int { 0 }
     func cursor(x: Float, y: Float, visible: Bool) { record { cursors.append(x) } }
     func cursorImage(_ image: CursorImage) {}
 }
@@ -183,10 +190,17 @@ final class ReceiverSessionTests: XCTestCase {
     }
 
     func testBrightnessBeforeTheHandshakeIsIgnored() throws {
-        client.send(Message(type: .brightness, payload: BrightnessWire.encode(0.1)))
+        client.send(Message(type: .brightness, payload: LevelWire.encode(0.1)))
         _ = try token()
         Thread.sleep(forTimeInterval: 0.2)
         XCTAssertTrue(display.read { display.brightnessSet.isEmpty })
+    }
+
+    func testVolumeMessageSetsThePlaybackVolume() throws {
+        _ = try token()
+        client.send(Message(type: .volume, payload: LevelWire.encode(0.3)))
+        waitForDisplay { [display] in !display.volumeSet.isEmpty }
+        XCTAssertEqual(display.read { display.volumeSet.first } ?? 0, 0.3, accuracy: 1e-6)
     }
 
     func testStopOnTheReceiverAsksTheSenderNotToReconnect() throws {
@@ -197,7 +211,7 @@ final class ReceiverSessionTests: XCTestCase {
 
     func testBrightnessMessageSetsThePanel() throws {
         _ = try token()
-        client.send(Message(type: .brightness, payload: BrightnessWire.encode(0.8)))
+        client.send(Message(type: .brightness, payload: LevelWire.encode(0.8)))
         waitForDisplay { [display] in !display.brightnessSet.isEmpty }
         XCTAssertEqual(display.read { display.brightnessSet.first } ?? 0, 0.8, accuracy: 1e-6)
     }
@@ -214,6 +228,7 @@ final class ReceiverSessionTests: XCTestCase {
         client.send(try! JSONWire.message(.config, tileConfig))
         wait(for: [e], timeout: 3)
         XCTAssertEqual(stats?.brightness, 0.4)
+        XCTAssertEqual(stats?.volume, 0.6)
     }
 
     private func token() throws -> UInt32 {
@@ -250,6 +265,14 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(display.read { display.tiles.count }, 1)
         display.tileGate = nil
         for _ in 0..<10 { gate.signal() }
+    }
+
+    func testSoundOnTheChannelReachesTheSpeakers() throws {
+        let channel = try channel(try token())
+        defer { channel.close(reason: "test end") }
+        channel.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: 48_000, channels: 2, samples: [1, 2, 3, 4])))
+        waitForDisplay { [display] in display.audioPackets.count == 1 }
+        XCTAssertEqual(display.read { display.audioPackets.first?.samples }, [1, 2, 3, 4])
     }
 
     func testChannelWithAnotherTokenIsRefused() throws {

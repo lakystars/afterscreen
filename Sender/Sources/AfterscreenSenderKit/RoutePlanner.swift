@@ -62,12 +62,32 @@ public enum RoutePlanner {
         return chosen.isEmpty ? (routes, true) : (chosen, false)
     }
 
-    /// Routes to a receiver over every link that answers now
+    /// Routes to a receiver over every link that answers now; works off the calling thread
     public static func routes(to receiver: DiscoveredReceiver, completion: @escaping ([Route]) -> Void) {
-        let local = currentInterfaces().filter { $0.kind != .unsupported }
-        lookup(host: receiver.host, on: local.map(\.name)) { found in
-            completion(plan(local: local, remote: found + receiver.addresses.map { RemoteAddress($0) }))
+        DispatchQueue.global(qos: .userInitiated).async {
+            let local = currentInterfaces().filter { $0.kind != .unsupported }
+            lookup(host: receiver.host, on: local.map(\.name)) { found in
+                completion(plan(local: local, remote: found + receiver.addresses.map { RemoteAddress($0) }))
+            }
         }
+    }
+
+    /// Link kind per interface name, for 30 s: telling a Thunderbolt bridge apart runs ifconfig
+    private static var kinds: (until: TimeInterval, byName: [String: LinkKind]) = (0, [:])
+    private static let kindsLock = NSLock()
+
+    static func kind(of name: String, ethernet: () -> Set<String>) -> LinkKind {
+        let now = ProcessInfo.processInfo.systemUptime
+        kindsLock.lock()
+        if now > kinds.until { kinds = (now + 30, [:]) }
+        let known = kinds.byName[name]
+        kindsLock.unlock()
+        if let known = known { return known }
+        let kind = LinkClassifier.classify(LinkClassifier.facts(for: name, ethernet: ethernet()))
+        kindsLock.lock()
+        kinds.byName[name] = kind
+        kindsLock.unlock()
+        return kind
     }
 
     /// IPv4 addresses of an mDNS host on each of `interfaces`, gathered for `wait` seconds.
@@ -107,6 +127,7 @@ public enum RoutePlanner {
         guard getifaddrs(&list) == 0 else { return [] }
         defer { freeifaddrs(list) }
         var result: [LocalInterface] = []
+        var ethernet: Set<String>?
         var cursor = list
         while let ifa = cursor {
             cursor = ifa.pointee.ifa_next
@@ -115,7 +136,10 @@ public enum RoutePlanner {
                   (ifa.pointee.ifa_flags & UInt32(IFF_UP)) != 0,
                   (ifa.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
             let name = String(cString: ifa.pointee.ifa_name)
-            let kind = LinkClassifier.classify(LinkClassifier.facts(for: name))
+            let kind = kind(of: name) {
+                if ethernet == nil { ethernet = LinkClassifier.ethernetNames() }
+                return ethernet!
+            }
             result.append(LocalInterface(name: name, ip: string(addr), netmask: string(mask), kind: kind))
         }
         return result
