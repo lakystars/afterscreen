@@ -4,7 +4,7 @@ Turn an iMac into an extended or mirrored display for an Apple Silicon Mac, at t
 
 - **5K at 60 fps** over Thunderbolt Bridge or USB networking, with no video codec on the path: the picture goes out as GPU texture blocks that the iMac's GPU draws directly.
 - **Slower links keep text sharp.** Still content stays lossless at native resolution; only the parts that move go out as HEVC or H.264 video.
-- **The Mac's sound plays on the iMac's speakers** at the Mac's own volume, with iMac brightness control in the menu bar.
+- **The Mac's sound plays on the iMac's speakers** at the Mac's own volume, and the iMac's brightness follows the Mac's.
 - **Picture quality tools**: gradient smoothing for 8-bit banding, a 10-bit output, bicubic scaling for reduced streams.
 - **A quality test** that measures the highest resolution and frame rate your link sustains.
 - **English and Korean** interface.
@@ -65,7 +65,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 
 **Sound and controls**
 - The Mac's sound plays on the iMac's speakers (the Mac stays silent meanwhile), with a switch at the top of the menu. The iMac's volume and mute follow the Mac's volume keys and menu bar, and go back to the iMac's own level when the sound stops.
-- iMac brightness slider. The value is remembered and applied at every connection, full brightness by default.
+- The iMac's brightness follows the Mac's built-in display: brightness keys, Control Center and auto-brightness. The two panels are matched in nits, not by slider position, from peaks each Mac reports: the MacBook's brightness controller, and the iMac's own luminance measured once at launch. It stays where it is after a disconnect; a Mac without a built-in display leaves the iMac's own.
 - The pointer travels on a connection of its own and never waits behind frames.
 - Disconnecting, from either Mac or by quitting, plays the power-off over the live picture and sound; the sound comes back to the Mac as the iMac's screen turns black.
 
@@ -162,7 +162,7 @@ Sender (**Settings…** in the menu):
 | Menu bar | The icon only (default), or also the frame rate and throughput. |
 | Language | System, English or Korean. |
 
-In the menu while streaming: sound on the iMac, iMac brightness, the link, Use as (Extend or Mirror), and Smooth gradients (medium by default).
+In the menu while streaming: sound on the iMac, the iMac brightness it follows, the link, Use as (Extend or Mirror), and Smooth gradients (medium by default).
 
 Receiver (**Settings…** in its menu):
 

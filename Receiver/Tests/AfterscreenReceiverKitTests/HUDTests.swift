@@ -20,7 +20,7 @@ final class HUDContentTests: XCTestCase {
             t.throughput.push(754e6)
         }
         t.receiver = ReceiverStats(receivedFPS: 60, displayedFPS: 58, uploadMs: 0.4, decompressMs: 0, lateFrames: 0,
-                                   cpuPercent: 8, memoryBytes: 70 << 20, gpuPercent: 22, brightness: 1)
+                                   cpuPercent: 8, memoryBytes: 70 << 20, gpuPercent: 22)
         t.deband = .normal
         return t
     }

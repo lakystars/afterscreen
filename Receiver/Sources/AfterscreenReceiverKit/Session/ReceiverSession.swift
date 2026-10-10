@@ -35,10 +35,9 @@ public protocol StreamDisplay: AnyObject {
     func decodeVideo(avcc: Data) -> Bool
     func cursor(x: Float, y: Float, visible: Bool)
     func cursorImage(_ image: CursorImage)
-    /// Panel brightness 0…1; nil when unreadable
-    var brightness: Double? { get }
     /// Main queue
-    func setBrightness(_ level: Double)
+    /// Matches the sender's nits on this panel when it can
+    func setBrightness(_ light: PanelLight)
     /// Any queue
     func playAudio(_ packet: AudioWire.Packet)
     /// Main queue: output volume and mute follow the sender's
@@ -253,8 +252,8 @@ public final class ReceiverSession {
                 if let ms = stats.latencyMs { $0.latency.push(ms) }
             }
         case .brightness:
-            guard currentPeer != nil, let level = try? LevelWire.decode(m.payload) else { return }
-            DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(level) }
+            guard currentPeer != nil, let light = try? BrightnessWire.decode(m.payload) else { return }
+            DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(light) }
         case .probe:
             if probeStart == nil { probeStart = Date() }
             if m.flags & ProbeFlags.end != 0 {
@@ -362,7 +361,7 @@ public final class ReceiverSession {
         let stats = ReceiverStats(receivedFPS: received.ratePerSecond(), displayedFPS: display.displayedFPS,
                                   uploadMs: display.uploadMs, decompressMs: display.decodeMs, lateFrames: display.lateFrames,
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
-                                  gpuPercent: display.gpuMeter.percentSinceLastRead(), brightness: display.brightness,
+                                  gpuPercent: display.gpuMeter.percentSinceLastRead(),
                                   audioBufferMs: display.audioBuffered.map { $0 * 1000 },
                                   audioUnderruns: display.audioUnderruns)
         record {

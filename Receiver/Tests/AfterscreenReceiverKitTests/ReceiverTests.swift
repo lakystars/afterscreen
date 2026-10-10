@@ -69,10 +69,9 @@ final class FakeDisplay: StreamDisplay {
     }
     func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool { record { log.append("params") }; return true }
     func decodeVideo(avcc: Data) -> Bool { record { videoFrames += 1; log.append("video") }; return true }
-    var brightness: Double? = 0.4
-    var brightnessSet: [Double] = []
+    var brightnessSet: [PanelLight] = []
     var cursors: [Float] = []
-    func setBrightness(_ level: Double) { record { brightnessSet.append(level) } }
+    func setBrightness(_ light: PanelLight) { record { brightnessSet.append(light) } }
     var audioPackets: [AudioWire.Packet] = []
     func playAudio(_ packet: AudioWire.Packet) { record { audioPackets.append(packet) } }
     var outputsFollowed: [OutputLevel?] = []
@@ -199,7 +198,7 @@ final class ReceiverSessionTests: XCTestCase {
     }
 
     func testBrightnessBeforeTheHandshakeIsIgnored() throws {
-        client.send(Message(type: .brightness, payload: LevelWire.encode(0.1)))
+        client.send(Message(type: .brightness, payload: BrightnessWire.encode(PanelLight(nits: 50, level: 0.3))))
         _ = try token()
         Thread.sleep(forTimeInterval: 0.2)
         XCTAssertTrue(display.read { display.brightnessSet.isEmpty })
@@ -362,12 +361,12 @@ final class ReceiverSessionTests: XCTestCase {
 
     func testBrightnessMessageSetsThePanel() throws {
         _ = try token()
-        client.send(Message(type: .brightness, payload: LevelWire.encode(0.8)))
+        client.send(Message(type: .brightness, payload: BrightnessWire.encode(PanelLight(nits: 260, level: 0.56))))
         waitForDisplay { [display] in !display.brightnessSet.isEmpty }
-        XCTAssertEqual(display.read { display.brightnessSet.first } ?? 0, 0.8, accuracy: 1e-6)
+        XCTAssertEqual(display.read { display.brightnessSet.first?.nits } ?? 0, 260, accuracy: 1e-3, "nits, mapped by the display")
     }
 
-    func testStatsReportBrightness() throws {
+    func testStatsReachTheSenderAndTheHUD() throws {
         let e = expectation(description: "stats")
         e.assertForOverFulfill = false
         var stats: ReceiverStats?
@@ -378,7 +377,7 @@ final class ReceiverSessionTests: XCTestCase {
         }
         client.send(try! JSONWire.message(.config, tileConfig))
         wait(for: [e], timeout: 3)
-        XCTAssertEqual(stats?.brightness, 0.4)
+        XCTAssertNotNil(stats)
         XCTAssertEqual(session.telemetry.receiver, stats, "the HUD shows what the sender is told")
         XCTAssertEqual(session.telemetry.shownFPS.values.count, 1)
     }

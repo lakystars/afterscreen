@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 9
+    public static let version = 10
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -131,15 +131,13 @@ public struct ReceiverStats: Codable, Equatable {
     public var cpuPercent: Double
     public var memoryBytes: UInt64
     public var gpuPercent: Double
-    /// Panel brightness 0…1; nil when the receiver cannot read it
-    public var brightness: Double?
     /// Sound buffered for playback; nil while no sound arrives
     public var audioBufferMs: Double?
     /// Per session; each underrun is an audible gap
     public var audioUnderruns: Int?
 
     public init(receivedFPS: Double, displayedFPS: Double, uploadMs: Double, decompressMs: Double, lateFrames: Int,
-                cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, brightness: Double?, audioBufferMs: Double? = nil,
+                cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, audioBufferMs: Double? = nil,
                 audioUnderruns: Int? = nil) {
         self.receivedFPS = receivedFPS
         self.displayedFPS = displayedFPS
@@ -149,7 +147,6 @@ public struct ReceiverStats: Codable, Equatable {
         self.cpuPercent = cpuPercent
         self.memoryBytes = memoryBytes
         self.gpuPercent = gpuPercent
-        self.brightness = brightness
         self.audioBufferMs = audioBufferMs
         self.audioUnderruns = audioUnderruns
     }
@@ -398,18 +395,32 @@ public enum AudioWire {
     }
 }
 
-/// brightness: f32 level, 0…1
-public enum LevelWire {
-    public static func encode(_ level: Double) -> Data {
-        var w = ByteWriter(capacity: 4)
-        w.f32(Float(level.isNaN ? 0 : min(1, max(0, level))))
+/// Sender panel's light: nits when known, and the slider level
+public struct PanelLight: Equatable {
+    public var nits: Double?
+    public var level: Double
+
+    public init(nits: Double?, level: Double) {
+        self.nits = nits
+        self.level = level
+    }
+}
+
+/// brightness: f32 nits (negative: unknown), f32 slider level 0…1
+public enum BrightnessWire {
+    static let nitsLimit = 10_000.0
+
+    public static func encode(_ light: PanelLight) -> Data {
+        var w = ByteWriter(capacity: 8)
+        w.f32(Float(light.nits.map { $0.isNaN ? -1 : min(nitsLimit, max(0, $0)) } ?? -1))
+        w.f32(Float(light.level.isNaN ? 0 : min(1, max(0, light.level))))
         return w.data
     }
 
-    public static func decode(_ data: Data) throws -> Double {
+    public static func decode(_ data: Data) throws -> PanelLight {
         var r = ByteReader(data)
-        let v = Double(try r.f32())
-        return v.isNaN ? 0 : min(1, max(0, v))
+        let nits = Double(try r.f32()), level = Double(try r.f32())
+        return PanelLight(nits: nits >= 0 && nits.isFinite ? min(nitsLimit, nits) : nil, level: level.isNaN ? 0 : min(1, max(0, level)))
     }
 }
 

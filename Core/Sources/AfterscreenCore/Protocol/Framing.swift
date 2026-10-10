@@ -9,6 +9,7 @@ public enum MessageType: UInt8, CaseIterable {
     case videoFrame = 0x12
     case cursorPos = 0x20
     case cursorImage = 0x21
+    /// Sender's panel light; the receiver matches its nits
     case brightness = 0x22
     /// Opens the second connection carrying cursor and sound
     case cursorChannel = 0x23

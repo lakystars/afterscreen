@@ -19,9 +19,9 @@ final class MessagesTests: XCTestCase {
         try roundTrip(StreamConfig(path: .tile, streamPixels: PixelSize(width: 5120, height: 2880),
                                    video: nil, linkKind: .ethernet))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
-                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: 0.7))
+                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, audioBufferMs: 30, audioUnderruns: 0))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
-                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: nil))
+                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18))
         try roundTrip(SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
                                   latencyMs: 1.0, jitterMs: 0.1, retransmitPercent: 0, cableScore: 100,
                                   captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 11, compressionRatio: 1,
@@ -61,12 +61,14 @@ final class MessagesTests: XCTestCase {
         XCTAssertThrowsError(try ChannelWire.decode(Data([1])))
     }
 
-    func testLevelWireClampsToTheUnitRange() throws {
-        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(0.25)), 0.25)
-        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(1.7)), 1)
-        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(-1)), 0)
-        XCTAssertEqual(try LevelWire.decode(LevelWire.encode(.nan)), 0)
-        XCTAssertThrowsError(try LevelWire.decode(Data([1, 2])))
+    func testBrightnessWireCarriesNitsWhenKnownAndTheLevel() throws {
+        let light = try BrightnessWire.decode(BrightnessWire.encode(PanelLight(nits: 259.7, level: 0.5625)))
+        XCTAssertEqual(light.nits ?? 0, 259.7, accuracy: 1e-3)
+        XCTAssertEqual(light.level, 0.5625, accuracy: 1e-6)
+        XCTAssertNil(try BrightnessWire.decode(BrightnessWire.encode(PanelLight(nits: nil, level: 0.3))).nits, "unknown peak: level only")
+        XCTAssertNil(try BrightnessWire.decode(BrightnessWire.encode(PanelLight(nits: .nan, level: 0.3))).nits)
+        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(PanelLight(nits: 1e6, level: 7))).level, 1)
+        XCTAssertThrowsError(try BrightnessWire.decode(Data([1, 2, 3, 4])))
     }
 
     func testOutputLevelWireRoundTripsAndClamps() throws {

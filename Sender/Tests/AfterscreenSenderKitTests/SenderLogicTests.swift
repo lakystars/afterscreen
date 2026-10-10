@@ -98,6 +98,13 @@ final class CursorNormalizeTests: XCTestCase {
         XCTAssertTrue(r.visible)
     }
 
+    func testBrightnessFollowsRealChangesNotSensorNoise() {
+        XCTAssertTrue(SenderSession.brightnessChanged(0.5, from: nil), "first reading goes out")
+        XCTAssertFalse(SenderSession.brightnessChanged(0.502, from: 0.5))
+        XCTAssertTrue(SenderSession.brightnessChanged(0.45, from: 0.5))
+        XCTAssertTrue(SenderSession.brightnessChanged(0, from: 0.0625), "down to the lowest step")
+    }
+
     func testOutsideIsHidden() {
         XCTAssertFalse(CursorTracker.normalize(point: CGPoint(x: 100, y: 100), displayBounds: bounds).visible)
         XCTAssertFalse(CursorTracker.normalize(point: CGPoint(x: 1800 + 2560, y: 0), displayBounds: bounds).visible)

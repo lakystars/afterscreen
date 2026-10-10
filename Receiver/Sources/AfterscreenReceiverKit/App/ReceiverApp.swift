@@ -54,6 +54,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         statusItem.menu = menu
 
         screen = ReceiverScreen(windowed: CommandLine.arguments.contains("--windowed"))
+        if let peak = screen?.panelPeakNits { FileHandle.standardError.write(Data("[receiver] Panel peak \(Int(peak.rounded())) nits\n".utf8)) }
         screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
         screen?.onSettingsRequest = { [weak self] in self?.openSettings(overStream: true) }
         screen?.onRelinkTimeout = { [weak self] in self?.sleepDisplayIfIdle() }

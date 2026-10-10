@@ -38,6 +38,8 @@ public struct SenderSnapshot {
     public var soundOnReceiver = false
     /// Receiver output's level; nil while it keeps its own
     public var outputLevel: OutputLevel?
+    /// Receiver panel's brightness; nil while it keeps its own
+    public var brightness: Double?
 
     public init() {}
 
@@ -77,9 +79,8 @@ public final class SenderSession {
     private var displaySize: DisplaySize
     private var sound: Bool
     private var deband: Deband
-    /// Panel brightness, sent once the stream shows (display awake)
-    /// nil leaves the panel as is
-    private var brightness: Double?
+    /// Last brightness sent; the receiver's panel follows this Mac's
+    private var brightnessSent: Double?
     /// Ignored by the quality test, which measures the panel
     private let resolution: StreamResolution
     private let role: DisplayRole
@@ -120,7 +121,7 @@ public final class SenderSession {
 
     /// `link`: link to use; nil or unreachable uses the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
-                sound: Bool = false, deband: Deband = .normal, brightness: Double? = nil, resolution: StreamResolution = .panel,
+                sound: Bool = false, deband: Deband = .normal, resolution: StreamResolution = .panel,
                 role: DisplayRole = .extend, fit: MirrorFit = .mac) {
         self.target = target
         self.purpose = purpose
@@ -128,7 +129,6 @@ public final class SenderSession {
         self.link = link
         self.sound = sound
         self.deband = deband
-        self.brightness = brightness
         self.resolution = resolution
         self.role = role
         self.fit = fit
@@ -195,10 +195,22 @@ public final class SenderSession {
         (cursorConnection ?? connection)?.send(Message(type: .volume, payload: OutputLevelWire.encode(level)))
     }
 
-    /// Receiver panel brightness, 0…1
-    public func setBrightness(_ level: Double) {
-        brightness = level
-        connection?.send(Message(type: .brightness, payload: LevelWire.encode(level)))
+    /// Receiver's panel takes this Mac's luminance, in nits
+    /// Not the slider: panels map the slider differently
+    /// Change judged on the slider; dim nits steps are tiny
+    /// Polled: macOS posts no public brightness change
+    /// No built-in panel: the receiver keeps its own
+    private func followBrightness() {
+        guard let panel = PanelBrightness.builtIn, SenderSession.brightnessChanged(panel.level, from: brightnessSent) else { return }
+        brightnessSent = panel.level
+        update { $0.brightness = panel.level }
+        let light = PanelLight(nits: PanelBrightness.builtInPeakNits.map { panel.linear * $0 }, level: panel.level)
+        connection?.send(Message(type: .brightness, payload: BrightnessWire.encode(light)))
+    }
+
+    /// Steps below 0.4% are sensor noise, not a change
+    static func brightnessChanged(_ level: Double, from sent: Double?) -> Bool {
+        sent.map { abs($0 - level) >= 0.004 } ?? true
     }
 
     /// Main queue: switches the virtual display's "looks like" size
@@ -371,7 +383,7 @@ public final class SenderSession {
     }
 
     /// Picks the path and size, then starts the picture
-    /// Mirror waits up to 2 s for a main display change
+    /// Waits up to 2 s for a changing main display
     /// For example, a virtual display that was main just left
     private func configure(link: LinkKind, gbps: Double, welcome: Welcome, attempt: Int = 0) {
         guard !ended else { return }
@@ -536,7 +548,6 @@ public final class SenderSession {
                 }
                 self.startSound()
                 self.sendOutputLevel(playing: self.audioTap != nil)
-                if let level = self.brightness { self.setBrightness(level) }
                 self.startTimers()
             }
         }
@@ -589,6 +600,8 @@ public final class SenderSession {
 
     private func startTimers() {
         timers.append(DispatchSource.repeating(on: .main, every: 1, after: 1) { [weak self] in self?.sampleTelemetry() })
+        // Brightness keys animate; 5 Hz keeps the iMac close behind
+        timers.append(DispatchSource.repeating(on: .main, every: 0.2) { [weak self] in self?.followBrightness() })
         lastSample = Date()
     }
 

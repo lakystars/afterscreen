@@ -16,10 +16,6 @@ public final class AppModel: ObservableObject {
     @Published public var isTesting = false
     /// Links that reach each receiver now, fastest first
     @Published public private(set) var links: [String: [LinkKind]] = [:]
-    /// Receiver panel brightness
-    /// After a change: slider value until the receiver reports it
-    @Published public private(set) var brightness: Double?
-    private var brightnessSetAt = 0.0
 
     public let settings: SenderSettings
     private var session: SenderSession?
@@ -136,14 +132,12 @@ public final class AppModel: ObservableObject {
         }
         retry?.cancel()
         let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link, sound: settings.sound,
-                                    deband: settings.deband, brightness: settings.brightness, resolution: settings.streamResolution,
+                                    deband: settings.deband, resolution: settings.streamResolution,
                                     role: settings.displayRole, fit: settings.mirrorFit)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.snapshot = s
             if s.isStreaming { self.auto.streamed() }
-            let now = ProcessInfo.processInfo.systemUptime
-            if now - self.brightnessSetAt > 1.5, self.brightness != s.receiver?.brightness { self.brightness = s.receiver?.brightness }
         }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
@@ -152,7 +146,6 @@ public final class AppModel: ObservableObject {
                 self.auto.userDisconnected()
                 self.reconnect = nil
             }
-            self.brightness = nil
             self.session = nil
             self.activeReceiver = nil
             self.lastMessage = reason
@@ -186,13 +179,6 @@ public final class AppModel: ObservableObject {
         guard session != nil else { return done() }
         quitDone = done
         disconnect()
-    }
-
-    public func setBrightness(_ level: Double) {
-        brightness = level
-        brightnessSetAt = ProcessInfo.processInfo.systemUptime
-        settings.brightness = level
-        session?.setBrightness(level)
     }
 
     public func setDeband(_ level: Deband) {

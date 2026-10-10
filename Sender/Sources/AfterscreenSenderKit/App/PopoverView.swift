@@ -158,7 +158,7 @@ private struct SoundCard: View {
         }
     }
 
-    /// e.g. "Sent to the iMac · volume 44% · 30 ms"
+    /// "Sent to the iMac · volume 44% · 30 ms"
     private static func status(_ s: SenderSnapshot) -> String {
         var parts = [L10n.t("Sent to the iMac", "iMac으로 보내는 중")]
         if let level = s.outputLevel {
@@ -367,13 +367,15 @@ public struct PopoverView: View {
                     .foregroundStyle(s.isStreaming ? .green : .secondary)
             }
             SoundCard(model: model)
-            if let level = model.brightness {
+            if let level = s.brightness {
                 Card(title: L10n.t("iMac brightness", "iMac 밝기")) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "sun.min").foregroundStyle(.secondary)
-                        Slider(value: Binding(get: { level }, set: { model.setBrightness($0) }), in: 0...1)
+                    HStack(spacing: 6) {
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
+                        Text(L10n.t("Follows this Mac · \(Int((level * 100).rounded()))%", "이 Mac 밝기를 따름 · \(Int((level * 100).rounded()))%"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
+                    .help(L10n.t("The iMac's panel follows this Mac's brightness keys, Control Center and auto-brightness; it stays as it is after you disconnect",
+                                 "iMac 밝기가 이 Mac의 밝기 키, 제어 센터, 자동 밝기를 따릅니다. 연결을 끊어도 그 밝기로 둡니다"))
                 }
             }
             Card(title: StatName.connection) {

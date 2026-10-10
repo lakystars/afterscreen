@@ -108,7 +108,6 @@ public final class SenderSettings: ObservableObject {
         static let language = "language"
         static let sound = "sound"
         static let deband = "deband"
-        static let brightness = "brightness"
         static let streamResolution = "streamResolution"
         static let displayRole = "displayRole"
         static let mirrorFit = "mirrorFit"
@@ -146,12 +145,6 @@ public final class SenderSettings: ObservableObject {
         didSet { defaults.set(streamResolution.rawValue, forKey: Key.streamResolution) }
     }
 
-    /// iMac panel brightness applied at stream start
-    /// macOS can restore a dimmer level on wake
-    @Published public var brightness: Double {
-        didSet { defaults.set(brightness, forKey: Key.brightness) }
-    }
-
     /// Frame rate and throughput next to the menu bar icon
     @Published public var menuBarStats: Bool {
         didSet { defaults.set(menuBarStats, forKey: Key.menuBarStats) }
@@ -181,7 +174,6 @@ public final class SenderSettings: ObservableObject {
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
         sound = defaults.object(forKey: Key.sound) as? Bool ?? true
-        brightness = defaults.object(forKey: Key.brightness) as? Double ?? 1
         streamResolution = defaults.enumValue(forKey: Key.streamResolution, default: .auto)
         deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
         language = defaults.enumValue(forKey: Key.language, default: .system)

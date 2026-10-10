@@ -167,8 +167,6 @@ public final class ReceiverScreen: StreamDisplay {
         window.setCursorImage(image)
     }
 
-    public var brightness: Double? { Brightness.level }
-
     public func playAudio(_ packet: AudioWire.Packet) {
         audio.play(packet)
     }
@@ -186,7 +184,19 @@ public final class ReceiverScreen: StreamDisplay {
         renderer.setDeband(level)
     }
 
-    public func setBrightness(_ level: Double) {
-        Brightness.set(level)
+    public func setBrightness(_ light: PanelLight) {
+        guard let nits = light.nits, let peak = panelPeakNits else { return PanelBrightness.set(light.level) }
+        PanelBrightness.set(nits: nits, peak: peak)
+    }
+
+    private static let peakKey = "panelPeakNits"
+
+    /// This panel's peak in nits, measured once and kept
+    /// Too dim to measure yet: the sender's slider stands in
+    public var panelPeakNits: Double? {
+        if let kept = UserDefaults.standard.object(forKey: ReceiverScreen.peakKey) as? Double { return kept }
+        guard let measured = PanelBrightness.measuredPeakNits(CGMainDisplayID()) else { return nil }
+        UserDefaults.standard.set(measured, forKey: ReceiverScreen.peakKey)
+        return measured
     }
 }
