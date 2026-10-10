@@ -163,6 +163,43 @@ final class PathPolicyTests: XCTestCase {
         XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: nil, tileBytes: 4096), 16)
     }
 
+    func testAutomaticResolutionSendsFourFifthsOverWiFiOnly() {
+        let retina4K = PixelSize(width: 4096, height: 2304)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .wifi, resolution: .auto), retina4K)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .ethernet, resolution: .auto), fiveK)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .thunderbolt, resolution: .reduced), retina4K)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .wifi, resolution: .panel), fiveK)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: retina4K, link: .wifi, resolution: .auto), PixelSize(width: 3276, height: 1840),
+                       "a 4K iMac: whole blocks of 4")
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.07, welcome: welcome(panel: fiveK), resolution: .auto)?.streamPixels, retina4K)
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.07, welcome: welcome(panel: fiveK))?.streamPixels, fiveK, "panel unless asked")
+    }
+
+    func testAReducedStreamDrawsTheDesktopAtExactlyItsPixels() {
+        // Each iMac's own panel: the desktop looks half the stream wide, so the 2× backing is the stream
+        let cases: [(panel: PixelSize, stream: PixelSize, looks: PixelSize)] = [
+            (fiveK, PixelSize(width: 4096, height: 2304), PixelSize(width: 2048, height: 1152)),           // 27" 5K
+            (PixelSize(width: 4480, height: 2520), PixelSize(width: 3584, height: 2016), PixelSize(width: 1792, height: 1008)), // 24"
+            (PixelSize(width: 4096, height: 2304), PixelSize(width: 3276, height: 1840), PixelSize(width: 1638, height: 920)),  // 21.5" 4K
+        ]
+        for c in cases {
+            let w = welcome(panel: c.panel)
+            let stream = PathPolicy.streamPixels(panel: c.panel, link: .wifi, resolution: .auto)
+            XCTAssertEqual(stream, c.stream)
+            let modes = PathPolicy.displayModes(welcome: w, stream: stream, size: .standard)
+            XCTAssertEqual(modes.initial, c.looks, "\(c.panel)")
+            XCTAssertTrue(modes.all.contains(c.looks))
+            XCTAssertEqual(Set(modes.all.map { "\($0)" }).count, modes.all.count, "no duplicates")
+        }
+        // Non-Retina panel: no 2× backing, so the desktop is the stream itself
+        let flat = welcome(panel: PixelSize(width: 2560, height: 1440))
+        XCTAssertEqual(PathPolicy.displayModes(welcome: flat, stream: PixelSize(width: 2048, height: 1152), size: .standard).initial,
+                       PixelSize(width: 2048, height: 1152))
+        // Panel resolution: the size chosen in the settings
+        let w = welcome(panel: fiveK)
+        XCTAssertEqual(PathPolicy.displayModes(welcome: w, stream: fiveK, size: .more).initial, DisplaySize.more.points(for: w.panelPoints))
+    }
+
     func testBC7MotionFillsHalfTheLinkAtSixtyFramesPerSecond() {
         XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 10, tileBytes: 4096), 2543)
         XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 3.8, tileBytes: 4096), 966)

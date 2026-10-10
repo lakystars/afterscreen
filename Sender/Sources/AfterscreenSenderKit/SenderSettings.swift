@@ -4,6 +4,21 @@ import AfterscreenCore
 import ServiceManagement
 
 /// "Looks like" size of the virtual display around the receiver's default points
+/// Pixels sent: the panel's, or four fifths each way (5K → 4096 × 2304). Automatic reduces on Wi-Fi only
+public enum StreamResolution: String, CaseIterable, Identifiable {
+    case auto, panel, reduced
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .auto: return L10n.t("Automatic", "자동")
+        case .panel: return L10n.t("Panel resolution", "패널 해상도")
+        case .reduced: return L10n.t("Four fifths", "4/5 해상도")
+        }
+    }
+}
+
 public enum DisplaySize: String, CaseIterable, Identifiable {
     case larger, standard, more, most
 
@@ -50,6 +65,7 @@ public final class SenderSettings: ObservableObject {
         static let sound = "sound"
         static let deband = "deband"
         static let brightness = "brightness"
+        static let streamResolution = "streamResolution"
     }
 
     @Published public var displaySize: DisplaySize {
@@ -72,6 +88,10 @@ public final class SenderSettings: ObservableObject {
     /// Smoothing of 8-bit steps on the receiver
     @Published public var deband: Deband {
         didSet { defaults.set(Int(deband.rawValue), forKey: Key.deband) }
+    }
+
+    @Published public var streamResolution: StreamResolution {
+        didSet { defaults.set(streamResolution.rawValue, forKey: Key.streamResolution) }
     }
 
     /// iMac panel brightness applied when a stream starts; macOS can restore a dimmer level on wake
@@ -106,6 +126,7 @@ public final class SenderSettings: ObservableObject {
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
         sound = defaults.object(forKey: Key.sound) as? Bool ?? true
         brightness = defaults.object(forKey: Key.brightness) as? Double ?? 1
+        streamResolution = StreamResolution(rawValue: defaults.string(forKey: Key.streamResolution) ?? "") ?? .auto
         deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
         language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
         L10n.language = language

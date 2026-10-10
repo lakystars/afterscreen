@@ -46,6 +46,8 @@ public final class AppModel: ObservableObject {
         paths.start(queue: .global(qos: .utility))
         settings.$displaySize.dropFirst().sink { [weak self] size in self?.session?.setDisplaySize(size) }.store(in: &cancellables)
         settings.$sound.dropFirst().sink { [weak self] on in self?.session?.setSound(on) }.store(in: &cancellables)
+        settings.$streamResolution.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.restartForResolution() }
+            .store(in: &cancellables)
         // Text is picked at render time; a new language redraws the popover
         settings.$language.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         // Published fires before the new value is stored
@@ -88,6 +90,13 @@ public final class AppModel: ObservableObject {
         session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"))
     }
 
+    /// A new transfer resolution takes a new session
+    private func restartForResolution() {
+        guard let session = session, !isTesting, let receiver = receivers.first(where: { $0.name == activeReceiver }) else { return }
+        reconnect = receiver
+        session.stop(reason: L10n.t("Changing the resolution", "해상도를 바꾸는 중"))
+    }
+
     private func start(_ receiver: DiscoveredReceiver, manual: Bool) {
         guard session == nil else { return }
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
@@ -105,7 +114,7 @@ public final class AppModel: ObservableObject {
         }
         retry?.cancel()
         let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link, sound: settings.sound,
-                                    deband: settings.deband, brightness: settings.brightness)
+                                    deband: settings.deband, brightness: settings.brightness, resolution: settings.streamResolution)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.snapshot = s

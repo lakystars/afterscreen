@@ -66,6 +66,8 @@ public final class SenderSession {
     private var deband: Deband
     /// Panel brightness sent once the stream shows, after the receiver's display has woken; nil leaves the panel as is
     private var brightness: Double?
+    /// Ignored by the quality test, which measures the panel
+    private let resolution: StreamResolution
     /// AudioTap, macOS 14.2 and later
     private var audioTap: AnyObject?
     private var testRun: QualityTestRun?
@@ -92,7 +94,7 @@ public final class SenderSession {
 
     /// `link`: the link to use; nil, or a link that no longer answers, takes the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
-                sound: Bool = false, deband: Deband = .normal, brightness: Double? = nil) {
+                sound: Bool = false, deband: Deband = .normal, brightness: Double? = nil, resolution: StreamResolution = .panel) {
         self.target = target
         self.purpose = purpose
         self.displaySize = displaySize
@@ -100,6 +102,7 @@ public final class SenderSession {
         self.sound = sound
         self.deband = deband
         self.brightness = brightness
+        self.resolution = resolution
     }
 
     /// Smoothing of 8-bit steps on the receiver; sent at the handshake and on each change
@@ -274,7 +277,8 @@ public final class SenderSession {
             guard let result = try? JSONWire.decode(ProbeResult.self, from: m.payload),
                   let welcome = snapshot.peer, let link = snapshot.link else { return }
             update { $0.capacityGbps = result.gbps }
-            guard let config = PathPolicy.choose(link: link, capacityGbps: result.gbps, welcome: welcome) else {
+            guard let config = PathPolicy.choose(link: link, capacityGbps: result.gbps, welcome: welcome,
+                                                 resolution: purpose == .qualityTest ? .panel : resolution) else {
                 return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
                                   "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
             }
@@ -342,9 +346,9 @@ public final class SenderSession {
             $0.state = L10n.t("Starting the display", "디스플레이 준비 중")
         }
         do {
-            let base = welcome.panelPoints
+            let modes = PathPolicy.displayModes(welcome: welcome, stream: config.streamPixels, size: displaySize)
             display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: config.streamPixels, hiDPI: welcome.isRetina,
-                                         modes: DisplaySize.allCases.map { $0.points(for: base) }, initial: displaySize.points(for: base))
+                                         modes: modes.all, initial: modes.initial)
         } catch {
             return end("\(error)")
         }

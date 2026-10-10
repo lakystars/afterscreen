@@ -72,6 +72,9 @@ final class SenderSettingsTests: XCTestCase {
         again.deband = .strong
         XCTAssertEqual(SenderSettings(defaults: defaults).deband, .strong)
         XCTAssertEqual(again.brightness, 1, "full brightness until the slider moves")
+        XCTAssertEqual(again.streamResolution, .auto)
+        again.streamResolution = .reduced
+        XCTAssertEqual(SenderSettings(defaults: defaults).streamResolution, .reduced)
         again.brightness = 0.4
         XCTAssertEqual(SenderSettings(defaults: defaults).brightness, 0.4, accuracy: 1e-9)
     }

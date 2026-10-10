@@ -82,6 +82,7 @@ Sender (**Settings…** in the popover):
 | Setting | Choices |
 |---|---|
 | Size | Larger text, Default, More space, Most space. On a 5K iMac these look like 2048, 2560, 2880 and 3200 points wide. Applies while streaming; System Settings → Displays lists the same sizes. |
+| Transfer resolution | Automatic (default), panel resolution, or four fifths. Automatic sends the panel's pixels over cables and four fifths over Wi-Fi (on a 5K iMac, 5120 × 2880 or 4096 × 2304). At four fifths the desktop switches to half the stream's size (on a 5K iMac, looks like 2048 × 1152), so the Mac draws exactly the pixels it sends and only the receiver scales, with a bicubic filter; over cables the size chosen above returns. The size is worked out from the receiver's own panel (27-inch 5K, 24-inch 4.5K, 21.5-inch 4K). Takes effect by reconnecting. |
 | Connect automatically | Connects to the receiver you last connected to when it appears, after sleep, and after the link drops. **Disconnect** pauses it until that receiver goes away. |
 | Open at login | Starts Afterscreen at login. |
 | Arrange Displays… | Opens System Settings for arrangement, mirroring and the main display. |

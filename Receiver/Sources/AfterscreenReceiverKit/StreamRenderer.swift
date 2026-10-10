@@ -115,10 +115,43 @@ final class StreamRenderer {
         dst.write(float4(deband(src, uv, src.sample(point, uv).rgb, g.range), 1.0), px);
     }
 
+    // Scaling up (a stream smaller than the panel): Catmull-Rom from nine bilinear taps keeps text edges
+    // sharper than plain bilinear. At 1:1 or smaller, one bilinear tap: texel centres come back exact.
+    // Derivatives are undefined in divergent branches, so callers test for scaling up outside them
+    static bool scalingUp(texture2d<float> tex, float2 uv) {
+        return fwidth(uv.x * float(tex.get_width())) < 0.99;
+    }
+
+    static float4 catmullRom(texture2d<float> tex, float2 uv) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        float2 size = float2(tex.get_width(), tex.get_height());
+        float2 pos = uv * size;
+        float2 t1 = floor(pos - 0.5) + 0.5, f = pos - t1;
+        float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+        float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+        float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+        float2 w3 = f * f * (-0.5 + 0.5 * f);
+        float2 w12 = w1 + w2;
+        float2 p0 = (t1 - 1.0) / size, p12 = (t1 + w2 / w12) / size, p3 = (t1 + 2.0) / size;
+        return saturate(tex.sample(s, float2(p0.x, p0.y)) * (w0.x * w0.y)
+                      + tex.sample(s, float2(p12.x, p0.y)) * (w12.x * w0.y)
+                      + tex.sample(s, float2(p3.x, p0.y)) * (w3.x * w0.y)
+                      + tex.sample(s, float2(p0.x, p12.y)) * (w0.x * w12.y)
+                      + tex.sample(s, float2(p12.x, p12.y)) * (w12.x * w12.y)
+                      + tex.sample(s, float2(p3.x, p12.y)) * (w3.x * w12.y)
+                      + tex.sample(s, float2(p0.x, p3.y)) * (w0.x * w3.y)
+                      + tex.sample(s, float2(p12.x, p3.y)) * (w12.x * w3.y)
+                      + tex.sample(s, float2(p3.x, p3.y)) * (w3.x * w3.y));
+    }
+
+    static float3 picture(texture2d<float> tex, float2 uv, bool up) {
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        return up ? catmullRom(tex, uv).rgb : tex.sample(s, uv).rgb;
+    }
+
     // BC7 picture, or its debanded copy; alpha is not part of the stream
     fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
-        constexpr sampler s(filter::linear, address::clamp_to_edge);
-        return float4(tex.sample(s, in.uv).rgb, 1.0);
+        return float4(picture(tex, in.uv, scalingUp(tex, in.uv)), 1.0);
     }
 
     // grid: tiles per row, tile edge in pixels, stream width and height.
@@ -127,9 +160,11 @@ final class StreamRenderer {
                                    texture2d<float> luma [[texture(1)]], texture2d<float> chroma [[texture(2)]],
                                    device const uchar *mask [[buffer(0)]], constant uint4 &grid [[buffer(1)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
+        bool up = scalingUp(tex, in.uv), videoUp = scalingUp(luma, in.uv);
         uint2 p = min(uint2(in.uv * float2(grid.zw)), grid.zw - uint2(1));
-        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) return float4(tex.sample(s, in.uv).rgb, 1.0);
-        float y = (luma.sample(s, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
+        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) return float4(picture(tex, in.uv, up), 1.0);
+        // Luma carries the detail: Catmull-Rom when scaled up; chroma at half resolution stays bilinear
+        float y = ((videoUp ? catmullRom(luma, in.uv).r : luma.sample(s, in.uv).r) - 16.0 / 255.0) * (255.0 / 219.0);
         float2 c = (chroma.sample(s, in.uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
         return float4(saturate(rgb), 1.0);

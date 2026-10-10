@@ -13,9 +13,9 @@ public enum PathPolicy {
     static let widthRange = 640...7680
     static let heightRange = 480...4320
 
-    public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome) -> StreamConfig? {
+    public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome, resolution: StreamResolution = .panel) -> StreamConfig? {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
-        let panel = aligned(welcome.panelPixels)
+        let panel = streamPixels(panel: aligned(welcome.panelPixels), link: link, resolution: resolution)
         let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link)
         if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps { return tiles }
         guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
@@ -24,6 +24,26 @@ public enum PathPolicy {
         let video = VideoLayer(codec: codec, pixels: videoPixels(panel, bitrate: rate, codec: codec), bitrate: rate,
                                tenBit: codec == .hevc && welcome.hevcMain10Decode)
         return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link)
+    }
+
+    /// The captured size. Four fifths each way (5K → 4096 × 2304) sends 64% of the pixels and held 60 fps of
+    /// full-screen motion over Wi-Fi; the virtual display keeps the panel's size, so the desktop looks the same
+    /// and the receiver scales the stream up by 1.25
+    static func streamPixels(panel: PixelSize, link: LinkKind, resolution: StreamResolution) -> PixelSize {
+        let reduce = resolution == .reduced || (resolution == .auto && link == .wifi)
+        return reduce ? aligned(PixelSize(width: panel.width * 4 / 5, height: panel.height * 4 / 5)) : panel
+    }
+
+    /// Virtual display modes and the one to start in. A reduced stream starts where the desktop's backing is
+    /// the stream itself (half its size on a Retina panel), so it is captured without scaling and the receiver
+    /// scales once; the size chosen in the settings applies at the panel's resolution
+    static func displayModes(welcome: Welcome, stream: PixelSize, size: DisplaySize) -> (all: [PixelSize], initial: PixelSize) {
+        var all = DisplaySize.allCases.map { $0.points(for: welcome.panelPoints) }
+        guard stream != aligned(welcome.panelPixels) else { return (all, size.points(for: welcome.panelPoints)) }
+        let scale = welcome.isRetina ? 2 : 1
+        let matched = PixelSize(width: stream.width / scale, height: stream.height / scale)
+        if !all.contains(matched) { all.append(matched) }
+        return (all, matched)
     }
 
     /// A quality test stage of `config` at `size`

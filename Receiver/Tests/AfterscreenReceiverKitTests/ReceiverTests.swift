@@ -724,6 +724,104 @@ final class StreamRendererTests: XCTestCase {
     }
 }
 
+final class UpscaleTests: XCTestCase {
+    /// Grey levels (w × 16) through `tileFragment` into a float target `scale` times wider; red per pixel of row 8, 0…255
+    private func upscaled(_ levels: [UInt8], width w: Int, scale: Double) throws -> [Float] {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let library = try device.makeLibrary(source: StreamRenderer.shaders, options: nil)
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "screenQuad")
+        desc.fragmentFunction = library.makeFunction(name: "tileFragment")
+        desc.colorAttachments[0].pixelFormat = .rgba32Float
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        let h = 16, tw = Int(Double(w) * scale), th = Int(Double(h) * scale)
+        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        sd.usage = .shaderRead
+        let source = try XCTUnwrap(device.makeTexture(descriptor: sd))
+        let rgba: [UInt8] = (0..<(w * h)).flatMap { i -> [UInt8] in let v = levels[i % w]; return [v, v, v, 255] }
+        source.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: rgba, bytesPerRow: w * 4)
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: tw, height: th, mipmapped: false)
+        td.usage = .renderTarget
+        let target = try XCTUnwrap(device.makeTexture(descriptor: td))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let cb = try XCTUnwrap(device.makeCommandQueue()?.makeCommandBuffer())
+        let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(source, index: 0)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var out = [Float](repeating: 0, count: tw * th * 4)
+        target.getBytes(&out, bytesPerRow: tw * 16, from: MTLRegionMake2D(0, 0, tw, th), mipmapLevel: 0)
+        return (0..<tw).map { out[((th / 2) * tw + $0) * 4] * 255 }
+    }
+
+    func testEdgesStaySharperThanBilinearWhenScaledUp() throws {
+        // Black to white at texel 32; at 1.25× pixels 39 and 40 straddle it (bilinear: 25.5 → 229.5)
+        let row = try upscaled((0..<64).map { $0 < 32 ? 0 : 255 }, width: 64, scale: 1.25)
+        XCTAssertGreaterThan(row[40] - row[39], 215)
+        XCTAssertEqual(row[10], 0, accuracy: 0.5)
+        XCTAssertEqual(row[70], 255, accuracy: 0.5)
+    }
+
+    func testVideoEdgesStaySharperThanBilinearWhenScaledUp() throws {
+        // Video luma black (16) to white (235) at texel 32 of 64, drawn 2× into masked tiles (bilinear: 63.75 → 191.25)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let library = try device.makeLibrary(source: StreamRenderer.shaders, options: nil)
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "screenQuad")
+        desc.fragmentFunction = library.makeFunction(name: "hybridFragment")
+        desc.colorAttachments[0].pixelFormat = .rgba32Float
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        func texture(_ format: MTLPixelFormat, _ w: Int, _ h: Int, _ bytes: [UInt8], _ bpp: Int) throws -> MTLTexture {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+            d.usage = [.shaderRead, .renderTarget]
+            let t = try XCTUnwrap(device.makeTexture(descriptor: d))
+            t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: bytes, bytesPerRow: w * bpp)
+            return t
+        }
+        let tiles = try texture(.rgba8Unorm, 128, 64, [UInt8](repeating: 0, count: 128 * 64 * 4), 4)
+        let luma = try texture(.r8Unorm, 64, 32, (0..<(64 * 32)).map { $0 % 64 < 32 ? 16 : 235 }, 1)
+        let chroma = try texture(.rg8Unorm, 32, 16, [UInt8](repeating: 128, count: 32 * 16 * 2), 2)
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: 128, height: 64, mipmapped: false)
+        td.usage = .renderTarget
+        let target = try XCTUnwrap(device.makeTexture(descriptor: td))
+        let mask = try XCTUnwrap(device.makeBuffer(bytes: [UInt8(1), 1], length: 2, options: .storageModeShared))
+        var grid: [UInt32] = [2, 64, 128, 64]
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let cb = try XCTUnwrap(device.makeCommandQueue()?.makeCommandBuffer())
+        let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(tiles, index: 0)
+        enc.setFragmentTexture(luma, index: 1)
+        enc.setFragmentTexture(chroma, index: 2)
+        enc.setFragmentBuffer(mask, offset: 0, index: 0)
+        enc.setFragmentBytes(&grid, length: 16, index: 1)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var out = [Float](repeating: 0, count: 128 * 64 * 4)
+        target.getBytes(&out, bytesPerRow: 128 * 16, from: MTLRegionMake2D(0, 0, 128, 64), mipmapLevel: 0)
+        let row = (0..<128).map { out[(32 * 128 + $0) * 4] * 255 }
+        XCTAssertGreaterThan(row[64] - row[63], 140)
+        XCTAssertEqual(row[10], 0, accuracy: 0.5)
+        XCTAssertEqual(row[110], 255, accuracy: 0.5)
+    }
+
+    func testFlatAreasStayFlatWhenScaledUp() throws {
+        let row = try upscaled([UInt8](repeating: 77, count: 64), width: 64, scale: 1.25)
+        XCTAssertLessThan(row.map { abs($0 - 77) }.max() ?? 1, 0.5)
+    }
+}
+
 final class DebandCacheTests: XCTestCase {
     private var device: MTLDevice!
     private var queue: MTLCommandQueue!
