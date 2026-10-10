@@ -11,10 +11,10 @@ public enum DisplaySize: String, CaseIterable, Identifiable {
 
     public var title: String {
         switch self {
-        case .larger: return "Larger text"
-        case .standard: return "Default"
-        case .more: return "More space"
-        case .most: return "Most space"
+        case .larger: return L10n.t("Larger text", "큰 글자")
+        case .standard: return L10n.t("Default", "기본")
+        case .more: return L10n.t("More space", "더 넓게")
+        case .most: return L10n.t("Most space", "가장 넓게")
         }
     }
 
@@ -46,6 +46,7 @@ public final class SenderSettings: ObservableObject {
         static let lastReceiver = "lastReceiver"
         static let link = "link"
         static let menuBarStats = "menuBarStats"
+        static let language = "language"
     }
 
     @Published public var displaySize: DisplaySize {
@@ -53,6 +54,12 @@ public final class SenderSettings: ObservableObject {
     }
     @Published public var autoConnect: Bool {
         didSet { defaults.set(autoConnect, forKey: Key.autoConnect) }
+    }
+    @Published public var language: Language {
+        didSet {
+            defaults.set(language.rawValue, forKey: Key.language)
+            L10n.language = language
+        }
     }
     /// Frame rate and throughput next to the menu bar icon
     @Published public var menuBarStats: Bool {
@@ -80,6 +87,8 @@ public final class SenderSettings: ObservableObject {
         displaySize = DisplaySize(rawValue: defaults.string(forKey: Key.displaySize) ?? "") ?? .standard
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
+        language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
+        L10n.language = language
     }
 
     /// Login item state lives in ServiceManagement, not in the defaults

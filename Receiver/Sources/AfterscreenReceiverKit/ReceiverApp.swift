@@ -10,12 +10,17 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private var session: ReceiverSession?
     private var screen: ReceiverScreen?
     private var hardware: Welcome!
-    private var lastSummary = "No session yet"
-    private var stateLine = "Starting…" {
-        didSet { FileHandle.standardError.write(Data("[receiver] \(stateLine)\n".utf8)) }
+    /// First: it sets the UI language the other properties' text uses
+    private let settings = ReceiverSettings()
+    private var lastSummary = L10n.t("No session yet", "아직 연결한 적 없음")
+    private var stateLine = L10n.t("Starting…", "시작하는 중…")
+
+    /// Shown in the user's language, logged in English for scripts that wait on it
+    private func state(_ english: String, _ korean: String) {
+        stateLine = L10n.t(english, korean)
+        FileHandle.standardError.write(Data("[receiver] \(english)\n".utf8))
     }
     private var startedAt: Date?
-    private let settings = ReceiverSettings()
     private var settingsWindow: NSWindow?
     /// The session was stopped on this Mac, so its display stays on
     private var stoppedHere = false
@@ -45,7 +50,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
         screen?.hudText = { [weak self] in self?.hudText() ?? "" }
         guard screen != nil else {
-            stateLine = "Metal is unavailable on this Mac"
+            state("Metal is unavailable on this Mac", "이 Mac에서는 Metal을 쓸 수 없습니다")
             return
         }
         do {
@@ -54,9 +59,9 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             listener.start()
             self.listener = listener
             publish(port: listener.port, name: name)
-            stateLine = "Waiting for a sender"
+            state("Waiting for a sender", "송신기를 기다리는 중")
         } catch {
-            stateLine = "Cannot listen: \(error)"
+            state("Cannot listen: \(error)", "연결을 받을 수 없습니다: \(error)")
         }
     }
 
@@ -79,30 +84,33 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
 
     private func accept(_ connection: Connection) {
         if let session = session { return session.offerChannel(connection) }
-        guard let screen = screen else { return refuse(connection, "Receiver display is unavailable") }
+        guard let screen = screen else { return refuse(connection, L10n.t("Receiver display is unavailable", "수신기 화면을 쓸 수 없습니다")) }
         let link = connection.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
-        guard settings.accepts(link) else { return refuse(connection, "This receiver accepts Thunderbolt, USB and Ethernet only") }
+        guard settings.accepts(link) else { return refuse(connection, L10n.t("This receiver accepts Thunderbolt, USB and Ethernet only",
+                                                                              "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다")) }
         let session = ReceiverSession(connection: connection, hardware: hardware, display: screen)
         session.onPeer = { [weak self] hello in
-            self?.stateLine = "Streaming from \(hello.name)"
+            self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
             self?.statusItem.button?.title = "▭ ●"
         }
         session.onEnd = { [weak self] reason in
             guard let self = self else { return }
             let duration = self.startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
-            self.lastSummary = "Last session: \(self.session?.peer?.name ?? "sender"), \(duration / 60)m \(duration % 60)s — \(reason)"
+            let peer = self.session?.peer?.name ?? L10n.t("sender", "송신기")
+            self.lastSummary = L10n.t("Last session: \(peer), \(duration / 60)m \(duration % 60)s — \(reason)",
+                                      "마지막 연결: \(peer), \(duration / 60)분 \(duration % 60)초 — \(reason)")
             // Only after a session that showed a stream: early failures would put the display to sleep on every retry
             if let config = self.session?.config, !config.test, self.settings.onDisconnect == .sleepDisplay && !self.stoppedHere {
                 ReceiverAppDelegate.sleepDisplay()
             }
             self.stoppedHere = false
             self.session = nil
-            self.stateLine = "Waiting for a sender"
+            self.state("Waiting for a sender", "송신기를 기다리는 중")
             self.statusItem.button?.title = "▭"
         }
         self.session = session
         startedAt = Date()
-        stateLine = "Connecting…"
+        state("Connecting…", "연결하는 중…")
         session.start()
     }
 
@@ -112,19 +120,22 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         switch config.linkKind {
         case .thunderbolt: link = "ϟ Thunderbolt"
         case .usb: link = "⌁ USB"
-        case .ethernet: link = "⇄ Ethernet"
+        case .ethernet: link = L10n.t("⇄ Ethernet", "⇄ 이더넷")
         case .wifi: link = "≋ Wi-Fi"
-        case .loopback: link = "Loopback"
-        case .unsupported: link = "Unsupported"
+        case .loopback: link = L10n.t("Loopback", "루프백")
+        case .unsupported: link = L10n.t("Unsupported", "지원 안 함")
         }
-        let path = config.video.map { "tiles + \($0.codec.rawValue.uppercased()) \($0.pixels.width)×\($0.pixels.height)" } ?? "tiles (BC7)"
-        let title = config.test ? "Afterscreen quality test" : "Afterscreen"
+        let path = config.video.map { v in
+            L10n.t("tiles + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") \(v.pixels.width)×\(v.pixels.height)",
+                   "타일 + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10비트" : "") \(v.pixels.width)×\(v.pixels.height)")
+        } ?? L10n.t("tiles (BC7)", "타일(BC7)")
+        let title = config.test ? L10n.t("Afterscreen quality test", "Afterscreen 품질 테스트") : "Afterscreen"
         return """
          \(title)  \(link)
          \(config.streamPixels.width)×\(config.streamPixels.height) \(path)
-         displayed \(String(format: "%.0f", screen.displayedFPS)) fps · late \(screen.lateFrames)
+         \(L10n.t("shown", "표시")) \(String(format: "%.0f", screen.displayedFPS)) fps · \(L10n.t("late", "지연")) \(screen.lateFrames)
          upload \(Format.ms(screen.uploadMs)) · GPU \(Format.percent(screen.gpuMeter.lastPercent))
-         ⌥⌘I hide · Esc Esc stop
+         \(L10n.t("⌥⌘I hide · Esc Esc stop", "⌥⌘I 숨김 · Esc 두 번 중지"))
         """
     }
 
@@ -140,34 +151,35 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         info("Afterscreen Receiver — \(stateLine)")
         menu.addItem(.separator())
         info(hardware.marketingName)
-        info("Panel \(hardware.panelPixels.width)×\(hardware.panelPixels.height) · macOS \(hardware.osVersion)")
+        info(L10n.t("Panel", "패널") + " \(hardware.panelPixels.width)×\(hardware.panelPixels.height) · macOS \(hardware.osVersion)")
         info("GPU \(hardware.gpuNames.joined(separator: ", "))")
-        info("Decode: BC7 tiles · HEVC \(hardware.hevcDecode ? "yes" : "no") · H.264 \(hardware.h264Decode ? "yes" : "no")")
-        info("Listening on port \(listener?.port ?? 0)")
+        let yes = L10n.t("yes", "지원"), no = L10n.t("no", "미지원")
+        info(L10n.t("Hardware decode", "하드웨어 디코딩") + ": BC7 · HEVC \(hardware.hevcDecode ? yes : no) · Main10 \(hardware.hevcMain10Decode ? yes : no) · H.264 \(hardware.h264Decode ? yes : no)")
+        info(L10n.t("Listening on port \(listener?.port ?? 0)", "포트 \(listener?.port ?? 0)에서 대기 중"))
         menu.addItem(.separator())
         info(lastSummary)
-        info("While streaming: ⌥⌘I toggles the HUD, Esc twice stops")
+        info(L10n.t("While streaming: ⌥⌘I toggles the HUD, Esc twice stops", "스트리밍 중: ⌥⌘I로 정보 표시, Esc 두 번으로 중지"))
         menu.addItem(.separator())
         if session != nil {
-            let stop = NSMenuItem(title: "Stop Streaming", action: #selector(stopStreaming), keyEquivalent: "")
+            let stop = NSMenuItem(title: L10n.t("Stop Streaming", "스트리밍 중지"), action: #selector(stopStreaming), keyEquivalent: "")
             stop.target = self
             menu.addItem(stop)
         }
-        let prefs = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        let prefs = NSMenuItem(title: L10n.t("Settings…", "설정…"), action: #selector(showSettings), keyEquivalent: ",")
         prefs.target = self
         menu.addItem(prefs)
-        menu.addItem(NSMenuItem(title: "Quit Afterscreen Receiver", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: L10n.t("Quit Afterscreen Receiver", "Afterscreen Receiver 종료"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     @objc private func stopStreaming() {
         stoppedHere = true
-        session?.stop(reason: "Stopped on the receiver", pause: true)
+        session?.stop(reason: L10n.t("Stopped on the iMac", "iMac에서 연결을 끊었습니다"), pause: true)
     }
 
     @objc private func showSettings() {
         if settingsWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(rootView: ReceiverSettingsView(settings: settings)))
-            window.title = "Afterscreen Receiver Settings"
+            window.title = L10n.t("Afterscreen Receiver Settings", "Afterscreen Receiver 설정")
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.center()

@@ -42,6 +42,8 @@ public final class AppModel: ObservableObject {
         paths.pathUpdateHandler = { [weak self] _ in DispatchQueue.main.async { self?.refreshLinks() } }
         paths.start(queue: .global(qos: .utility))
         settings.$displaySize.dropFirst().sink { [weak self] size in self?.session?.setDisplaySize(size) }.store(in: &cancellables)
+        // Text is picked at render time; a new language redraws the popover
+        settings.$language.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         // Published fires before the new value is stored
         settings.$autoConnect.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.considerAutoConnect() }
             .store(in: &cancellables)
@@ -81,7 +83,8 @@ public final class AppModel: ObservableObject {
         guard let session = session, !isTesting, let receiver = receivers.first(where: { $0.name == activeReceiver }),
               snapshot.link != (link ?? links[receiver.name]?.first) else { return }
         reconnect = receiver
-        session.stop(reason: "Switching to \(link.map { LinkLabel.name($0) } ?? "the fastest link")")
+        let name = link.map { LinkLabel.name($0) } ?? L10n.t("the fastest link", "가장 빠른 링크")
+        session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"))
     }
 
     private func start(_ receiver: DiscoveredReceiver, manual: Bool) {
@@ -90,7 +93,8 @@ public final class AppModel: ObservableObject {
         guard screenRecordingGranted else {
             if manual {
                 CGRequestScreenCaptureAccess()
-                lastMessage = "Allow Screen Recording for Afterscreen, then connect again"
+                lastMessage = L10n.t("Allow Screen Recording for Afterscreen, then connect again",
+                                     "Afterscreen에 화면 기록 권한을 허용한 뒤 다시 연결하세요")
             }
             return
         }
@@ -142,7 +146,7 @@ public final class AppModel: ObservableObject {
     }
 
     public func stopTest() {
-        session?.stop(reason: "Quality test stopped")
+        session?.stop(reason: L10n.t("Quality test stopped", "품질 테스트를 멈췄습니다"))
     }
 
     private func considerAutoConnect() {

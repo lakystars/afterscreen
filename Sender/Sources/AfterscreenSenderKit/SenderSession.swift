@@ -102,12 +102,13 @@ public final class SenderSession {
     // MARK: - Lifecycle (main queue)
 
     public func start() {
-        update { $0.state = "Finding a route" }
+        update { $0.state = L10n.t("Finding a route", "경로 찾는 중") }
         RoutePlanner.routes(to: target) { [weak self] routes in
             DispatchQueue.main.async {
                 guard let self = self, !self.ended else { return }
                 let chosen = RoutePlanner.select(routes, prefer: self.link)
-                guard !chosen.routes.isEmpty else { return self.end("No Thunderbolt, USB, Ethernet or Wi-Fi route to \(self.target.name)") }
+                guard !chosen.routes.isEmpty else { return self.end(L10n.t("No Thunderbolt, USB, Ethernet or Wi-Fi route to \(self.target.name)",
+                                                                                  "\(self.target.name)까지 Thunderbolt, USB, 이더넷, Wi-Fi 경로가 없습니다")) }
                 self.update { $0.missingLink = chosen.fellBack ? self.link : nil }
                 self.connect(chosen.routes)
             }
@@ -115,8 +116,8 @@ public final class SenderSession {
     }
 
     private func connect(_ routes: [Route]) {
-        guard let route = routes.first else { return end("Could not reach \(target.name)") }
-        update { $0.state = "Connecting via \(route.interface)" }
+        guard let route = routes.first else { return end(L10n.t("Could not reach \(target.name)", "\(target.name)에 연결할 수 없습니다")) }
+        update { $0.state = L10n.t("Connecting via \(LinkLabel.name(route.kind))", "\(LinkLabel.name(route.kind))로 연결 중") }
         Connection.connect(host: route.address, port: target.port,
                            interfaceName: route.kind == .loopback ? nil : route.interface, timeout: 2) { [weak self] result in
             DispatchQueue.main.async {
@@ -145,7 +146,7 @@ public final class SenderSession {
             $0.link = simulated == nil ? route.kind : .wifi
             $0.interface = route.interface
             $0.mtu = Interfaces.mtu(route.interface)
-            $0.state = "Handshake"
+            $0.state = L10n.t("Handshake", "연결 확인 중")
         }
         let host = Host.current().localizedName ?? "Mac"
         let os = ProcessInfo.processInfo.operatingSystemVersion
@@ -153,7 +154,7 @@ public final class SenderSession {
                            osVersion: "\(os.majorVersion).\(os.minorVersion)"))
     }
 
-    public func stop(reason: String = "Stopped on the sender") {
+    public func stop(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다")) {
         guard let c = connection, !ended else { return end(reason) }
         send(.bye, Bye(reason: reason))
         c.closeAfterFlush(reason: reason)
@@ -194,19 +195,20 @@ public final class SenderSession {
     private func handle(_ m: Message) {
         switch m.type {
         case .welcome:
-            guard let welcome = try? JSONWire.decode(Welcome.self, from: m.payload) else { return end("Bad welcome") }
-            guard PathPolicy.isPlausible(welcome) else { return end("Receiver reported an invalid display size") }
+            guard let welcome = try? JSONWire.decode(Welcome.self, from: m.payload) else { return end(L10n.t("The receiver sent an invalid reply", "수신기가 잘못된 응답을 보냈습니다")) }
+            guard PathPolicy.isPlausible(welcome) else { return end(L10n.t("The receiver reported an invalid display size", "수신기가 잘못된 화면 크기를 보냈습니다")) }
             update { $0.peer = welcome }
             guard welcome.protocolVersion == AfterscreenProtocol.version else { return }
             if purpose == .display { openCursorChannel(token: welcome.channelToken) }
-            update { $0.state = "Measuring the link" }
+            update { $0.state = L10n.t("Measuring the link", "링크 속도 측정 중") }
             probe()
         case .probeResult:
             guard let result = try? JSONWire.decode(ProbeResult.self, from: m.payload),
                   let welcome = snapshot.peer, let link = snapshot.link else { return }
             update { $0.capacityGbps = result.gbps }
             guard let config = PathPolicy.choose(link: link, capacityGbps: result.gbps, welcome: welcome) else {
-                return end("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links")
+                return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
+                                  "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
             }
             if purpose == .qualityTest { return startQualityTest(config) }
             send(.config, config)
@@ -269,7 +271,7 @@ public final class SenderSession {
     private func beginStreaming(_ config: StreamConfig, welcome: Welcome) {
         update {
             $0.config = config
-            $0.state = "Starting display"
+            $0.state = L10n.t("Starting the display", "디스플레이 준비 중")
         }
         do {
             let base = welcome.panelPoints
@@ -306,7 +308,7 @@ public final class SenderSession {
 
         let capture = Capture(displayID: display.displayID, size: config.streamPixels)
         capture.onFrame = { [weak streamer] frame in streamer?.offer(frame) }
-        capture.onStop = { [weak self] reason in DispatchQueue.main.async { self?.end("Capture stopped: \(reason)") } }
+        capture.onStop = { [weak self] reason in DispatchQueue.main.async { self?.end(L10n.t("Screen capture stopped: \(reason)", "화면 캡처가 멈췄습니다: \(reason)")) } }
         self.capture = capture
         capture.start { [weak self] error in
             DispatchQueue.main.async {
@@ -316,13 +318,14 @@ public final class SenderSession {
                     return
                 }
                 if let error = error {
-                    return self.end("Screen capture failed (\(error.localizedDescription)). Check Screen Recording permission.")
+                    return self.end(L10n.t("Screen capture failed (\(error.localizedDescription)). Check Screen Recording permission.",
+                                           "화면 캡처에 실패했습니다(\(error.localizedDescription)). 화면 기록 권한을 확인하세요."))
                 }
                 self.activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
                                                                       reason: "Streaming a display")
                 self.update {
                     $0.isStreaming = true
-                    $0.state = "Streaming"
+                    $0.state = L10n.t("Streaming", "스트리밍 중")
                 }
                 self.startTimers()
             }
@@ -331,16 +334,21 @@ public final class SenderSession {
 
     private func startQualityTest(_ config: StreamConfig) {
         let stages = QualityTest.stages(panel: config.streamPixels).map { PathPolicy.stage(config, size: $0) }
-        let path = config.video.map { "Tiles + \($0.codec.rawValue.uppercased())\($0.tenBit ? " 10-bit" : "") for motion" } ?? "Tiles"
+        let path = config.video.map { v in
+            L10n.t("Tiles + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") for motion",
+                   "타일 + 움직임은 \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10비트" : "")")
+        } ?? L10n.t("Tiles", "타일")
         let report = QualityTest.Report(receiver: snapshot.peer?.marketingName ?? target.name, link: snapshot.link, path: path)
         guard let connection = connection,
               let run = QualityTestRun(connection: connection, configs: stages, capacityGbps: snapshot.capacityGbps, report: report) else {
-            return end("Quality test unavailable: Metal or the test pattern failed")
+            return end(L10n.t("Quality test unavailable: Metal or the test pattern failed",
+                              "품질 테스트를 할 수 없습니다: Metal 또는 테스트 화면 생성 실패"))
         }
         run.onReport = { [weak self] r in
             self?.update {
                 $0.qualityTest = r
-                $0.state = r.running.map { "Testing \(QualityTest.label($0))" } ?? "Test finished"
+                $0.state = r.running.map { L10n.t("Testing \(QualityTest.label($0))", "\(QualityTest.label($0)) 측정 중") }
+                    ?? L10n.t("Test finished", "테스트 완료")
             }
         }
         run.onFinish = { [weak self] in
@@ -351,7 +359,7 @@ public final class SenderSession {
             let link = String(format: "%@ via %@, %.2f Gb/s, %@", self.snapshot.link?.rawValue ?? "?", self.snapshot.interface ?? "?",
                               self.snapshot.capacityGbps ?? 0, path)
             FileHandle.standardError.write(Data("[sender] quality test (\(link)): \(stages.joined(separator: ", "))\n".utf8))
-            self.stop(reason: "Quality test finished")
+            self.stop(reason: L10n.t("Quality test finished", "품질 테스트를 마쳤습니다"))
         }
         update { $0.config = config }
         testRun = run

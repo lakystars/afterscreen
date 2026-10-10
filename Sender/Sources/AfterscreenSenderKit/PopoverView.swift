@@ -18,10 +18,10 @@ enum LinkLabel {
         switch kind {
         case .thunderbolt?: return "Thunderbolt"
         case .usb?: return "USB"
-        case .ethernet?: return "Ethernet"
+        case .ethernet?: return L10n.t("Ethernet", "이더넷")
         case .wifi?: return "Wi-Fi"
-        case .loopback?: return "Loopback (same Mac)"
-        case .unsupported?: return "Unsupported"
+        case .loopback?: return L10n.t("Loopback (same Mac)", "루프백(같은 Mac)")
+        case .unsupported?: return L10n.t("Unsupported", "지원 안 함")
         case nil: return "—"
         }
     }
@@ -71,10 +71,12 @@ struct Sparkline: View {
     }
 }
 
+/// Label, value and an optional trailing view; `help` explains the field on hover
 private struct Row<Trailing: View>: View {
     var label: String
     var value: String
     var valueColor: Color = .primary
+    var help: String?
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
@@ -85,12 +87,29 @@ private struct Row<Trailing: View>: View {
             trailing()
         }
         .font(.system(size: 12))
+        .help(help ?? "")
     }
 }
 
 private extension Row where Trailing == EmptyView {
-    init(_ label: String, _ value: String, color: Color = .primary) {
-        self.init(label: label, value: value, valueColor: color) { EmptyView() }
+    init(_ label: String, _ value: String, color: Color = .primary, help: String? = nil) {
+        self.init(label: label, value: value, valueColor: color, help: help) { EmptyView() }
+    }
+}
+
+/// A titled group on a tinted background, so sections read apart
+private struct Card<Content: View>: View {
+    var title: String
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) { content() }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+        }
     }
 }
 
@@ -100,8 +119,8 @@ private struct LinkPicker: View {
     var receiver: String
 
     var body: some View {
-        Picker("Link", selection: Binding(get: { model.link(for: receiver) }, set: { model.setLink($0) })) {
-            Text("Automatic").tag(LinkKind?.none)
+        Picker(L10n.t("Link", "연결"), selection: Binding(get: { model.link(for: receiver) }, set: { model.setLink($0) })) {
+            Text(L10n.t("Automatic", "자동")).tag(LinkKind?.none)
             ForEach(model.links[receiver] ?? [], id: \.self) { kind in
                 Text("\(LinkLabel.glyph(kind)) \(LinkLabel.name(kind))").tag(LinkKind?.some(kind))
             }
@@ -109,14 +128,7 @@ private struct LinkPicker: View {
         .pickerStyle(.menu)
         .labelsHidden()
         .fixedSize()
-        .help("Automatic uses the fastest link that answers")
-    }
-}
-
-private struct SectionTitle: View {
-    var text: String
-    var body: some View {
-        Text(text.uppercased()).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 4)
+        .help(L10n.t("Automatic uses the fastest link that reaches the receiver", "자동은 수신기에 닿는 가장 빠른 링크를 씁니다"))
     }
 }
 
@@ -126,12 +138,12 @@ private struct QualityCard: View {
     var testing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionTitle(text: "Quality test · \(report.receiver)")
+        Card(title: L10n.t("Quality test · \(report.receiver)", "품질 테스트 · \(report.receiver)")) {
             if let v = report.verdict {
                 Text("\(QualityTest.label(v.size)) · \(Int(v.fps.rounded())) fps").font(.system(size: 24, weight: .bold, design: .rounded))
             } else if !testing && !report.stages.isEmpty {
-                Text("Under \(Int(QualityTest.smoothFPS)) fps at every size").font(.system(size: 15, weight: .semibold))
+                Text(L10n.t("Under \(Int(QualityTest.smoothFPS)) fps at every size", "모든 크기에서 \(Int(QualityTest.smoothFPS))fps 미만"))
+                    .font(.system(size: 15, weight: .semibold))
             }
             if report.link != nil {
                 Text("\(LinkLabel.glyph(report.link)) \(LinkLabel.name(report.link)) · \(report.path)")
@@ -141,7 +153,8 @@ private struct QualityCard: View {
             if testing {
                 HStack {
                     ProgressView(value: Double(report.stages.count), total: Double(max(1, report.total)))
-                    Text(report.running.map { "Testing \(QualityTest.label($0))…" } ?? "Measuring the link…")
+                    Text(report.running.map { L10n.t("Testing \(QualityTest.label($0))…", "\(QualityTest.label($0)) 측정 중…") }
+                         ?? L10n.t("Measuring the link…", "링크 측정 중…"))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
@@ -176,7 +189,7 @@ public struct PopoverView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             if model.isTesting {
                 testBody
             } else if model.isActive || model.snapshot.isStreaming {
@@ -190,8 +203,8 @@ public struct PopoverView: View {
                     Text(message).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
-                Button("Settings…", action: openSettings).keyboardShortcut(",")
-                Button("Quit") { NSApp.terminate(nil) }
+                Button(L10n.t("Settings…", "설정…"), action: openSettings).keyboardShortcut(",")
+                Button(L10n.t("Quit", "종료")) { NSApp.terminate(nil) }
             }
         }
         .padding(12)
@@ -199,47 +212,52 @@ public struct PopoverView: View {
     }
 
     private var idleBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("Afterscreen").font(.headline)
             if !model.screenRecordingGranted {
                 HStack {
-                    Text("Screen Recording permission is required").font(.system(size: 12)).foregroundStyle(.orange)
+                    Text(L10n.t("Screen Recording permission is required", "화면 기록 권한이 필요합니다"))
+                        .font(.system(size: 12)).foregroundStyle(.orange)
                     Spacer()
-                    Button("Open Settings") { model.openPrivacySettings() }
+                    Button(L10n.t("Open Settings", "설정 열기")) { model.openPrivacySettings() }
                 }
             }
             if let report = model.testReport { QualityCard(report: report, testing: false) }
-            SectionTitle(text: "Receivers")
-            if model.receivers.isEmpty {
-                Text("Looking for Afterscreen Receiver… Start it on the iMac, then connect a Thunderbolt, USB or Ethernet cable, or join the same network.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(model.receivers) { r in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(r.name).font(.system(size: 13, weight: .medium))
-                        Text([r.model, r.panel].filter { !$0.isEmpty }.joined(separator: " · "))
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
+            Card(title: L10n.t("Receivers", "수신기")) {
+                if model.receivers.isEmpty {
+                    Text(L10n.t("Looking for Afterscreen Receiver… Start it on the iMac, then connect a Thunderbolt, USB or Ethernet cable, or join the same network.",
+                                "Afterscreen Receiver를 찾는 중… iMac에서 실행한 뒤 Thunderbolt, USB, 이더넷 케이블을 연결하거나 같은 네트워크에 연결하세요."))
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(model.receivers) { r in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(r.name).font(.system(size: 13, weight: .medium))
+                            Text([r.model, r.panel].filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        LinkPicker(model: model, receiver: r.name)
+                        Button(L10n.t("Test", "테스트")) { model.runQualityTest(r) }
+                            .help(L10n.t("Measure the highest resolution and frame rate this receiver and link sustain",
+                                         "이 수신기와 링크로 낼 수 있는 최대 해상도와 프레임을 측정합니다"))
+                        Button(L10n.t("Connect", "연결")) { model.connect(r) }
                     }
-                    Spacer()
-                    LinkPicker(model: model, receiver: r.name)
-                    Button("Test") { model.runQualityTest(r) }
-                        .help("Measure the highest resolution and frame rate this receiver and link sustain")
-                    Button("Connect") { model.connect(r) }
                 }
             }
         }
     }
 
     private var testBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Quality test").font(.headline)
-            Text("The iMac shows full-motion frames at each size for a few seconds.")
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.t("Quality test", "품질 테스트")).font(.headline)
+            Text(L10n.t("The iMac shows full-motion frames at each size for a few seconds.",
+                        "iMac에 크기별로 몇 초씩 전체가 움직이는 화면이 나옵니다."))
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             if let report = model.testReport { QualityCard(report: report, testing: true) }
             HStack {
                 Spacer()
-                Button("Stop") { model.stopTest() }
+                Button(L10n.t("Stop", "중지")) { model.stopTest() }
             }
         }
     }
@@ -247,83 +265,110 @@ public struct PopoverView: View {
     private var streamingBody: some View {
         let s = model.snapshot
         let scoreColor: Color = (s.cableScore ?? 100) >= 80 ? .green : ((s.cableScore ?? 100) >= 50 ? .yellow : .red)
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(s.peer?.marketingName ?? model.activeReceiver ?? "Receiver").font(.headline)
+                Text(s.peer?.marketingName ?? model.activeReceiver ?? L10n.t("Receiver", "수신기")).font(.headline)
                 Spacer()
-                Text(s.isStreaming ? "● Streaming" : s.state).font(.system(size: 11))
+                Text(s.isStreaming ? "● " + L10n.t("Streaming", "스트리밍 중") : s.state).font(.system(size: 11))
                     .foregroundStyle(s.isStreaming ? .green : .secondary)
             }
-            Divider()
             if let level = model.brightness {
-                SectionTitle(text: "Brightness")
-                HStack(spacing: 8) {
-                    Image(systemName: "sun.min").foregroundStyle(.secondary)
-                    Slider(value: Binding(get: { level }, set: { model.setBrightness($0) }), in: 0...1)
-                    Image(systemName: "sun.max").foregroundStyle(.secondary)
+                Card(title: L10n.t("iMac brightness", "iMac 밝기")) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sun.min").foregroundStyle(.secondary)
+                        Slider(value: Binding(get: { level }, set: { model.setBrightness($0) }), in: 0...1)
+                        Image(systemName: "sun.max").foregroundStyle(.secondary)
+                    }
                 }
-                .help("Brightness of the receiver's panel")
             }
-            SectionTitle(text: "Connection")
-            Row(label: "Method", value: "\(LinkLabel.glyph(s.link)) \(LinkLabel.name(s.link)) · \(s.interface ?? "—")") {
-                if let receiver = model.activeReceiver { LinkPicker(model: model, receiver: receiver) }
-            }
-            if let missing = s.missingLink {
-                Text("\(LinkLabel.name(missing)) does not reach the receiver; using the fastest link")
-                    .font(.system(size: 11)).foregroundStyle(.orange)
-            }
-            if let mtu = s.mtu {
-                let advice = LinkMetrics.mtuAdvice(mtu: mtu, link: s.link)
-                Row("MTU", advice.map { "\(mtu) · \($0)" } ?? "\(mtu)", color: advice == nil ? .primary : .orange)
-            }
-            Row("Cable quality", s.cableScore.map { "\($0) / 100" } ?? "—", color: scoreColor)
-            Row(label: "Throughput", value: Format.gbps(bytesPerSecond: s.throughputBitsPerSecond / 8)) {
-                Sparkline(values: s.throughputHistory, color: .green)
-            }
-            Row(label: "Latency (RTT)", value: s.latencyMs.map(Format.ms) ?? "—") {
-                Sparkline(values: s.latencyHistory, color: .blue)
-            }
-            Row("Jitter", Format.ms(s.jitterMs))
-            Row("Capacity (probe)", s.capacityGbps.map { String(format: "%.2f Gbps", $0) } ?? "—")
-            Row("Retransmits", String(format: "%.2f%%", s.retransmitPercent))
-            SectionTitle(text: "Frames")
-            Row("Capture → sent → shown",
-                "\(Int(s.captureFPS.rounded())) · \(Int(s.sentFPS.rounded())) · \(Int((s.receiver?.displayedFPS ?? 0).rounded()))")
-            Row("Dropped / min", "\(s.droppedPerMinute)")
-            if let c = s.config {
-                Row("Path", "Tiles (BC7) \(c.streamPixels.width)×\(c.streamPixels.height)")
-                if let v = c.video {
-                    Row("Motion", "\(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps")
+            Card(title: L10n.t("Connection", "연결")) {
+                Row(label: L10n.t("Link", "링크"), value: "\(LinkLabel.glyph(s.link)) \(LinkLabel.name(s.link)) · \(s.interface ?? "—")",
+                    help: L10n.t("The link carrying the stream, and the local interface", "스트림이 지나는 링크와 이 Mac의 인터페이스")) {
+                    if let receiver = model.activeReceiver { LinkPicker(model: model, receiver: receiver) }
                 }
-                Row("Changed tiles", String(format: "%.0f%%", s.dirtyPercent))
-                Row("Compression", s.compressionRatio > 0 ? String(format: "%.1f×", s.compressionRatio) : "—")
+                if let missing = s.missingLink {
+                    Text(L10n.t("\(LinkLabel.name(missing)) does not reach the receiver; using the fastest link",
+                                "\(LinkLabel.name(missing))(으)로는 수신기에 닿지 않아 가장 빠른 링크를 씁니다"))
+                        .font(.system(size: 11)).foregroundStyle(.orange)
+                }
+                Row(label: L10n.t("Throughput", "전송량"), value: Format.gbps(bytesPerSecond: s.throughputBitsPerSecond / 8),
+                    help: L10n.t("Data sent to the iMac per second; it rises as more of the screen changes",
+                                 "지금 iMac으로 보내는 초당 데이터 양입니다. 화면이 많이 바뀔수록 커집니다")) {
+                    Sparkline(values: s.throughputHistory, color: .green)
+                }
+                Row(L10n.t("Link capacity", "링크 최대 속도"), s.capacityGbps.map { String(format: "%.2f Gbps", $0) } ?? "—",
+                    help: L10n.t("Measured when the session started", "연결할 때 측정한 링크의 최대 전송 속도"))
+                Row(label: L10n.t("Latency", "지연"), value: s.latencyMs.map(Format.ms) ?? "—",
+                    help: L10n.t("Round trip to the iMac and back over this link", "이 링크로 iMac까지 왕복하는 시간")) {
+                    Sparkline(values: s.latencyHistory, color: .blue)
+                }
+                Row(L10n.t("Jitter", "지연 변동"), Format.ms(s.jitterMs),
+                    help: L10n.t("How much the latency varies", "지연 시간이 흔들리는 정도"))
+                Row(L10n.t("Retransmits", "재전송"), String(format: "%.2f%%", s.retransmitPercent),
+                    help: L10n.t("Packets sent again after a loss; high values point at the cable or Wi-Fi",
+                                 "손실로 다시 보낸 패킷 비율. 높으면 케이블이나 Wi-Fi 상태를 의심하세요"))
+                Row(L10n.t("Link quality", "링크 품질"), s.cableScore.map { "\($0) / 100" } ?? "—", color: scoreColor,
+                    help: L10n.t("100 minus penalties for retransmits, jitter and a capacity below what the stream needs",
+                                 "100점에서 재전송, 지연 변동, 부족한 링크 속도만큼 깎은 점수"))
+                if let mtu = s.mtu {
+                    let advice = LinkMetrics.mtuAdvice(mtu: mtu, link: s.link)
+                    Row("MTU", advice.map { "\(mtu) · \($0)" } ?? "\(mtu)", color: advice == nil ? .primary : .orange,
+                        help: L10n.t("Packet size; 9000 (jumbo frames) lowers CPU on Thunderbolt and USB",
+                                     "패킷 크기. Thunderbolt·USB에서는 9000(점보 프레임)이 CPU를 덜 씁니다"))
+                }
             }
-            Row("Encode", Format.ms(s.encodeMs))
-            SectionTitle(text: "This app (sender)")
-            Row("CPU · RAM · GPU", "\(Format.percent(s.cpuPercent)) · \(Format.bytes(s.memoryBytes)) · \(Format.percent(s.gpuPercent))")
-            SectionTitle(text: "Receiver app")
-            if let r = s.receiver {
-                Row("CPU · RAM · GPU", "\(Format.percent(r.cpuPercent)) · \(Format.bytes(r.memoryBytes)) · \(Format.percent(r.gpuPercent))")
-                Row("Upload · decompress", "\(Format.ms(r.uploadMs)) · \(Format.ms(r.decompressMs))")
-            } else {
-                Row("Status", "waiting for stats")
+            Card(title: L10n.t("Picture", "화면")) {
+                Row(L10n.t("Frames: captured · sent · shown", "프레임: 캡처 · 전송 · 표시"),
+                    "\(Int(s.captureFPS.rounded())) · \(Int(s.sentFPS.rounded())) · \(Int((s.receiver?.displayedFPS ?? 0).rounded()))",
+                    help: L10n.t("Per second: frames the Mac drew, sent, and the iMac showed", "초당 Mac이 그린 프레임, 보낸 프레임, iMac이 표시한 프레임"))
+                Row(L10n.t("Dropped / min", "버린 프레임/분"), "\(s.droppedPerMinute)",
+                    help: L10n.t("Frames replaced by a newer one before they could be sent", "보내기 전에 더 새 프레임으로 대체된 수"))
+                if let c = s.config {
+                    Row(L10n.t("Resolution", "해상도"), "\(c.streamPixels.width)×\(c.streamPixels.height)",
+                        help: L10n.t("Still areas are sent losslessly at this size", "멈춘 영역은 이 해상도로 무손실 전송합니다"))
+                    if let v = c.video {
+                        Row(L10n.t("Moving areas", "움직이는 영역"),
+                            "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps",
+                            help: L10n.t("On slower links, areas in motion go out as video", "느린 링크에서는 움직이는 영역을 비디오로 보냅니다"))
+                    }
+                    Row(L10n.t("Changed area", "바뀐 영역"), String(format: "%.0f%%", s.dirtyPercent),
+                        help: L10n.t("Share of the screen sent again in the last second", "최근 1초 동안 다시 보낸 화면 비율"))
+                    Row(L10n.t("Compression", "압축률"), s.compressionRatio > 0 ? String(format: "%.1f×", s.compressionRatio) : "—",
+                        help: L10n.t("Picture data before and after compression; 1.0× when the link carries it uncompressed",
+                                     "압축 전후 데이터 비율. 링크에 여유가 있으면 압축하지 않아 1.0×"))
+                }
+                Row(L10n.t("Encode time", "인코딩 시간"), Format.ms(s.encodeMs),
+                    help: L10n.t("From capture to send, per frame", "프레임 하나를 캡처해서 보내기까지 걸린 시간"))
+            }
+            Card(title: L10n.t("Resources", "자원 사용")) {
+                Row(L10n.t("This Mac: CPU · RAM · GPU", "이 Mac: CPU · 메모리 · GPU"),
+                    "\(Format.percent(s.cpuPercent)) · \(Format.bytes(s.memoryBytes)) · \(Format.percent(s.gpuPercent))")
+                if let r = s.receiver {
+                    Row(L10n.t("iMac: CPU · RAM · GPU", "iMac: CPU · 메모리 · GPU"),
+                        "\(Format.percent(r.cpuPercent)) · \(Format.bytes(r.memoryBytes)) · \(Format.percent(r.gpuPercent))")
+                    Row(L10n.t("iMac upload · decompress", "iMac 업로드 · 압축 해제"), "\(Format.ms(r.uploadMs)) · \(Format.ms(r.decompressMs))")
+                } else {
+                    Row("iMac", L10n.t("waiting for stats", "통계 기다리는 중"))
+                }
             }
             DisclosureGroup(isExpanded: $showHardware) {
                 if let p = s.peer {
                     VStack(alignment: .leading, spacing: 3) {
-                        Row("Model", "\(p.marketingName) (\(p.modelID))")
-                        Row("Panel", "\(p.panelPixels.width)×\(p.panelPixels.height)")
+                        Row(L10n.t("Model", "모델"), "\(p.marketingName) (\(p.modelID))")
+                        Row(L10n.t("Panel", "패널"), "\(p.panelPixels.width)×\(p.panelPixels.height)")
                         Row("GPU", p.gpuNames.joined(separator: ", "))
                         Row("macOS", p.osVersion)
-                        Row("Decode", "BC7 · HEVC \(p.hevcDecode ? "✓" : "✗") · H.264 \(p.h264Decode ? "✓" : "✗")")
+                        Row(L10n.t("Hardware decode", "하드웨어 디코딩"),
+                            "BC7 · HEVC \(p.hevcDecode ? "✓" : "✗")\(p.hevcMain10Decode ? " 10-bit" : "") · H.264 \(p.h264Decode ? "✓" : "✗")")
                     }
+                    .padding(.top, 4)
                 }
             } label: {
-                Text("Hardware").font(.system(size: 12, weight: .medium))
+                Text(L10n.t("iMac hardware", "iMac 하드웨어")).font(.system(size: 12, weight: .medium))
             }
             HStack {
                 Spacer()
-                Button("Disconnect") { model.disconnect() }
+                Button(L10n.t("Disconnect", "연결 끊기")) { model.disconnect() }
             }
         }
     }

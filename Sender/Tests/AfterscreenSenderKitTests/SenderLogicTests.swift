@@ -271,6 +271,10 @@ final class CursorMoveTests: XCTestCase {
 }
 
 final class MTUAdviceTests: XCTestCase {
+    private var saved = L10n.language
+    override func setUp() { saved = L10n.language; L10n.language = .english }
+    override func tearDown() { L10n.language = saved }
+
     func testJumboFramesAreAdvisedOnWiredLinks() {
         XCTAssertEqual(LinkMetrics.mtuAdvice(mtu: 1500, link: .thunderbolt), "9000 recommended")
         XCTAssertNil(LinkMetrics.mtuAdvice(mtu: 9000, link: .thunderbolt))

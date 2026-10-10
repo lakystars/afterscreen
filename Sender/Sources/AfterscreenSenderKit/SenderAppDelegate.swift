@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import AfterscreenCore
 import SwiftUI
 
 /// Status item with a SwiftUI popover
@@ -48,7 +49,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
             window.contentViewController = content
         } else {
             let window = NSWindow(contentViewController: content)
-            window.title = "Afterscreen Settings"
+            window.title = L10n.t("Afterscreen Settings", "Afterscreen 설정")
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.center()

@@ -1,3 +1,4 @@
+import AfterscreenCore
 import SwiftUI
 
 /// Receiver settings window content; SwiftUI as of macOS 10.15
@@ -6,29 +7,38 @@ struct ReceiverSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Toggle("Open at login", isOn: Binding(get: { settings.launchAtLogin }, set: { settings.launchAtLogin = $0 }))
+            Toggle(L10n.t("Open at login", "로그인 시 열기"), isOn: Binding(get: { settings.launchAtLogin }, set: { settings.launchAtLogin = $0 }))
             VStack(alignment: .leading, spacing: 4) {
-                Text("Accept connections over").font(.headline)
+                Text(L10n.t("Accept connections over", "받을 연결")).font(.headline)
                 Picker("", selection: $settings.accept) {
-                    Text("Any network: Thunderbolt, USB, Ethernet or Wi-Fi").tag(ReceiverSettings.Accept.any)
-                    Text("Cables only: Thunderbolt, USB or Ethernet").tag(ReceiverSettings.Accept.wired)
+                    Text(L10n.t("Any network: Thunderbolt, USB, Ethernet or Wi-Fi", "모든 연결: Thunderbolt, USB, 이더넷, Wi-Fi"))
+                        .tag(ReceiverSettings.Accept.any)
+                    Text(L10n.t("Cables only: Thunderbolt, USB or Ethernet", "케이블만: Thunderbolt, USB, 이더넷")).tag(ReceiverSettings.Accept.wired)
                 }
                 .pickerStyle(RadioGroupPickerStyle())
                 .labelsHidden()
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("When the sender disconnects").font(.headline)
+                Text(L10n.t("When the sender disconnects", "송신기 연결이 끊기면")).font(.headline)
                 Picker("", selection: $settings.onDisconnect) {
-                    Text("Show this Mac's desktop").tag(ReceiverSettings.OnDisconnect.showDesktop)
-                    Text("Turn the display off").tag(ReceiverSettings.OnDisconnect.sleepDisplay)
+                    Text(L10n.t("Show this Mac's desktop", "이 Mac의 데스크톱 보기")).tag(ReceiverSettings.OnDisconnect.showDesktop)
+                    Text(L10n.t("Turn the display off", "화면 끄기")).tag(ReceiverSettings.OnDisconnect.sleepDisplay)
                 }
                 .pickerStyle(RadioGroupPickerStyle())
                 .labelsHidden()
-                Text("Stopping on this Mac (Esc twice) always shows the desktop.")
+                Text(L10n.t("Stopping on this Mac (Esc twice) always shows the desktop.", "이 Mac에서 중지하면(Esc 두 번) 항상 데스크톱이 보입니다."))
                     .font(.caption).foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L10n.t("Language", "언어")).font(.headline)
+                Picker("", selection: $settings.language) {
+                    ForEach(Language.allCases, id: \.self) { Text(L10n.name($0)).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 180)
             }
         }
         .padding(20)
-        .frame(width: 400, alignment: .leading)
+        .frame(width: 420, alignment: .leading)
     }
 }

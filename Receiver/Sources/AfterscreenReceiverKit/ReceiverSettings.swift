@@ -18,6 +18,7 @@ public final class ReceiverSettings: ObservableObject {
     private enum Key {
         static let accept = "accept"
         static let onDisconnect = "onDisconnect"
+        static let language = "language"
     }
 
     public static let agentLabel = "io.github.lakystars.afterscreen.receiver"
@@ -27,6 +28,12 @@ public final class ReceiverSettings: ObservableObject {
     }
     @Published public var onDisconnect: OnDisconnect {
         didSet { defaults.set(onDisconnect.rawValue, forKey: Key.onDisconnect) }
+    }
+    @Published public var language: Language {
+        didSet {
+            defaults.set(language.rawValue, forKey: Key.language)
+            L10n.language = language
+        }
     }
 
     private let defaults: UserDefaults
@@ -41,6 +48,8 @@ public final class ReceiverSettings: ObservableObject {
         self.bundleID = bundleID
         accept = Accept(rawValue: defaults.string(forKey: Key.accept) ?? "") ?? .any
         onDisconnect = OnDisconnect(rawValue: defaults.string(forKey: Key.onDisconnect) ?? "") ?? .showDesktop
+        language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
+        L10n.language = language
     }
 
     public func accepts(_ link: LinkKind) -> Bool {
