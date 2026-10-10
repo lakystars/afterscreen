@@ -16,6 +16,11 @@ print "== Signing identity: $IDENTITY"
 
 mkdir -p "$OUT"
 
+print "== App icon"
+rm -rf "$OUT/icon"
+swift "$ROOT/scripts/icons.swift" "$OUT/icon"
+iconutil -c icns "$OUT/icon/AppIcon.iconset" -o "$OUT/icon/AppIcon.icns"
+
 plist() { # name bundle-id executable min-os extra-keys
     cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,6 +31,7 @@ plist() { # name bundle-id executable min-os extra-keys
     <key>CFBundleDisplayName</key><string>$1</string>
     <key>CFBundleIdentifier</key><string>$2</string>
     <key>CFBundleExecutable</key><string>$3</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
@@ -44,6 +50,7 @@ bundle() { # app-path executable-src executable-name plist-content
     rm -rf "$1"
     mkdir -p "$1/Contents/MacOS" "$1/Contents/Resources"
     cp "$2" "$1/Contents/MacOS/$3"
+    cp "$OUT/icon/AppIcon.icns" "$1/Contents/Resources/"
     # Symbols only serve debugging; stripped executables are about 45% smaller
     strip "$1/Contents/MacOS/$3"
     print -r -- "$4" > "$1/Contents/Info.plist"

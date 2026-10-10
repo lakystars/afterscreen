@@ -121,7 +121,7 @@ This produces:
 - `build/Afterscreen.app`: the sender (arm64, macOS 14+)
 - `build/Afterscreen Receiver.app`: the receiver (universal, macOS 10.15+)
 
-The script strips symbols from both executables and signs them with `AFTERSCREEN_SIGN_IDENTITY` when set, else with the first Apple Development identity in the keychain, else ad hoc. An ad hoc signature changes with every build, so macOS asks for the privacy permissions again each time.
+The script draws the app icon from `scripts/icons.swift`, strips symbols from both executables and signs them with `AFTERSCREEN_SIGN_IDENTITY` when set, else with the first Apple Development identity in the keychain, else ad hoc. An ad hoc signature changes with every build, so macOS asks for the privacy permissions again each time.
 
 The receiver is compiled with `swiftc` directly, because current SwiftPM refuses deployment targets below macOS 12. The Swift packages are used for the tests:
 
