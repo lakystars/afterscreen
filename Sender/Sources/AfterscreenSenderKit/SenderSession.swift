@@ -47,6 +47,7 @@ public final class SenderSession {
 
     private let target: DiscoveredReceiver
     private let purpose: Purpose
+    private var displaySize: DisplaySize
     private var testRun: QualityTestRun?
     private var connection: Connection?
     private var display: VirtualDisplay?
@@ -67,9 +68,23 @@ public final class SenderSession {
     /// Development: pace writes to this many Mbps and treat the route as Wi-Fi
     public static var simulatedLinkMbps: Double?
 
-    public init(target: DiscoveredReceiver, purpose: Purpose = .display) {
+    public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard) {
         self.target = target
         self.purpose = purpose
+        self.displaySize = displaySize
+    }
+
+    /// Receiver panel brightness, 0…1
+    public func setBrightness(_ level: Double) {
+        connection?.send(Message(type: .brightness, payload: BrightnessWire.encode(level)))
+    }
+
+    /// Main queue: switches the virtual display's "looks like" size while streaming
+    public func setDisplaySize(_ size: DisplaySize) {
+        displaySize = size
+        guard let display = display, let peer = snapshot.peer, display.setMode(points: size.points(for: peer.panelPoints)) else { return }
+        // Cursor sizes are sent in stream pixels, which a new size changes
+        cursor?.resendImage()
     }
 
     // MARK: - Lifecycle (main queue)
@@ -217,8 +232,9 @@ public final class SenderSession {
             $0.state = "Starting display"
         }
         do {
-            let panel = PathPolicy.aligned(welcome.panelPixels)
-            display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: panel, points: welcome.panelPoints)
+            let base = welcome.panelPoints
+            display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: config.streamPixels, hiDPI: welcome.isRetina,
+                                         modes: DisplaySize.allCases.map { $0.points(for: base) }, initial: displaySize.points(for: base))
         } catch {
             return end("\(error)")
         }
@@ -235,9 +251,13 @@ public final class SenderSession {
         cursor.onPosition = { [weak self] x, y, visible in
             self?.connection?.send(Message(type: .cursorPos, payload: CursorWire.pos(x: x, y: y, visible: visible)))
         }
-        cursor.onImage = { [weak self] image in
-            self?.connection?.send(Message(type: .cursorImage, payload: CursorWire.image(width: image.width, height: image.height,
-                                                                                          hotX: image.hotX, hotY: image.hotY, png: image.png)))
+        cursor.onImage = { [weak self, weak display] image in
+            guard let display = display else { return }
+            // Points → stream pixels, so the receiver needs no display size
+            let k = Double(config.streamPixels.width) / max(1, Double(display.bounds.width))
+            func px(_ v: Int) -> Int { Int((Double(v) * k).rounded()) }
+            self?.connection?.send(Message(type: .cursorImage, payload: CursorWire.image(width: px(image.width), height: px(image.height),
+                                                                                          hotX: px(image.hotX), hotY: px(image.hotY), png: image.png)))
         }
         cursor.start()
         self.cursor = cursor

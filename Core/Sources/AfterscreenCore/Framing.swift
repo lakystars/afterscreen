@@ -9,6 +9,7 @@ public enum MessageType: UInt8, CaseIterable {
     case videoFrame = 0x12
     case cursorPos = 0x20
     case cursorImage = 0x21
+    case brightness = 0x22
     case probe = 0x30
     case probeResult = 0x31
     case ping = 0x40

@@ -7,6 +7,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private let model = AppModel()
+    private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
 
     public override init() {}
@@ -18,7 +19,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(toggle)
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: PopoverView(model: model))
+        popover.contentViewController = NSHostingController(rootView: PopoverView(model: model) { [weak self] in self?.showSettings() })
         model.$snapshot.receive(on: RunLoop.main).sink { [weak self] _ in
             guard let self = self else { return }
             self.statusItem.button?.title = self.model.statusTitle
@@ -34,6 +35,24 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    private func showSettings() {
+        popover.performClose(nil)
+        // Rebuilt on each open: size labels follow the receiver last seen
+        let content = NSHostingController(rootView: SettingsView(settings: model.settings, panelPoints: model.panelPoints))
+        if let window = settingsWindow {
+            window.contentViewController = content
+        } else {
+            let window = NSWindow(contentViewController: content)
+            window.title = "Afterscreen Settings"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     /// Automation hook: connect to, or test, the first receiver whose name contains `match`

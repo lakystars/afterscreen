@@ -9,23 +9,28 @@ final class ModePickerTests: XCTestCase {
         ModeInfo(width: w, height: h, pixelWidth: pw, pixelHeight: ph, refreshRate: hz)
     }
 
-    func testPrefersBackingPixelsOverSamePointsLowRes() {
+    private let fiveK = PixelSize(width: 2560, height: 1440)
+
+    func testPrefersTheHiDPIModeOverSamePointsLowRes() {
         let modes = [mode(2560, 1440, 2560, 1440), mode(2560, 1440, 5120, 2880), mode(1920, 1080, 3840, 2160)]
-        XCTAssertEqual(VirtualDisplay.pickMode(modes, streamPixels: PixelSize(width: 5120, height: 2880),
-                                               sourcePoints: PixelSize(width: 2560, height: 1440)), 1)
+        XCTAssertEqual(VirtualDisplay.pickMode(modes, points: fiveK, hiDPI: true), 1)
+        XCTAssertEqual(VirtualDisplay.pickMode(modes, points: fiveK, hiDPI: false), 0)
+    }
+
+    func testScaledHiDPIModeHasDoubleBacking() {
+        let modes = [mode(2880, 1620, 2880, 1620), mode(2880, 1620, 5760, 3240), mode(2560, 1440, 5120, 2880)]
+        XCTAssertEqual(VirtualDisplay.pickMode(modes, points: PixelSize(width: 2880, height: 1620), hiDPI: true), 1)
     }
 
     func testPrefersHigherRefreshAmongExactMatches() {
         let modes = [mode(2560, 1440, 5120, 2880, 30), mode(2560, 1440, 5120, 2880, 60)]
-        XCTAssertEqual(VirtualDisplay.pickMode(modes, streamPixels: PixelSize(width: 5120, height: 2880),
-                                               sourcePoints: PixelSize(width: 2560, height: 1440)), 1)
+        XCTAssertEqual(VirtualDisplay.pickMode(modes, points: fiveK, hiDPI: true), 1)
     }
 
     func testFallsBackToLargestPixelsAtRequestedPoints() {
         let modes = [mode(2560, 1440, 2560, 1440), mode(1280, 720, 2560, 1440), mode(2560, 1440, 4096, 2304)]
-        XCTAssertEqual(VirtualDisplay.pickMode(modes, streamPixels: PixelSize(width: 3840, height: 2160),
-                                               sourcePoints: PixelSize(width: 2560, height: 1440)), 2)
-        XCTAssertNil(VirtualDisplay.pickMode([], streamPixels: PixelSize(width: 1, height: 1), sourcePoints: PixelSize(width: 1, height: 1)))
+        XCTAssertEqual(VirtualDisplay.pickMode(modes, points: fiveK, hiDPI: true), 2)
+        XCTAssertNil(VirtualDisplay.pickMode([], points: fiveK, hiDPI: true))
     }
 }
 
@@ -59,7 +64,6 @@ final class PathPolicyTests: XCTestCase {
         let c = PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK))
         XCTAssertEqual(c?.path, .tile)
         XCTAssertEqual(c?.streamPixels, fiveK)
-        XCTAssertEqual(c?.sourcePoints, PixelSize(width: 2560, height: 1440))
         XCTAssertNil(c?.video)
         XCTAssertEqual(PathPolicy.choose(link: .ethernet, capacityGbps: 9.4, welcome: welcome(panel: fiveK))?.path, .tile)
     }

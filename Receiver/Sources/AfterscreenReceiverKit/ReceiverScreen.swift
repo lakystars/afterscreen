@@ -68,4 +68,10 @@ public final class ReceiverScreen: StreamDisplay {
     public func cursorImage(_ image: CursorImage) {
         window.setCursorImage(image)
     }
+
+    public var brightness: Double? { Brightness.level }
+
+    public func setBrightness(_ level: Double) {
+        Brightness.set(level)
+    }
 }

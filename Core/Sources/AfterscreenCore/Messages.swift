@@ -92,18 +92,15 @@ public struct VideoLayer: Codable, Equatable {
 public struct StreamConfig: Codable, Equatable {
     public var path: StreamPath
     public var streamPixels: PixelSize
-    public var sourcePoints: PixelSize
     /// Set on the hybrid path
     public var video: VideoLayer?
     public var linkKind: LinkKind
     /// A quality test stage: generated frames, no virtual display
     public var test: Bool
 
-    public init(path: StreamPath, streamPixels: PixelSize, sourcePoints: PixelSize, video: VideoLayer?, linkKind: LinkKind,
-                test: Bool = false) {
+    public init(path: StreamPath, streamPixels: PixelSize, video: VideoLayer?, linkKind: LinkKind, test: Bool = false) {
         self.path = path
         self.streamPixels = streamPixels
-        self.sourcePoints = sourcePoints
         self.video = video
         self.linkKind = linkKind
         self.test = test
@@ -119,9 +116,11 @@ public struct ReceiverStats: Codable, Equatable {
     public var cpuPercent: Double
     public var memoryBytes: UInt64
     public var gpuPercent: Double
+    /// Panel brightness 0…1; nil when the receiver cannot read it
+    public var brightness: Double?
 
     public init(receivedFPS: Double, displayedFPS: Double, uploadMs: Double, decompressMs: Double, lateFrames: Int,
-                cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double) {
+                cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, brightness: Double?) {
         self.receivedFPS = receivedFPS
         self.displayedFPS = displayedFPS
         self.uploadMs = uploadMs
@@ -130,6 +129,7 @@ public struct ReceiverStats: Codable, Equatable {
         self.cpuPercent = cpuPercent
         self.memoryBytes = memoryBytes
         self.gpuPercent = gpuPercent
+        self.brightness = brightness
     }
 }
 
@@ -166,7 +166,7 @@ public enum JSONWire {
 }
 
 public struct CursorImage: Equatable {
-    /// Size and hotspot in source points
+    /// Size and hotspot: points on the sender, stream pixels on the wire
     public var width: Int
     public var height: Int
     public var hotX: Int
@@ -225,6 +225,21 @@ public enum PingWire {
     public static func decode(_ data: Data) throws -> UInt64 {
         var r = ByteReader(data)
         return try r.u64()
+    }
+}
+
+/// brightness: f32 panel brightness, 0…1
+public enum BrightnessWire {
+    public static func encode(_ level: Double) -> Data {
+        var w = ByteWriter(capacity: 4)
+        w.f32(Float(level.isNaN ? 0 : min(1, max(0, level))))
+        return w.data
+    }
+
+    public static func decode(_ data: Data) throws -> Double {
+        var r = ByteReader(data)
+        let v = Double(try r.f32())
+        return v.isNaN ? 0 : min(1, max(0, v))
     }
 }
 

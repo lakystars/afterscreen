@@ -13,13 +13,12 @@ public enum PathPolicy {
     public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome) -> StreamConfig? {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
         let panel = aligned(welcome.panelPixels)
-        let points = welcome.panelPoints
-        let tiles = StreamConfig(path: .tile, streamPixels: panel, sourcePoints: points, video: nil, linkKind: link)
+        let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link)
         if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps { return tiles }
         guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
         let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
         let video = VideoLayer(codec: codec, pixels: videoPixels(panel, codec: codec), bitrate: bitrate(capacityGbps: capacityGbps))
-        return StreamConfig(path: .hybrid, streamPixels: panel, sourcePoints: points, video: video, linkKind: link)
+        return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link)
     }
 
     /// A quality test stage of `config` at `size`

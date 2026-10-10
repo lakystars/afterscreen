@@ -38,7 +38,6 @@ final class StreamWindow {
     private var cursorImage: CursorImage?
     private var cursorNormalized: (x: Float, y: Float, visible: Bool) = (0, 0, false)
     private var contentPixels = CGSize.zero
-    private var sourcePoints = CGSize.zero
     /// The HUD was shown for a quality test, not by the user
     private var forcedHUD = false
 
@@ -55,6 +54,9 @@ final class StreamWindow {
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces]
+        // A menu bar app never owns the menu bar, so hiding it through presentation options does not apply:
+        // the stream sits above the menu bar and Dock instead
+        if !windowed { window.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1) }
         view.frame = NSRect(origin: .zero, size: frame.size)
         view.layer = root
         view.wantsLayer = true
@@ -88,7 +90,6 @@ final class StreamWindow {
     /// Called again for each new config of a session (quality test stages)
     func show(config: StreamConfig) {
         contentPixels = CGSize(width: config.streamPixels.width, height: config.streamPixels.height)
-        sourcePoints = CGSize(width: config.sourcePoints.width, height: config.sourcePoints.height)
         if config.test && hudLayer.isHidden {
             hudLayer.isHidden = false
             forcedHUD = true
@@ -161,12 +162,13 @@ final class StreamWindow {
     }
 
     private func placeCursor() {
-        guard let image = cursorImage, sourcePoints.width > 0 else {
+        guard let image = cursorImage, contentPixels.width > 0 else {
             cursorLayer.isHidden = true
             return
         }
         let rect = videoRect
-        let scale = rect.width / sourcePoints.width
+        // Cursor sizes arrive in stream pixels
+        let scale = rect.width / contentPixels.width
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         cursorLayer.bounds = CGRect(x: 0, y: 0, width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)

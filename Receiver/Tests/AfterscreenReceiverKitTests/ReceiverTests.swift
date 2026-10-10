@@ -64,6 +64,9 @@ final class FakeDisplay: StreamDisplay {
     }
     func setVideoParams(codec: VideoCodec, parameterSets: [Data]) -> Bool { record { log.append("params") }; return true }
     func decodeVideo(avcc: Data) -> Bool { record { videoFrames += 1; log.append("video") }; return true }
+    var brightness: Double? = 0.4
+    var brightnessSet: [Double] = []
+    func setBrightness(_ level: Double) { record { brightnessSet.append(level) } }
     func cursor(x: Float, y: Float, visible: Bool) {}
     func cursorImage(_ image: CursorImage) {}
 }
@@ -157,7 +160,7 @@ final class ReceiverSessionTests: XCTestCase {
 
     func testConfigBeginsStream() {
         let config = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
-                                  sourcePoints: PixelSize(width: 128, height: 64), video: nil, linkKind: .loopback)
+                                  video: nil, linkKind: .loopback)
         client.send(try! JSONWire.message(.config, config))
         waitForDisplay { [display] in display.begun == [config] }
     }
@@ -166,10 +169,30 @@ final class ReceiverSessionTests: XCTestCase {
         let g = TileGeometry(width: 256, height: 128)
         let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1), TileRun(row: 1, first: 2, count: 2)])
         client.send(try! JSONWire.message(.config, StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
-                                                                 sourcePoints: PixelSize(width: 128, height: 64), video: nil, linkKind: .loopback)))
+                                                                 video: nil, linkKind: .loopback)))
         client.send(Message(type: .tileFrame, payload: frame.payload))
         waitForDisplay { [display] in display.tiles.count == 1 }
         XCTAssertEqual(display.tiles.first, frame.raw)
+    }
+
+    func testBrightnessMessageSetsThePanel() {
+        client.send(Message(type: .brightness, payload: BrightnessWire.encode(0.8)))
+        waitForDisplay { [display] in !display.brightnessSet.isEmpty }
+        XCTAssertEqual(display.read { display.brightnessSet.first } ?? 0, 0.8, accuracy: 1e-6)
+    }
+
+    func testStatsReportBrightness() throws {
+        let e = expectation(description: "stats")
+        e.assertForOverFulfill = false
+        var stats: ReceiverStats?
+        client.onMessage = { m in
+            guard m.type == .stats else { return }
+            stats = try? JSONWire.decode(ReceiverStats.self, from: m.payload)
+            e.fulfill()
+        }
+        client.send(try! JSONWire.message(.config, tileConfig))
+        wait(for: [e], timeout: 3)
+        XCTAssertEqual(stats?.brightness, 0.4)
     }
 
     func testPingEchoesAsPong() throws {
@@ -190,7 +213,7 @@ final class ReceiverSessionTests: XCTestCase {
     }
 
     private let tileConfig = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
-                                          sourcePoints: PixelSize(width: 128, height: 64), video: nil, linkKind: .loopback)
+                                          video: nil, linkKind: .loopback)
 
     private func expectEnd(_ send: () -> Void) -> String {
         let ended = expectation(description: "ended")
@@ -207,7 +230,6 @@ final class ReceiverSessionTests: XCTestCase {
     }
 
     private let hybridConfig = StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 256, height: 128),
-                                            sourcePoints: PixelSize(width: 128, height: 64),
                                             video: VideoLayer(codec: .hevc, pixels: PixelSize(width: 192, height: 96), bitrate: 20_000_000),
                                             linkKind: .wifi)
 

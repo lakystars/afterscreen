@@ -1,5 +1,6 @@
 import AppKit
 import AfterscreenCore
+import SwiftUI
 
 /// Menu bar app: advertises over Bonjour, accepts one sender at a time
 public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NetServiceDelegate {
@@ -14,6 +15,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         didSet { FileHandle.standardError.write(Data("[receiver] \(stateLine)\n".utf8)) }
     }
     private var startedAt: Date?
+    private let settings = ReceiverSettings()
+    private var settingsWindow: NSWindow?
+    /// The session was stopped on this Mac, so its display stays on
+    private var stoppedHere = false
 
     public override init() {}
 
@@ -37,7 +42,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         statusItem.menu = menu
 
         screen = ReceiverScreen(windowed: CommandLine.arguments.contains("--windowed"))
-        screen?.onExitRequest = { [weak self] in self?.session?.stop(reason: "Stopped on the receiver") }
+        screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
         screen?.hudText = { [weak self] in self?.hudText() ?? "" }
         guard screen != nil else {
             stateLine = "Metal is unavailable on this Mac"
@@ -67,12 +72,15 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         self.service = service
     }
 
+    private func refuse(_ connection: Connection, _ reason: String) {
+        connection.send((try? JSONWire.message(.bye, Bye(reason: reason))) ?? Message(type: .bye))
+        connection.closeAfterFlush(reason: reason)
+    }
+
     private func accept(_ connection: Connection) {
-        guard session == nil, let screen = screen else {
-            connection.send((try? JSONWire.message(.bye, Bye(reason: "Receiver is busy with another sender"))) ?? Message(type: .bye))
-            connection.closeAfterFlush(reason: "busy")
-            return
-        }
+        guard session == nil, let screen = screen else { return refuse(connection, "Receiver is busy with another sender") }
+        let link = connection.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
+        guard settings.accepts(link) else { return refuse(connection, "This receiver accepts Thunderbolt, USB and Ethernet only") }
         let session = ReceiverSession(connection: connection, hardware: hardware, display: screen)
         session.onPeer = { [weak self] hello in
             self?.stateLine = "Streaming from \(hello.name)"
@@ -82,6 +90,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             guard let self = self else { return }
             let duration = self.startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
             self.lastSummary = "Last session: \(self.session?.peer?.name ?? "sender"), \(duration / 60)m \(duration % 60)s — \(reason)"
+            if self.settings.onDisconnect == .sleepDisplay && !self.stoppedHere && self.session?.config?.test != true {
+                ReceiverAppDelegate.sleepDisplay()
+            }
+            self.stoppedHere = false
             self.session = nil
             self.stateLine = "Waiting for a sender"
             self.statusItem.button?.title = "▭"
@@ -139,10 +151,35 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             stop.target = self
             menu.addItem(stop)
         }
+        let prefs = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        prefs.target = self
+        menu.addItem(prefs)
         menu.addItem(NSMenuItem(title: "Quit Afterscreen Receiver", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     @objc private func stopStreaming() {
+        stoppedHere = true
         session?.stop(reason: "Stopped on the receiver")
+    }
+
+    @objc private func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: ReceiverSettingsView(settings: settings)))
+            window.title = "Afterscreen Receiver Settings"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Same as `pmset displaysleepnow`, which needs no privileges
+    private static func sleepDisplay() {
+        let pmset = Process()
+        pmset.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        pmset.arguments = ["displaysleepnow"]
+        try? pmset.run()
     }
 }

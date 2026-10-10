@@ -130,9 +130,13 @@ private struct QualityCard: View {
 
 public struct PopoverView: View {
     @ObservedObject var model: AppModel
+    var openSettings: () -> Void
     @State private var showHardware = false
 
-    public init(model: AppModel) { self.model = model }
+    public init(model: AppModel, openSettings: @escaping () -> Void) {
+        self.model = model
+        self.openSettings = openSettings
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -149,6 +153,7 @@ public struct PopoverView: View {
                     Text(message).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
+                Button("Settings…", action: openSettings).keyboardShortcut(",")
                 Button("Quit") { NSApp.terminate(nil) }
             }
         }
@@ -196,7 +201,7 @@ public struct PopoverView: View {
             if let report = model.testReport { QualityCard(report: report, testing: true) }
             HStack {
                 Spacer()
-                Button("Stop") { model.disconnect() }
+                Button("Stop") { model.stopTest() }
             }
         }
     }
@@ -212,6 +217,15 @@ public struct PopoverView: View {
                     .foregroundStyle(s.isStreaming ? .green : .secondary)
             }
             Divider()
+            if let level = model.brightness {
+                SectionTitle(text: "Brightness")
+                HStack(spacing: 8) {
+                    Image(systemName: "sun.min").foregroundStyle(.secondary)
+                    Slider(value: Binding(get: { level }, set: { model.setBrightness($0) }), in: 0...1)
+                    Image(systemName: "sun.max").foregroundStyle(.secondary)
+                }
+                .help("Brightness of the receiver's panel")
+            }
             SectionTitle(text: "Connection")
             Row("Method", "\(LinkLabel.glyph(s.link)) \(LinkLabel.name(s.link)) · \(s.interface ?? "—")")
             if let mtu = s.mtu {

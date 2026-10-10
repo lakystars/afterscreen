@@ -14,13 +14,14 @@ final class MessagesTests: XCTestCase {
                               panelPixels: PixelSize(width: 5120, height: 2880), panelPoints: PixelSize(width: 2560, height: 1440),
                               hevcDecode: true, h264Decode: true, bc7: true))
         try roundTrip(StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 5120, height: 2880),
-                                   sourcePoints: PixelSize(width: 2560, height: 1440),
                                    video: VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 160_000_000),
                                    linkKind: .wifi))
         try roundTrip(StreamConfig(path: .tile, streamPixels: PixelSize(width: 5120, height: 2880),
-                                   sourcePoints: PixelSize(width: 2560, height: 1440), video: nil, linkKind: .ethernet))
+                                   video: nil, linkKind: .ethernet))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
-                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18))
+                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: 0.7))
+        try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
+                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, brightness: nil))
         try roundTrip(Bye(reason: "user"))
         try roundTrip(ProbeResult(bytes: 1 << 20, seconds: 0.3))
     }
@@ -38,6 +39,14 @@ final class MessagesTests: XCTestCase {
     func testTruncatedCursorThrows() {
         XCTAssertThrowsError(try CursorWire.parsePos(Data([1, 2, 3])))
         XCTAssertThrowsError(try CursorWire.parseImage(Data([1, 0, 2])))
+    }
+
+    func testBrightnessWireClampsToTheUnitRange() throws {
+        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(0.25)), 0.25)
+        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(1.7)), 1)
+        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(-1)), 0)
+        XCTAssertEqual(try BrightnessWire.decode(BrightnessWire.encode(.nan)), 0)
+        XCTAssertThrowsError(try BrightnessWire.decode(Data([1, 2])))
     }
 
     func testPingRoundTripAndTruncation() throws {

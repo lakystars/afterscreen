@@ -25,18 +25,20 @@ public enum VirtualDisplayError: Error, CustomStringConvertible {
     }
 }
 
-/// Extended display backed by CGVirtualDisplay; removed when released
+/// Extended display backed by CGVirtualDisplay; removed when released.
+/// Registers every "looks like" size, so System Settings → Displays lists them too
 public final class VirtualDisplay {
     public let displayID: CGDirectDisplayID
     private let display: CGVirtualDisplay
+    private let hiDPI: Bool
 
-    /// `streamPixels` is the backing size; HiDPI when it is twice `points`
-    public init(name: String, streamPixels: PixelSize, points: PixelSize, refresh: Double = 60) throws {
-        let hiDPI = streamPixels.width >= points.width * 2
+    /// `modes` in points; HiDPI modes have twice the points as backing pixels
+    public init(name: String, streamPixels: PixelSize, hiDPI: Bool, modes: [PixelSize], initial: PixelSize, refresh: Double = 60) throws {
+        let scale = hiDPI ? 2 : 1
         let desc = CGVirtualDisplayDescriptor()
         desc.name = name
-        desc.maxPixelsWide = UInt32(streamPixels.width)
-        desc.maxPixelsHigh = UInt32(streamPixels.height)
+        desc.maxPixelsWide = UInt32(max(streamPixels.width, (modes.map(\.width).max() ?? 0) * scale))
+        desc.maxPixelsHigh = UInt32(max(streamPixels.height, (modes.map(\.height).max() ?? 0) * scale))
         // 27" class panel; macOS uses it only for physical size hints
         desc.sizeInMillimeters = CGSize(width: 597, height: 336)
         desc.vendorID = 0x5056
@@ -46,39 +48,36 @@ public final class VirtualDisplay {
         guard let display = CGVirtualDisplay(descriptor: desc) else { throw VirtualDisplayError.create }
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = hiDPI ? 1 : 0
-        settings.modes = [CGVirtualDisplayMode(width: UInt(points.width), height: UInt(points.height), refreshRate: refresh)]
+        settings.modes = modes.map { CGVirtualDisplayMode(width: UInt($0.width), height: UInt($0.height), refreshRate: refresh) }
         guard display.apply(settings) else { throw VirtualDisplayError.settings }
         self.display = display
+        self.hiDPI = hiDPI
         displayID = display.displayID
-        try activateMode(streamPixels: streamPixels, points: points)
-    }
-
-    /// Lists modes including duplicate low-resolution ones, then applies the backing-size match
-    private func activateMode(streamPixels: PixelSize, points: PixelSize) throws {
+        // The mode list appears shortly after the settings apply
         let deadline = Date().addingTimeInterval(3)
-        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
-        while Date() < deadline {
-            let modes = (CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode]) ?? []
-            let infos = modes.map { ModeInfo(width: $0.width, height: $0.height, pixelWidth: $0.pixelWidth,
-                                             pixelHeight: $0.pixelHeight, refreshRate: $0.refreshRate) }
-            if let index = VirtualDisplay.pickMode(infos, streamPixels: streamPixels, sourcePoints: points),
-               CGDisplaySetDisplayMode(displayID, modes[index], nil) == .success {
-                return
-            }
+        while !setMode(points: initial) {
+            guard Date() < deadline else { throw VirtualDisplayError.mode }
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
-        throw VirtualDisplayError.mode
     }
 
-    /// Exact backing-pixel match (fastest refresh), else the largest backing at the requested points
-    public static func pickMode(_ modes: [ModeInfo], streamPixels: PixelSize, sourcePoints: PixelSize) -> Int? {
-        let exact = modes.indices.filter {
-            modes[$0].pixelWidth == streamPixels.width && modes[$0].pixelHeight == streamPixels.height
-        }
+    /// Switches the "looks like" size; false when macOS lists no such mode
+    @discardableResult
+    public func setMode(points: PixelSize) -> Bool {
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        let modes = (CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode]) ?? []
+        let infos = modes.map { ModeInfo(width: $0.width, height: $0.height, pixelWidth: $0.pixelWidth,
+                                         pixelHeight: $0.pixelHeight, refreshRate: $0.refreshRate) }
+        guard let index = VirtualDisplay.pickMode(infos, points: points, hiDPI: hiDPI) else { return false }
+        return CGDisplaySetDisplayMode(displayID, modes[index], nil) == .success
+    }
+
+    /// The mode at `points` with full backing (2× when HiDPI), fastest refresh; else the largest backing at those points.
+    /// Duplicate low-resolution modes must be in the list: macOS lists the 1x variant of a HiDPI size first
+    public static func pickMode(_ modes: [ModeInfo], points: PixelSize, hiDPI: Bool) -> Int? {
+        let atPoints = modes.indices.filter { modes[$0].width == points.width && modes[$0].height == points.height }
+        let exact = atPoints.filter { modes[$0].pixelWidth == points.width * (hiDPI ? 2 : 1) }
         if let best = exact.max(by: { modes[$0].refreshRate < modes[$1].refreshRate }) { return best }
-        let atPoints = modes.indices.filter {
-            modes[$0].width == sourcePoints.width && modes[$0].height == sourcePoints.height
-        }
         return atPoints.max(by: { modes[$0].pixelWidth < modes[$1].pixelWidth })
     }
 

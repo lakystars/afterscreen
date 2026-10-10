@@ -19,6 +19,10 @@ public protocol StreamDisplay: AnyObject {
     func decodeVideo(avcc: Data) -> Bool
     func cursor(x: Float, y: Float, visible: Bool)
     func cursorImage(_ image: CursorImage)
+    /// Panel brightness 0…1; nil when unreadable
+    var brightness: Double? { get }
+    /// Main queue
+    func setBrightness(_ level: Double)
     var gpuMeter: GPUTimeMeter { get }
     var displayedFPS: Double { get }
     var lateFrames: Int { get }
@@ -96,7 +100,6 @@ public final class ReceiverSession {
         let width = 16...7680, height = 16...4320
         return width.contains(c.streamPixels.width) && height.contains(c.streamPixels.height)
             && c.streamPixels.width % 4 == 0 && c.streamPixels.height % 4 == 0
-            && width.contains(c.sourcePoints.width) && height.contains(c.sourcePoints.height)
     }
 
     public func start() {
@@ -178,6 +181,9 @@ public final class ReceiverSession {
         case .cursorImage:
             guard let image = try? CursorWire.parseImage(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.cursorImage(image) }
+        case .brightness:
+            guard let level = try? BrightnessWire.decode(m.payload) else { return }
+            DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(level) }
         case .probe:
             if probeStart == nil { probeStart = Date() }
             if m.flags & ProbeFlags.end != 0 {
@@ -227,7 +233,7 @@ public final class ReceiverSession {
         let stats = ReceiverStats(receivedFPS: received.ratePerSecond(), displayedFPS: display.displayedFPS,
                                   uploadMs: display.uploadMs, decompressMs: display.decodeMs, lateFrames: display.lateFrames,
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
-                                  gpuPercent: display.gpuMeter.percentSinceLastRead())
+                                  gpuPercent: display.gpuMeter.percentSinceLastRead(), brightness: display.brightness)
         send(.stats, stats)
     }
 

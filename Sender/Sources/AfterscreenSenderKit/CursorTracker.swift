@@ -86,6 +86,12 @@ final class CursorTracker {
         timer = nil
     }
 
+    /// Sends the current image again on the next poll
+    func resendImage() {
+        lastImage = nil
+        lastSeed = nil
+    }
+
     private func schedule(_ timer: DispatchSourceTimer) {
         let interval = rate.interval
         timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(interval > 0.02 ? 5 : 1))
