@@ -28,6 +28,7 @@ public final class AppModel: ObservableObject {
     private var retry: DispatchWorkItem?
     /// Reconnect target once the replaced session ends
     private var reconnect: DiscoveredReceiver?
+    private var quitDone: (() -> Void)?
     private let paths = NWPathMonitor()
     private var cancellables: Set<AnyCancellable> = []
 
@@ -103,7 +104,7 @@ public final class AppModel: ObservableObject {
     public func setLink(_ link: LinkKind?) {
         settings.link = link
         // Automatic before the links are known: no basis to switch
-        guard let session = session, !isTesting, let receiver = receivers.first(where: { $0.name == activeReceiver }),
+        guard let session = session, !isTesting, !session.isClosing, let receiver = receivers.first(where: { $0.name == activeReceiver }),
               let target = link ?? links[receiver.name]?.first, snapshot.link != target else { return }
         reconnect = receiver
         let name = link.map { LinkLabel.name($0) } ?? L10n.t("the fastest link", "가장 빠른 링크")
@@ -112,7 +113,7 @@ public final class AppModel: ObservableObject {
 
     /// New transfer size or display role: a new session
     private func restart(_ reason: String) {
-        guard let session = session, !isTesting else { return }
+        guard let session = session, !isTesting, !session.isClosing else { return }
         // Bonjour may drop the receiver; the session keeps its target
         reconnect = receivers.first { $0.name == activeReceiver } ?? session.target
         session.stop(reason: reason, relink: true)
@@ -155,6 +156,10 @@ public final class AppModel: ObservableObject {
             self.session = nil
             self.activeReceiver = nil
             self.lastMessage = reason
+            if let done = self.quitDone {
+                self.quitDone = nil
+                return done()
+            }
             if let receiver = self.reconnect {
                 self.reconnect = nil
                 return self.start(receiver, manual: true)
@@ -172,7 +177,15 @@ public final class AppModel: ObservableObject {
     public func disconnect() {
         auto.userDisconnected()
         reconnect = nil
-        session?.stop()
+        session?.close()
+    }
+
+    /// Quit while connected: the iMac powers off first
+    /// `done` once the session has ended
+    public func closeForQuit(_ done: @escaping () -> Void) {
+        guard session != nil else { return done() }
+        quitDone = done
+        disconnect()
     }
 
     public func setBrightness(_ level: Double) {
@@ -216,6 +229,8 @@ public final class AppModel: ObservableObject {
             self?.session = nil
             self?.isTesting = false
             self?.lastMessage = reason
+            self?.quitDone?()
+            self?.quitDone = nil
         }
         self.session = session
         testReport = QualityTest.Report(receiver: receiver.name, total: QualityTest.scales.count)

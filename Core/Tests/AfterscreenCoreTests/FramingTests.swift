@@ -100,8 +100,9 @@ final class FramingTests: XCTestCase {
         XCTAssertEqual(pool.freeCount, 2)
     }
 
-    func testSenderStatsMessageIsProtocolVersionEight() {
-        XCTAssertEqual(AfterscreenProtocol.version, 8)
+    func testSenderStatsMessageIsProtocolVersionNine() {
+        XCTAssertEqual(AfterscreenProtocol.version, 9)
+        XCTAssertEqual(MessageType.powerOff.rawValue, 0x27)
         XCTAssertEqual(MessageType.senderStats.rawValue, 0x51)
         XCTAssertEqual(MessageType.deband.rawValue, 0x26)
     }

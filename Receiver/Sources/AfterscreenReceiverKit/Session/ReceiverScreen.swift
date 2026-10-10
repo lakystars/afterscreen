@@ -35,6 +35,8 @@ public final class ReceiverScreen: StreamDisplay {
     /// Held while a stream shows; input arrives on the sender
     /// Without it the iMac idles into display sleep
     private var awake: NSObjectProtocol?
+    /// Declared user activity; held until the stream ends
+    private var userActivity = IOPMAssertionID(0)
 
     public init?(windowed: Bool = false) {
         guard let device = MTLCreateSystemDefaultDevice(), let renderer = StreamRenderer(device: device) else { return nil }
@@ -67,8 +69,7 @@ public final class ReceiverScreen: StreamDisplay {
         if awake == nil {
             // Wakes a display slept by the last session's end
             // The activity below only keeps it awake
-            var id: IOPMAssertionID = 0
-            IOPMAssertionDeclareUserActivity("Afterscreen stream" as CFString, kIOPMUserActiveLocal, &id)
+            IOPMAssertionDeclareUserActivity("Afterscreen stream" as CFString, kIOPMUserActiveLocal, &userActivity)
             awake = ProcessInfo.processInfo.beginActivity(options: [.idleDisplaySleepDisabled, .userInitiated],
                                                           reason: "Showing a Afterscreen stream")
         }
@@ -115,7 +116,8 @@ public final class ReceiverScreen: StreamDisplay {
         audio.stop()
         // Link or size change: the next session takes this window
         // Power effects skipped; output level kept for the sender's return
-        guard !relink else {
+        // Already powered off: closed like any end
+        if relink, window.isPoweredOn {
             return window.hold(for: StreamWindow.relinkWait) { [weak self] in
                 self?.releaseAwake()
                 self?.output.restore()
@@ -134,9 +136,15 @@ public final class ReceiverScreen: StreamDisplay {
         output.restore()
     }
 
+    public func powerOff(done: @escaping () -> Void) {
+        window.powerOff(done: done)
+    }
+
     private func releaseAwake() {
         if let a = awake { ProcessInfo.processInfo.endActivity(a) }
         awake = nil
+        if userActivity != 0 { IOPMAssertionRelease(userActivity) }
+        userActivity = 0
     }
 
     public func showTiles(_ frame: TileFrame, present: Bool) -> Bool {

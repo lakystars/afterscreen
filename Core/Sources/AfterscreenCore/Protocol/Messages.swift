@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 8
+    public static let version = 9
     public static let bonjourType = "_afterscreen._tcp"
 }
 

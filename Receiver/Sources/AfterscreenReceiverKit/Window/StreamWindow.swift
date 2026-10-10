@@ -345,6 +345,36 @@ final class StreamWindow {
         }
     }
 
+    /// Power-off over the live stream; `done` once black
+    /// Window stays until `hide`, which then closes it at once
+    func powerOff(done: @escaping () -> Void) {
+        guard let window = window, window.isVisible else { return done() }
+        // Pending power-on steps (HUD, hint, pointer) become no-ops
+        // No key monitor: a late full-screen entry cannot power on
+        generation += 1
+        if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
+        keyMonitor = nil
+        cursorSuppressed = true
+        cursorLayer.isHidden = true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            hud.animator().alphaValue = 0
+        }
+        guard power.powerOff(effect: shownEffect) else { return done() }
+        view.layoutSubtreeIfNeeded()
+        switch shownEffect {
+        case .crt: tube.powerOff()
+        case .tiles: wave.powerOff(live: true)
+        case .none: break
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: false), execute: done)
+    }
+
+    /// false once powered off: nothing to hold for a relink
+    var isPoweredOn: Bool {
+        power.on
+    }
+
     func hide() {
         held?.cancel()
         held = nil
@@ -416,7 +446,9 @@ final class StreamWindow {
         if closing?.window === window { closing = nil }
         if shownEffect == .tiles { wave.finish() }
         // Closing a full-screen window exits its Space via system transition
-        if window.styleMask.contains(.fullScreen) { window.close() } else { window.orderOut(nil) }
+        // Closed either way: a window mid-slide must not come back
+        if !window.styleMask.contains(.fullScreen) { window.orderOut(nil) }
+        window.close()
         if !windowed { NSApp.presentationOptions = [] }
     }
 
@@ -452,8 +484,11 @@ final class StreamWindow {
                 guard let window = window else { return }
                 self?.onVisibilityChange?(window.occlusionState.contains(.visible))
             },
-            center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
-                self?.powerOn()
+            center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self, weak window] _ in
+                guard let self = self, let window = window else { return }
+                // Ended mid-slide: the window was hidden before full screen
+                guard self.window === window, self.keyMonitor != nil else { return window.close() }
+                self.powerOn()
             },
         ]
         self.window = window

@@ -21,6 +21,9 @@ public protocol StreamDisplay: AnyObject {
     func redraw()
     /// `relink`: sender reconnects at once; picture held for next session
     func end(reason: String, relink: Bool)
+    /// Main queue: power-off over the live stream
+    /// `done` once black; `end` then closes at once
+    func powerOff(done: @escaping () -> Void)
     /// false when the tile data fails to decode
     /// `present`: draw to the screen; else only update the texture
     /// `present` false when frames queue behind: refresh never limits intake
@@ -268,6 +271,14 @@ public final class ReceiverSession {
             let bye = (try? JSONWire.decode(Bye.self, from: m.payload)) ?? Bye(reason: "sender stopped")
             peerBye = bye
             connection.close(reason: bye.reason)
+        case .powerOff:
+            guard currentPeer != nil else { return }
+            let bye = (try? JSONWire.decode(Bye.self, from: m.payload)) ?? Bye(reason: "sender stopped")
+            peerBye = bye
+            // Picture and sound live until black; bye ends both
+            DispatchQueue.main.async { [weak self] in
+                self?.display?.powerOff { self?.stop(reason: bye.reason) }
+            }
         case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel:
             break
         }

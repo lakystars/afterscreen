@@ -58,6 +58,9 @@ final class FakeDisplay: StreamDisplay {
     func prepare(config: StreamConfig) { record { log.append("prepare") } }
     func releaseDecodeResources() { record { log.append("release") } }
     func end(reason: String, relink: Bool) { record { ended.append((reason, relink)) } }
+    /// Held until the test calls it: the power-off still playing
+    var powerOffDone: (() -> Void)?
+    func powerOff(done: @escaping () -> Void) { record { powerOffDone = done } }
     func showTiles(_ frame: TileFrame, present: Bool) -> Bool {
         guard let raw = try? frame.decodeAll() else { return false }
         record { tiles.append(raw); presented.append(present); log.append("tiles") }
@@ -255,6 +258,34 @@ final class ReceiverSessionTests: XCTestCase {
     func testTheSendersReasonSurvivesItsClose() throws {
         XCTAssertEqual(try endBySender(Bye(reason: "Stopped on this Mac")), "Stopped on this Mac")
         XCTAssertFalse(session.relinking)
+        XCTAssertEqual(display.read { display.ended.map(\.relink) }, [false])
+    }
+
+    func testAPowerOffKeepsTheStreamLiveUntilBlackThenSaysBye() throws {
+        _ = try token()
+        let bye = expectation(description: "bye")
+        var received: Bye?
+        client.onMessage = { m in
+            guard m.type == .bye else { return }
+            received = try? JSONWire.decode(Bye.self, from: m.payload)
+            bye.fulfill()
+        }
+        let ended = expectation(description: "ended")
+        var reason: String?
+        session.onEnd = { reason = $0; ended.fulfill() }
+        client.send(try JSONWire.message(.powerOff, Bye(reason: "Stopped on this Mac")))
+        waitForDisplay { [display] in display.powerOffDone != nil }
+        // Frames during the power-off still reach the screen
+        let g = TileGeometry(width: 256, height: 128)
+        client.send(try JSONWire.message(.config, StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
+                                                               video: nil, linkKind: .loopback)))
+        client.send(Message(type: .tileFrame, payload: tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        XCTAssertTrue(display.read { display.ended.isEmpty }, "live until black")
+        DispatchQueue.main.async { [display] in display.read { display.powerOffDone }?() }
+        wait(for: [bye, ended], timeout: 3)
+        XCTAssertEqual(received?.reason, "Stopped on this Mac")
+        XCTAssertEqual(reason, "Stopped on this Mac")
         XCTAssertEqual(display.read { display.ended.map(\.relink) }, [false])
     }
 

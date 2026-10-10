@@ -71,6 +71,15 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
 
     public override init() {}
 
+    /// Quit while connected waits for the iMac's power-off
+    /// Sound returns to this Mac as its screen turns black
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model.isActive else { return .terminateNow }
+        // Async: a session that ends at once replies after terminateLater
+        model.closeForQuit { DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) } }
+        return .terminateLater
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)

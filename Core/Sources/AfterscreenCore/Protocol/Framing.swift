@@ -16,6 +16,9 @@ public enum MessageType: UInt8, CaseIterable {
     /// Sender's output volume and mute, set on the receiver
     case volume = 0x25
     case deband = 0x26
+    /// Sender's disconnect: power-off over the live stream
+    /// Receiver says bye once the screen is black
+    case powerOff = 0x27
     case probe = 0x30
     case probeResult = 0x31
     case ping = 0x40

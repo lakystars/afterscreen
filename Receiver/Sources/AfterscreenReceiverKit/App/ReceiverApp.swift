@@ -193,7 +193,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             return
         }
         stoppedHere = true
-        session.stop(reason: L10n.t("Stopped on the iMac", "iMac에서 연결을 끊었습니다"), pause: true)
+        // Power-off over the live stream; bye at black
+        let stop = { session.stop(reason: L10n.t("Stopped on the iMac", "iMac에서 연결을 끊었습니다"), pause: true) }
+        guard let screen = screen else { return stop() }
+        screen.powerOff(done: stop)
     }
 
     @objc private func showSettings() {

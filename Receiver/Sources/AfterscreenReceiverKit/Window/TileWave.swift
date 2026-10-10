@@ -30,9 +30,11 @@ final class TileWave {
         run(for: TileWave.onDuration, on: .main) { [weak self] in self?.requestRedraw?() }
     }
 
-    /// Plays over the picture kept at the session's end
-    func powerOff() {
+    /// `live`: over the running stream, redrawn as for power-on
+    /// Else over the picture kept at the session's end
+    func powerOff(live: Bool = false) {
         renderer.setWave(.closing(start: CACurrentMediaTime(), duration: TileWave.offDuration))
+        if live { return run(for: TileWave.offDuration, on: .main) { [weak self] in self?.requestRedraw?() } }
         run(for: TileWave.offDuration, on: queue) { [renderer] in renderer.drawFarewell() }
     }
 

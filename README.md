@@ -67,6 +67,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 - The Mac's sound plays on the iMac's speakers (the Mac stays silent meanwhile), with a switch at the top of the menu. The iMac's volume and mute follow the Mac's volume keys and menu bar, and go back to the iMac's own level when the sound stops.
 - iMac brightness slider. The value is remembered and applied at every connection, full brightness by default.
 - The pointer travels on a connection of its own and never waits behind frames.
+- Disconnecting, from either Mac or by quitting, plays the power-off over the live picture and sound; the sound comes back to the Mac as the iMac's screen turns black.
 
 **Everyday use**
 - Connect automatically to the last receiver when it appears, after sleep and after the link drops.
@@ -187,9 +188,9 @@ Receiver (**Settings…** in its menu):
 | Retransmits | Packets sent again after a loss |
 | Link quality | 100, minus penalties for retransmits, jitter and a link slower than the stream needs |
 | MTU | Packet size; 9000 is recommended on Thunderbolt and USB |
-| Frames: captured · sent · shown | Frames per second the Mac drew, sent, and the iMac showed |
 | Use as | Extend: the iMac is a display of its own. Mirror: it shows the Mac's main display |
 | Optimize for | While mirroring. This Mac: it keeps its resolution. iMac: the desktop takes the iMac's resolution |
+| Frames: captured · sent · shown | Frames per second the Mac drew, sent, and the iMac showed |
 | Dropped / min | Frames replaced by a newer one before they could be sent |
 | Resolution | Size of the stream |
 | Moving areas | Tile path: BC7, or BC1 and how many tiles. Hybrid path: video codec, layer size and bitrate |

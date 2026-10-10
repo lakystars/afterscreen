@@ -88,6 +88,8 @@ public final class SenderSession {
     private(set) var mirrorSource: MirrorSource?
     /// Mirror for the iMac: macOS mirrors into the virtual display
     private var osMirror: DisplayMirror?
+    /// Disconnect reason while the receiver powers off
+    private var closing: String?
     /// AudioTap, macOS 14.2 and later
     private var audioTap: AnyObject?
     /// This Mac's volume and mute, followed by the receiver
@@ -274,8 +276,23 @@ public final class SenderSession {
     /// `relink`: new session follows at once; receiver keeps its picture
     public func stop(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다"), relink: Bool = false) {
         guard let c = connection, !ended else { return end(reason) }
-        c.send(.bye, json: Bye(reason: reason, relink: relink))
+        // A closing session already powered the iMac off
+        c.send(.bye, json: Bye(reason: reason, relink: relink && closing == nil))
         c.closeAfterFlush(reason: reason)
+    }
+
+    public var isClosing: Bool { closing != nil }
+
+    /// Main queue: a disconnect the iMac plays out
+    /// Picture and sound stay live through its power-off
+    /// Ends at its bye, as the screen turns black
+    public func close(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다")) {
+        guard closing == nil else { return }
+        guard snapshot.isStreaming, purpose == .display, let c = connection else { return stop(reason: reason) }
+        closing = reason
+        c.send(.powerOff, json: Bye(reason: reason))
+        // Longest power-off is 0.85 s; a silent receiver ends anyway
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.stop(reason: reason) }
     }
 
     /// Live link: pings and stats at least twice a second
@@ -284,6 +301,8 @@ public final class SenderSession {
     private func end(_ reason: String) {
         guard !ended else { return }
         ended = true
+        // A closing session ends with its own reason
+        let reason = closing ?? reason
         if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] session ended: \(reason)\n".utf8)) }
         timers.forEach { $0.cancel() }
         timers.removeAll()
