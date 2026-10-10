@@ -11,6 +11,7 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     private let renderer: StreamRenderer
+    private var snapshotSignal: DispatchSourceSignal?
     private let window: StreamWindow
     private let audio = AudioPlayer()
     /// Held while a stream is shown: input arrives on the sender, so the iMac would idle into display sleep
@@ -19,6 +20,12 @@ public final class ReceiverScreen: StreamDisplay {
     public init?(windowed: Bool = false) {
         guard let device = MTLCreateSystemDefaultDevice(), let renderer = StreamRenderer(device: device) else { return nil }
         self.renderer = renderer
+        // `kill -USR1 <pid>` saves the next drawn frame: debugging over SSH, where screen captures miss the stream
+        signal(SIGUSR1, SIG_IGN)
+        let snapshot = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        snapshot.setEventHandler { [weak renderer] in renderer?.requestSnapshot() }
+        snapshot.resume()
+        snapshotSignal = snapshot
         window = StreamWindow(renderer: renderer, windowed: windowed)
         window.onExitRequest = { [weak self] in self?.onExitRequest?() }
     }
@@ -89,6 +96,10 @@ public final class ReceiverScreen: StreamDisplay {
 
     public func setVolume(_ level: Double) {
         audio.volume = level
+    }
+
+    public func setDeband(_ level: Deband) {
+        renderer.setDeband(level)
     }
 
     public func setBrightness(_ level: Double) {

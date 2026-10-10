@@ -35,6 +35,21 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         self.size = size
     }
 
+    /// 8-bit BGRA: the virtual display composites in 8-bit, so a 10-bit capture adds no levels, only WindowServer work.
+    /// sRGB keeps SDR colour
+    static func configuration(size: PixelSize) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = size.width
+        config.height = size.height
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.colorSpaceName = CGColorSpace.sRGB
+        config.showsCursor = false
+        config.queueDepth = 3
+        // A ceiling, not a target: the virtual display composites only as fast as it is consumed
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
+        return config
+    }
+
     /// The virtual display can take a moment to appear in shareable content
     func start(completion: @escaping (Error?) -> Void) {
         Task {
@@ -49,18 +64,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let display = display else {
                     throw NSError(domain: "Afterscreen", code: 1, userInfo: [NSLocalizedDescriptionKey: "Virtual display not visible to ScreenCaptureKit"])
                 }
-                let config = SCStreamConfiguration()
-                config.width = size.width
-                config.height = size.height
-                // 10-bit RGB: an 8-bit capture cuts the compositor's output to 1/255 steps, which bands dark gradients.
-                // Extended range keeps the compositor's precision; sRGB keeps SDR colour
-                config.pixelFormat = kCVPixelFormatType_ARGB2101010LEPacked
-                if #available(macOS 15.0, *) { config.captureDynamicRange = .hdrLocalDisplay }
-                config.colorSpaceName = CGColorSpace.sRGB
-                config.showsCursor = false
-                config.queueDepth = 3
-                // A ceiling, not a target: the virtual display composites only as fast as it is consumed
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
+                let config = Capture.configuration(size: size)
                 let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: config, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
                 try await stream.startCapture()

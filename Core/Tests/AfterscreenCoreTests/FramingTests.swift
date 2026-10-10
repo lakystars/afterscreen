@@ -100,8 +100,17 @@ final class FramingTests: XCTestCase {
         XCTAssertEqual(pool.freeCount, 2)
     }
 
-    func testSoundAndTenBitFieldsAreProtocolVersionFive() {
-        XCTAssertEqual(AfterscreenProtocol.version, 5)
+    func testDebandMessageIsProtocolVersionSix() {
+        XCTAssertEqual(AfterscreenProtocol.version, 6)
+        XCTAssertEqual(MessageType.deband.rawValue, 0x26)
+    }
+
+    func testDebandWireCarriesOneLevelByte() throws {
+        for level in Deband.allCases { XCTAssertEqual(try DebandWire.decode(DebandWire.encode(level)), level) }
+        XCTAssertEqual(DebandWire.encode(.strong), Data([3]))
+        XCTAssertThrowsError(try DebandWire.decode(Data([9])))
+        XCTAssertThrowsError(try DebandWire.decode(Data()))
+        XCTAssertEqual(Deband.allCases.map(\.rangePixels), [0, 16, 32, 64])
     }
 
     func testPoolKnowsItsOwnBuffers() {

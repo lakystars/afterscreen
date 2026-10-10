@@ -74,6 +74,8 @@ final class FakeDisplay: StreamDisplay {
     var volume = 0.6
     var volumeSet: [Double] = []
     func setVolume(_ level: Double) { record { volumeSet.append(level) } }
+    var debandSet: [Deband] = []
+    func setDeband(_ level: Deband) { record { debandSet.append(level) } }
     var audioBuffered: Double? { nil }
     var audioUnderruns: Int { 0 }
     func cursor(x: Float, y: Float, visible: Bool) { record { cursors.append(x) } }
@@ -201,6 +203,13 @@ final class ReceiverSessionTests: XCTestCase {
         client.send(Message(type: .volume, payload: LevelWire.encode(0.3)))
         waitForDisplay { [display] in !display.volumeSet.isEmpty }
         XCTAssertEqual(display.read { display.volumeSet.first } ?? 0, 0.3, accuracy: 1e-6)
+    }
+
+    func testDebandMessageSetsTheSmoothing() throws {
+        _ = try token()
+        client.send(Message(type: .deband, payload: DebandWire.encode(.strong)))
+        waitForDisplay { [display] in !display.debandSet.isEmpty }
+        XCTAssertEqual(display.read { display.debandSet }, [.strong])
     }
 
     func testStopOnTheReceiverAsksTheSenderNotToReconnect() throws {
@@ -715,6 +724,127 @@ final class StreamRendererTests: XCTestCase {
     }
 }
 
+final class DebandCacheTests: XCTestCase {
+    private var device: MTLDevice!
+    private var queue: MTLCommandQueue!
+    private var cache: DebandCache!
+
+    override func setUpWithError() throws {
+        device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        queue = try XCTUnwrap(device.makeCommandQueue())
+        cache = try XCTUnwrap(DebandCache(device: device))
+    }
+
+    /// Grey levels (8-bit) as an RGBA texture
+    private func source(_ levels: [UInt8], _ w: Int, _ h: Int) throws -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        desc.usage = .shaderRead
+        let t = try XCTUnwrap(device.makeTexture(descriptor: desc))
+        let rgba: [UInt8] = levels.flatMap { [$0, $0, $0, 255] }
+        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: rgba, bytesPerRow: w * 4)
+        return t
+    }
+
+    /// Updates the cache and draws what the screen would show through `tileFragment`; red per pixel, 0…255
+    private func shown(_ src: MTLTexture, _ g: TileGeometry, _ level: Deband) throws -> [Float] {
+        let cb = try XCTUnwrap(queue.makeCommandBuffer())
+        let picture = cache.update(source: src, geometry: g, range: level.rangePixels, into: cb) ?? src
+        let library = try device.makeLibrary(source: StreamRenderer.shaders, options: nil)
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "screenQuad")
+        desc.fragmentFunction = library.makeFunction(name: "tileFragment")
+        desc.colorAttachments[0].pixelFormat = .rgba32Float
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: g.width, height: g.height, mipmapped: false)
+        td.usage = .renderTarget
+        let target = try XCTUnwrap(device.makeTexture(descriptor: td))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(picture, index: 0)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var out = [Float](repeating: 0, count: g.width * g.height * 4)
+        target.getBytes(&out, bytesPerRow: g.width * 16, from: MTLRegionMake2D(0, 0, g.width, g.height), mipmapLevel: 0)
+        return stride(from: 0, to: out.count, by: 4).map { out[$0] * 255 }
+    }
+
+    /// Levels 18…21 in 128-pixel bands: a dark gradient drawn without dither
+    private let bandW = 512, bandH = 64
+    private var bands: [UInt8] { (0..<(bandW * bandH)).map { UInt8(18 + ($0 % bandW) / 128) } }
+
+    /// Columns whose mean sits between the levels either side of the step at x = 256: 0 for an untouched step
+    private func rampWidth(_ out: [Float]) -> Int {
+        (128..<384).filter { x in
+            let mean = (0..<bandH).reduce(Float(0)) { $0 + out[$1 * bandW + x] } / Float(bandH)
+            return mean > 19.1 && mean < 19.9
+        }.count
+    }
+
+    func testSingleLevelStepsInFlatAreasBecomeRamps() throws {
+        let g = TileGeometry(width: bandW, height: bandH)
+        let out = try shown(try source(bands, bandW, bandH), g, .weak)
+        let profile = (0..<bandW).map { x in (0..<bandH).reduce(Float(0)) { $0 + out[$1 * bandW + x] } / Float(bandH) }
+        let steepest = zip(profile, profile.dropFirst()).map { abs($1 - $0) }.max() ?? 1
+        XCTAssertLessThan(steepest, 0.35, "a one-level step spreads over a ramp")
+        let mean = out.reduce(0, +) / Float(out.count), sourceMean = Float(bands.reduce(0) { $0 + Int($1) }) / Float(bands.count)
+        XCTAssertEqual(mean, sourceMean, accuracy: 0.05, "brightness unchanged")
+    }
+
+    func testOffDrawsTheSourceAndStrongerSpreadsWider() throws {
+        let g = TileGeometry(width: bandW, height: bandH)
+        let src = try source(bands, bandW, bandH)
+        let off = try shown(src, g, .off)
+        XCTAssertEqual(zip(off, bands).map { abs($0 - Float($1)) }.max() ?? 1, 0, accuracy: 0.001)
+        let weak = rampWidth(try shown(src, g, .weak))
+        let strong = rampWidth(try shown(src, g, .strong))
+        XCTAssertGreaterThan(weak, 16)
+        XCTAssertGreaterThan(Double(strong), Double(weak) * 1.5)
+    }
+
+    func testEdgesAndFlatAreasStayWithinTenBitPrecision() throws {
+        // Dark and light halves with a one-pixel line: every difference is far past one level
+        let w = 256, h = 64
+        let levels = (0..<(w * h)).map { i -> UInt8 in
+            let x = i % w
+            return x == 64 ? 60 : (x < 128 ? 20 : 200)
+        }
+        let out = try shown(try source(levels, w, h), TileGeometry(width: w, height: h), .strong)
+        XCTAssertLessThan(zip(out, levels).map { abs($0 - Float($1)) }.max() ?? 1, 0.13)
+    }
+
+    func testOnlyMarkedTilesAndTheirReachAreRecomputed() throws {
+        // 8 tiles in a row; low reaches one tile
+        let g = TileGeometry(width: 512, height: 64)
+        let src = try source([UInt8](repeating: 100, count: 512 * 64), 512, 64)
+        _ = try shown(src, g, .weak)
+        let brighter: [UInt8] = [UInt8](repeating: 150, count: 512 * 64).flatMap { [$0, $0, $0, 255] }
+        src.replace(region: MTLRegionMake2D(0, 0, 512, 64), mipmapLevel: 0, withBytes: brighter, bytesPerRow: 512 * 4)
+        cache.mark([TileRun(row: 0, first: 0, count: 1)], geometry: g)
+        let out = try shown(src, g, .weak)
+        func tile(_ i: Int) -> Float { out[32 * 512 + i * 64 + 32] }
+        XCTAssertEqual(tile(0), 150, accuracy: 0.2, "the changed tile")
+        XCTAssertEqual(tile(1), 150, accuracy: 0.2, "within reach of it")
+        XCTAssertEqual(tile(7), 100, accuracy: 0.2, "out of reach: kept from before")
+        XCTAssertEqual(try shown(src, g, .strong)[32 * 512 + 7 * 64 + 32], 150, accuracy: 0.2, "a new level recomputes all")
+    }
+
+    func testReachGrowsMarksByTheMarginWithinTheGrid() {
+        var marks = [Bool](repeating: false, count: 4 * 3)
+        marks[1 * 4 + 1] = true
+        XCTAssertEqual(DebandCache.reach(marks, tilesX: 4, tilesY: 3, margin: 1), [0, 1, 2, 4, 5, 6, 8, 9, 10])
+        XCTAssertEqual(DebandCache.reach(marks, tilesX: 4, tilesY: 3, margin: 0), [5])
+        marks = [Bool](repeating: false, count: 4 * 3)
+        marks[11] = true
+        XCTAssertEqual(DebandCache.reach(marks, tilesX: 4, tilesY: 3, margin: 1), [6, 7, 10, 11])
+    }
+}
+
 final class VideoMaskTests: XCTestCase {
     private let g = TileGeometry(width: 256, height: 128) // 4×2 tiles
 
@@ -740,5 +870,43 @@ final class VideoMaskTests: XCTestCase {
         mask.reset()
         XCTAssertEqual(mask.shown, 0)
         XCTAssertTrue(mask.bytes.isEmpty)
+    }
+}
+
+final class ScreenSnapshotTests: XCTestCase {
+    func testTenBitWordsBecomeSixteenBitRGBInTheDrawablesLayout() throws {
+        // What the GPU writes for pure red into the drawable format
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: StreamRenderer.drawableFormat, width: 4, height: 4, mipmapped: false)
+        desc.usage = .renderTarget
+        let target = try XCTUnwrap(device.makeTexture(descriptor: desc))
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 0.5, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        let cb = try XCTUnwrap(device.makeCommandQueue()?.makeCommandBuffer())
+        try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass)).endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var words = [UInt32](repeating: 0, count: 16)
+        target.getBytes(&words, bytesPerRow: 16, from: MTLRegionMake2D(0, 0, 4, 4), mipmapLevel: 0)
+        let rgb = ScreenSnapshot.rgb16(fromBGR10A2: words)
+        XCTAssertEqual(rgb.count, 16 * 3)
+        XCTAssertEqual(rgb[0], 65535)
+        XCTAssertEqual(Double(rgb[1]), 32768, accuracy: 64)
+        XCTAssertEqual(rgb[2], 0)
+    }
+
+    func testWritesASixteenBitPNG() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("snapshot-\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let words = [UInt32](repeating: 3 << 30 | 1023 << 20, count: 8 * 2)
+        try ScreenSnapshot.writePNG(words: words, width: 8, height: 2, to: url)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(image.width, 8)
+        XCTAssertEqual(image.height, 2)
+        XCTAssertEqual(image.bitsPerComponent, 16)
     }
 }

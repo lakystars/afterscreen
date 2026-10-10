@@ -14,6 +14,7 @@ public enum MessageType: UInt8, CaseIterable {
     case cursorChannel = 0x23
     case audio = 0x24
     case volume = 0x25
+    case deband = 0x26
     case probe = 0x30
     case probeResult = 0x31
     case ping = 0x40

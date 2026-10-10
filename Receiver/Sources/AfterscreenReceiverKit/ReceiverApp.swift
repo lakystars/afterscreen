@@ -105,6 +105,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             }
             self.stoppedHere = false
             self.session = nil
+            FileHandle.standardError.write(Data("[receiver] Session ended: \(reason)\n".utf8))
             self.state("Waiting for a sender", "송신기를 기다리는 중")
             self.statusItem.button?.title = "▭"
         }

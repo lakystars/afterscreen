@@ -77,10 +77,6 @@ public final class AppModel: ObservableObject {
     }
 
     /// The chosen link if it reaches `receiver` now, else nil (automatic)
-    public func link(for receiver: String) -> LinkKind? {
-        settings.link.flatMap { links[receiver]?.contains($0) == true ? $0 : nil }
-    }
-
     /// nil is automatic. A display session on another link reconnects over the new one
     public func setLink(_ link: LinkKind?) {
         settings.link = link
@@ -108,7 +104,8 @@ public final class AppModel: ObservableObject {
             auto = AutoConnect()
         }
         retry?.cancel()
-        let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link, sound: settings.sound)
+        let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link, sound: settings.sound,
+                                    deband: settings.deband, brightness: settings.brightness)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.snapshot = s
@@ -152,7 +149,13 @@ public final class AppModel: ObservableObject {
     public func setBrightness(_ level: Double) {
         brightness = level
         brightnessSetAt = ProcessInfo.processInfo.systemUptime
+        settings.brightness = level
         session?.setBrightness(level)
+    }
+
+    public func setDeband(_ level: Deband) {
+        settings.deband = level
+        session?.setDeband(level)
     }
 
     public func setVolume(_ level: Double) {
@@ -182,7 +185,7 @@ public final class AppModel: ObservableObject {
     /// Needs no Screen Recording: the test streams generated frames
     public func runQualityTest(_ receiver: DiscoveredReceiver) {
         guard session == nil else { return }
-        let session = SenderSession(target: receiver, purpose: .qualityTest, link: settings.link)
+        let session = SenderSession(target: receiver, purpose: .qualityTest, link: settings.link, deband: settings.deband)
         session.onUpdate = { [weak self] s in
             if let r = s.qualityTest { self?.testReport = r }
         }

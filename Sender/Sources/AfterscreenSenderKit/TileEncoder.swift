@@ -35,6 +35,8 @@ public final class TileEncoder {
     public var motion = Motion.bc1
     /// Most settled tiles sent per frame; a slow link keeps a big refinement from stalling motion
     public var settleLimit = Int.max
+    /// Most moving tiles per frame sent as BC7 on the BC1 motion path; more go out as BC1
+    public var bc7MotionLimit = 0
     /// Tiles the receiver shows lossy: BC1, or the video layer
     public private(set) var lossyTiles = 0
 
@@ -200,16 +202,16 @@ public final class TileEncoder {
         let congestedWindow = lastCongested ? max(TileEncoder.congestedMotionWindow, 1.5 * (now - lastEncode)) : TileEncoder.congestedMotionWindow
         lastEncode = now
         lastCongested = congested || forceAll
-        var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = []
+        var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = [], moving: [Int] = []
         for t in 0..<geometry.tileCount {
             if flags[t] != 0 {
                 let since = now - lastChange[t]
                 // A lossy tile keeps moving until it stays still for the settle delay
-                let moving = !forceAll && (since < TileEncoder.motionWindow || (lossy[t] && since < TileEncoder.settleDelay)
+                let inMotion = !forceAll && (since < TileEncoder.motionWindow || (lossy[t] && since < TileEncoder.settleDelay)
                     || (congested && lastFrame[t] == encodes - 1 && since < congestedWindow))
                 lastChange[t] = now
                 lastFrame[t] = encodes
-                if moving && motion == .video {
+                if inMotion && motion == .video {
                     // Video tiles join the lossy set once their video run is on its way
                     if lossy[t] {
                         flags[t] = 0
@@ -221,12 +223,22 @@ public final class TileEncoder {
                     }
                     continue
                 }
-                lossy[t] = moving
-                mark(t, mode: moving ? 2 : 0, in: flags)
+                if inMotion {
+                    moving.append(t)
+                } else {
+                    lossy[t] = false
+                    mark(t, mode: 0, in: flags)
+                }
             } else if lossy[t] && now - lastChange[t] >= TileEncoder.settleDelay && settling.count < settleLimit {
                 settling.append(t)
                 mark(t, mode: 1, in: flags)
             }
+        }
+        // Motion within the link's BC7 budget stays sharp; past it, all of it halves to BC1
+        let sharp = moving.count <= bc7MotionLimit
+        for t in moving {
+            lossy[t] = !sharp
+            mark(t, mode: sharp ? 0 : 2, in: flags)
         }
         let frame = gather(texture: texture, referenceOnly: referenceOnly)
         if frame != nil { entering.forEach { lossy[$0] = true } }

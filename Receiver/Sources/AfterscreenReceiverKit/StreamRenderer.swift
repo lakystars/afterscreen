@@ -24,6 +24,8 @@ final class StreamRenderer {
     private let tilePipeline: MTLRenderPipelineState
     private let hybridPipeline: MTLRenderPipelineState
     private let tileTexture: TileTexture
+    /// nil if the deband kernel fails to build; the picture then shows as sent
+    private let debandCache: DebandCache?
     private var textureCache: CVMetalTextureCache?
     private var decoder: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
@@ -39,6 +41,10 @@ final class StreamRenderer {
     private var maskRing = 0
     private let sizeLock = NSLock()
     private var drawableSize = CGSize.zero
+    /// First-pass deband radius in texels; set from the main queue, read when drawing
+    private var debandRange = Deband.normal.rangePixels
+    /// The next draw also goes to a PNG in /tmp
+    private var snapshotRequested = false
 
     static let shaders = """
     #include <metal_stdlib>
@@ -54,7 +60,62 @@ final class StreamRenderer {
         return o;
     }
 
-    // BC7 picture; alpha is not part of the stream
+    // Deband: sources often draw dark gradients in 8-bit steps without dither.
+    // Each pass takes four samples placed symmetrically around the pixel at a growing radius;
+    // on a gradient their mean is the unstepped value. A pass whose mean is within a level of the
+    // pixel and whose samples are all within three joins the average; the 10-bit drawable keeps
+    // the in-between values. Edges and text fail the sample limit and pass unchanged.
+    // Point samples keep partial edge mixes out. `range`: first-pass radius in texels, 0 for off
+    constant float kDebandMeanLimit = 1.0 / 255.0;
+    constant float kDebandSampleLimit = 3.0 / 255.0;
+    constant int kDebandIterations = 3;
+
+    // Stable per-pixel random in [0, 1): the same pixel gets the same offsets every frame
+    static inline float hash01(uint2 p, uint i) {
+        uint h = p.x * 0x8da6b343u ^ p.y * 0xd8163841u ^ i * 0xcb1ab31fu;
+        h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+        return float(h) * (1.0 / 4294967296.0);
+    }
+
+    static float3 deband(texture2d<float> tex, float2 uv, float3 color, float range) {
+        if (range <= 0.0) return color;
+        constexpr sampler point(filter::nearest, address::clamp_to_edge);
+        float2 size = float2(tex.get_width(), tex.get_height());
+        uint2 p = uint2(uv * size);
+        float3 sum = color;
+        float n = 1.0;
+        for (int i = 1; i <= kDebandIterations; i++) {
+            float dist = hash01(p, uint(2 * i)) * range * float(i);
+            float dir = hash01(p, uint(2 * i + 1)) * 6.2831853;
+            float2 o = dist * float2(cos(dir), sin(dir)) / size;
+            float3 a = tex.sample(point, uv + o).rgb, b = tex.sample(point, uv + float2(-o.y, o.x)).rgb;
+            float3 c = tex.sample(point, uv - o).rgb, d = tex.sample(point, uv + float2(o.y, -o.x)).rgb;
+            float3 ring = a + b + c + d;
+            float3 spread = max(max(abs(a - color), abs(b - color)), max(abs(c - color), abs(d - color)));
+            if (any(abs(ring * 0.25 - color) > kDebandMeanLimit) || any(spread > kDebandSampleLimit)) continue;
+            sum += ring;
+            n += 4.0;
+        }
+        return sum / n;
+    }
+
+    struct DebandGrid { uint width; uint height; uint tilesX; uint tilePixels; float range; };
+
+    // Grid (tilePixels, tilePixels, tiles): one thread per pixel of each listed tile
+    kernel void debandTiles(texture2d<float> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant DebandGrid &g [[buffer(0)]],
+                            device const uint *tiles [[buffer(1)]],
+                            uint3 gid [[thread_position_in_grid]]) {
+        uint tile = tiles[gid.z];
+        uint2 px = uint2((tile % g.tilesX) * g.tilePixels + gid.x, (tile / g.tilesX) * g.tilePixels + gid.y);
+        if (px.x >= g.width || px.y >= g.height) return;
+        constexpr sampler point(filter::nearest, address::clamp_to_edge);
+        float2 uv = (float2(px) + 0.5) / float2(g.width, g.height);
+        dst.write(float4(deband(src, uv, src.sample(point, uv).rgb, g.range), 1.0), px);
+    }
+
+    // BC7 picture, or its debanded copy; alpha is not part of the stream
     fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         return float4(tex.sample(s, in.uv).rgb, 1.0);
@@ -91,6 +152,7 @@ final class StreamRenderer {
         tilePipeline = tile
         hybridPipeline = hybrid
         tileTexture = TileTexture(device: device)
+        debandCache = DebandCache(device: device, library: library)
         CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
         layer.device = device
         layer.pixelFormat = StreamRenderer.drawableFormat
@@ -115,6 +177,20 @@ final class StreamRenderer {
         sizeLock.unlock()
     }
 
+    /// Any queue: the next draw is also saved as /tmp/afterscreen-receiver-<time>.png
+    func requestSnapshot() {
+        sizeLock.lock()
+        snapshotRequested = true
+        sizeLock.unlock()
+    }
+
+    /// Any queue: applies from the next draw
+    func setDeband(_ level: Deband) {
+        sizeLock.lock()
+        debandRange = level.rangePixels
+        sizeLock.unlock()
+    }
+
     func reset() {
         if let d = decoder { VTDecompressionSessionInvalidate(d) }
         decoder = nil
@@ -130,6 +206,7 @@ final class StreamRenderer {
         reset()
         maskBuffers = []
         tileTexture.release()
+        debandCache?.release()
     }
 
     // MARK: - Tile path
@@ -151,19 +228,24 @@ final class StreamRenderer {
         stats.uploadMs = max(0, (ProcessInfo.processInfo.systemUptime - start) * 1000 - decode)
         statsLock.unlock()
         mask.apply(frame.runs, geometry: frame.geometry)
+        debandCache?.mark(frame.runs, geometry: frame.geometry)
         guard present, let texture = tileTexture.texture else {
             cb.commit()
             return true
         }
         let g = frame.geometry
         let content = CGSize(width: g.width, height: g.height)
+        sizeLock.lock()
+        let range = debandRange
+        sizeLock.unlock()
+        let image = debandCache?.update(source: texture, geometry: g, range: range, into: cb) ?? texture
         if mask.shown > 0, let picture = video, let luma = CVMetalTextureGetTexture(picture.luma),
            let chroma = CVMetalTextureGetTexture(picture.chroma), let maskBuffer = nextMaskBuffer() {
             cb.addCompletedHandler { _ in _ = picture }
             var grid = [UInt32(g.tilesX), UInt32(g.tilePixels), UInt32(g.width), UInt32(g.height)]
             encodeDraw(cb, content: content) { enc in
                 enc.setRenderPipelineState(hybridPipeline)
-                enc.setFragmentTexture(texture, index: 0)
+                enc.setFragmentTexture(image, index: 0)
                 enc.setFragmentTexture(luma, index: 1)
                 enc.setFragmentTexture(chroma, index: 2)
                 enc.setFragmentBuffer(maskBuffer, offset: 0, index: 0)
@@ -172,7 +254,7 @@ final class StreamRenderer {
         } else {
             encodeDraw(cb, content: content) { enc in
                 enc.setRenderPipelineState(tilePipeline)
-                enc.setFragmentTexture(texture, index: 0)
+                enc.setFragmentTexture(image, index: 0)
             }
         }
         return true
@@ -290,10 +372,51 @@ final class StreamRenderer {
         bind(enc)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
+        sizeLock.lock()
+        let snapshot = snapshotRequested
+        snapshotRequested = false
+        sizeLock.unlock()
+        if snapshot { encodeSnapshot(cb, content: content, videoTiles: mask.shown > 0 ? mask.bytes : [], bind: bind) }
         cb.present(drawable)
         let counter = displayed
         cb.addCompletedHandler { _ in counter.tick() }
         cb.commit()
+    }
+}
+
+extension StreamRenderer {
+    /// The same draw at stream size into a texture, copied out and written once the GPU is done
+    /// `videoTiles`: the hybrid mask, one byte per tile (1 = video), saved next to the image
+    fileprivate func encodeSnapshot(_ cb: MTLCommandBuffer, content: CGSize, videoTiles: [UInt8], bind: (MTLRenderCommandEncoder) -> Void) {
+        let w = Int(content.width), h = Int(content.height)
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: StreamRenderer.drawableFormat, width: w, height: h, mipmapped: false)
+        desc.usage = .renderTarget
+        desc.storageMode = .private
+        guard w > 0, h > 0, let target = layer.device?.makeTexture(descriptor: desc),
+              let buffer = layer.device?.makeBuffer(length: w * h * 4, options: .storageModeShared) else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
+        enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(w), height: Double(h), znear: 0, zfar: 1))
+        bind(enc)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        guard let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: target, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: w, height: h, depth: 1),
+                  to: buffer, destinationOffset: 0, destinationBytesPerRow: w * 4, destinationBytesPerImage: w * h * 4)
+        blit.endEncoding()
+        cb.addCompletedHandler { _ in
+            let words = Array(UnsafeBufferPointer(start: buffer.contents().assumingMemoryBound(to: UInt32.self), count: w * h))
+            DispatchQueue.global(qos: .utility).async {
+                let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+                let url = URL(fileURLWithPath: "/tmp/afterscreen-receiver-\(stamp).png")
+                let result = (try? ScreenSnapshot.writePNG(words: words, width: w, height: h, to: url)) != nil ? url.path : "failed"
+                if !videoTiles.isEmpty { try? Data(videoTiles).write(to: url.deletingPathExtension().appendingPathExtension("mask")) }
+                FileHandle.standardError.write(Data("[receiver] Snapshot: \(result)\n".utf8))
+            }
+        }
     }
 }
 

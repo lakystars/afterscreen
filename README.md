@@ -13,10 +13,10 @@ Use an older iMac (Late 2013 or newer) as an external display for an Apple Silic
 
 | Link | Picture path |
 |---|---|
-| Wired, 2.5 Gbps or more (Thunderbolt Bridge, USB networking, fast Ethernet) | **Tiles**: the sender encodes the regions ScreenCaptureKit reports as changed into BC7 texture blocks on the GPU and sends the 64×64 tiles that differ, grouped into runs. Tiles that keep changing go out as BC1 at half the size, and their BC7 version follows once they settle. The receiver blits each run straight into a BC7 texture. Every Mac GPU since 2013 samples BC7 in hardware, so no video decoder is needed and there is no codec latency. LZ4 is used only when a frame would not fit the link otherwise. |
+| Wired, 2.5 Gbps or more (Thunderbolt Bridge, USB networking, fast Ethernet) | **Tiles**: the sender encodes the regions ScreenCaptureKit reports as changed into BC7 texture blocks on the GPU and sends the 64×64 tiles that differ, grouped into runs. Tiles that keep changing stay BC7 while they fit half the measured link at 60 fps; past that they go out as BC1 at half the size, and their BC7 version follows once they settle. The receiver blits each run straight into a BC7 texture. Every Mac GPU since 2013 samples BC7 in hardware, so no video decoder is needed and there is no codec latency. LZ4 is used only when a frame would not fit the link otherwise. |
 | Slower links (Gigabit Ethernet, Wi-Fi) | **Hybrid**: still and briefly changing tiles go out as BC7, as above. Tiles that keep moving switch to a video layer (VideoToolbox HEVC, or H.264 when the receiver has no HEVC decoder) and return to BC7 once they settle. The receiver draws the video in those tiles and the BC7 picture elsewhere. The video layer is 4K, 1440p or 1080p, whichever the link's bitrate fills at 0.15 bit per pixel. |
 
-The sender creates a virtual display at the receiver's panel resolution, captures it with ScreenCaptureKit in 10-bit, and streams over TCP. Tiles dither the extra precision into BC7, so gradients do not band; the video layer is HEVC Main10 when the receiver decodes it in hardware. The cursor travels on a second connection of its own, so it never waits behind frames. Receivers announce themselves over Bonjour (`_afterscreen._tcp`). On connect the sender asks for the receiver on each of its links and prefers Thunderbolt, then USB, Ethernet and Wi-Fi; the popover can pin one of the links that answer. A short throughput probe at session start chooses the path.
+The sender creates a virtual display at the receiver's panel resolution, captures it with ScreenCaptureKit in 8-bit, and streams over TCP. The virtual display composites in 8-bit, so a deeper capture would add no levels. The video layer is HEVC Main10 when the receiver decodes it in hardware. The cursor travels on a second connection of its own, so it never waits behind frames. Receivers announce themselves over Bonjour (`_afterscreen._tcp`). On connect the sender asks for the receiver on each of its links and prefers Thunderbolt, then USB, Ethernet and Wi-Fi; the popover can pin one of the links that answer. A short throughput probe at session start chooses the path.
 
 ## Requirements
 
@@ -73,7 +73,7 @@ The iMac switches to a fullscreen picture of the new display. On the receiver:
 - ⌥⌘I toggles the HUD
 - Esc twice stops the session
 
-While streaming, the popover has sliders for the iMac's brightness and for the volume of the sound it plays.
+The popover starts with a switch that plays this Mac's sound on the iMac (on by default; the Mac stays silent meanwhile, asks once for System Audio Recording permission, about 1.5 Mbps) and, while the iMac plays it, a volume slider. While streaming it also has a slider for the iMac's brightness, applied again at the next connection (full by default), and a **Smooth gradients** choice (off, low, medium by default, high). Browsers often draw dark gradients in 8-bit steps; the iMac fills them in on its GPU and shows the in-between values on its 10-bit panel. Higher reaches wider and uses more of the iMac's GPU.
 
 ### Settings
 
@@ -85,7 +85,6 @@ Sender (**Settings…** in the popover):
 | Connect automatically | Connects to the receiver you last connected to when it appears, after sleep, and after the link drops. **Disconnect** pauses it until that receiver goes away. |
 | Open at login | Starts Afterscreen at login. |
 | Arrange Displays… | Opens System Settings for arrangement, mirroring and the main display. |
-| Sound | Plays this Mac's sound on the iMac (on by default). The Mac stays silent meanwhile; asks once for System Audio Recording permission; about 1.5 Mbps. |
 | Menu bar | The icon only (default), or also the frame rate and throughput at a fixed width. |
 | Language | System (Korean when it comes first, else English), English or Korean. |
 

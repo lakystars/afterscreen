@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import AfterscreenCore
+import ScreenCaptureKit
 import XCTest
 @testable import AfterscreenSenderKit
 
@@ -31,6 +32,38 @@ final class ModePickerTests: XCTestCase {
         let modes = [mode(2560, 1440, 2560, 1440), mode(1280, 720, 2560, 1440), mode(2560, 1440, 4096, 2304)]
         XCTAssertEqual(VirtualDisplay.pickMode(modes, points: fiveK, hiDPI: true), 2)
         XCTAssertNil(VirtualDisplay.pickMode([], points: fiveK, hiDPI: true))
+    }
+}
+
+final class PopoverLabelTests: XCTestCase {
+    private var saved = L10n.language
+    override func setUp() { saved = L10n.language; L10n.language = .english }
+    override func tearDown() { L10n.language = saved }
+
+    func testAPinnedLinkThatStoppedAnsweringStaysListedAsUnreachable() {
+        let pinnedGone = LinkMenu.choices(available: [.thunderbolt, .wifi], pinned: .usb)
+        XCTAssertEqual(pinnedGone.map(\.kind), [.thunderbolt, .wifi, .usb])
+        XCTAssertEqual(pinnedGone.map(\.reachable), [true, true, false])
+        XCTAssertEqual(LinkMenu.choices(available: [.thunderbolt, .wifi], pinned: .wifi).map(\.kind), [.thunderbolt, .wifi])
+        XCTAssertTrue(LinkMenu.choices(available: [], pinned: nil).isEmpty)
+    }
+
+    func testMotionFormatShowsOnTheTilePathOnly() {
+        XCTAssertEqual(MotionLabel.text(path: .tile, lossyTiles: 0), "BC7, sharp")
+        XCTAssertEqual(MotionLabel.text(path: .tile, lossyTiles: 12), "BC1 on 12 tiles")
+        XCTAssertNil(MotionLabel.text(path: .hybrid, lossyTiles: 3))
+    }
+}
+
+final class CaptureConfigurationTests: XCTestCase {
+    func testCapturesEightBitSRGBWithoutExtendedRange() {
+        let c = Capture.configuration(size: PixelSize(width: 5120, height: 2880))
+        XCTAssertEqual(c.width, 5120)
+        XCTAssertEqual(c.height, 2880)
+        XCTAssertEqual(c.pixelFormat, kCVPixelFormatType_32BGRA, "the virtual display composites in 8-bit")
+        if #available(macOS 15.0, *) { XCTAssertEqual(c.captureDynamicRange, .SDR) }
+        XCTAssertEqual(c.colorSpaceName, CGColorSpace.sRGB)
+        XCTAssertFalse(c.showsCursor)
     }
 }
 
@@ -128,6 +161,12 @@ final class PathPolicyTests: XCTestCase {
     func testSettledTilesPerFrameFillHalfAFrameIntervalAtTwoToOne() {
         XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: 0.3, tileBytes: 4096), 152)
         XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: nil, tileBytes: 4096), 16)
+    }
+
+    func testBC7MotionFillsHalfTheLinkAtSixtyFramesPerSecond() {
+        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 10, tileBytes: 4096), 2543)
+        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 3.8, tileBytes: 4096), 966)
+        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: nil, tileBytes: 4096), 0)
     }
 
     func testVideoBitrateIsFortyPercentOfCapacityWithinLimits() {

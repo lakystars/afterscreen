@@ -54,6 +54,12 @@ public enum PathPolicy {
         max(16, Int((capacityGbps ?? 0) * 1e9 / 8 / 60 / Double(tileBytes)))
     }
 
+    /// Moving tiles per frame sent as BC7 rather than BC1: half the link at 60 fps, no LZ4 credit.
+    /// BC1's 5:6:5 endpoints band gradients and tint greys; the BC7 encoding exists already
+    public static func bc7MotionTiles(capacityGbps: Double?, tileBytes: Int) -> Int {
+        Int((capacityGbps ?? 0) * 0.5e9 / 8 / 60 / Double(tileBytes))
+    }
+
     /// Video layer bitrate: 40% of the link, leaving the rest to lossless tiles; 20…200 Mbps
     public static func bitrate(capacityGbps: Double?) -> Int {
         min(200_000_000, max(20_000_000, Int((capacityGbps ?? 0) * 0.4e9)))

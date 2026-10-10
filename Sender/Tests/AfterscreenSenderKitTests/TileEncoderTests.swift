@@ -256,6 +256,26 @@ final class MotionTests: XCTestCase {
         return t
     }
 
+    func testMotionWithinTheBC7BudgetStaysSharpAndPastItFallsBackToBC1() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let g = TileGeometry(width: w, height: h)
+        let encoder = try TileEncoder(device: device, geometry: g, uploadBuffers: 8)
+        encoder.bc7MotionLimit = 2
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0)
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 1), w, h), forceAll: false, dirty: nil, now: 1)
+        let moving = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 2), w, h), forceAll: false, dirty: nil, now: 1.016))
+        XCTAssertEqual(moving.runs, [TileRun(row: 0, first: 0, count: 2)])
+        XCTAssertEqual(moving.data.count, g.blocksX * g.blocksY * BC7.blockBytes)
+        XCTAssertEqual(encoder.lossyTiles, 0)
+        XCTAssertNil(encoder.nextRefinement(now: 1.016), "nothing left to settle")
+
+        encoder.bc7MotionLimit = 1
+        let over = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: false, dirty: nil, now: 1.032))
+        XCTAssertEqual(over.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
+        XCTAssertEqual(encoder.lossyTiles, 2)
+    }
+
     /// Video-like colour field with a moving phase, BGRA (a few levels per pixel per channel)
     func scene(_ w: Int, _ h: Int, phase: Double) -> [UInt32] {
         (0..<(w * h)).map { i -> UInt32 in

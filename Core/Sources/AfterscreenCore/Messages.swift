@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 5
+    public static let version = 6
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -268,6 +268,33 @@ public enum ChannelWire {
     public static func decode(_ data: Data) throws -> UInt32 {
         var r = ByteReader(data)
         return try r.u32()
+    }
+}
+
+/// Receiver smoothing of one-level steps in flat areas: sources often draw dark gradients in 8-bit steps
+public enum Deband: UInt8, CaseIterable, Codable {
+    case off, weak, normal, strong
+
+    /// Search radius of the first pass in stream pixels; the third pass reaches three times this
+    public var rangePixels: Float {
+        switch self {
+        case .off: return 0
+        case .weak: return 16
+        case .normal: return 32
+        case .strong: return 64
+        }
+    }
+}
+
+/// deband: u8 level
+public enum DebandWire {
+    public static func encode(_ level: Deband) -> Data { Data([level.rawValue]) }
+
+    public static func decode(_ data: Data) throws -> Deband {
+        var r = ByteReader(data)
+        let raw = try r.u8()
+        guard let level = Deband(rawValue: raw) else { throw FramingError.invalid("deband level \(raw)") }
+        return level
     }
 }
 

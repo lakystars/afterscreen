@@ -48,6 +48,8 @@ public final class SenderSettings: ObservableObject {
         static let menuBarStats = "menuBarStats"
         static let language = "language"
         static let sound = "sound"
+        static let deband = "deband"
+        static let brightness = "brightness"
     }
 
     @Published public var displaySize: DisplaySize {
@@ -67,6 +69,16 @@ public final class SenderSettings: ObservableObject {
         didSet { defaults.set(sound, forKey: Key.sound) }
     }
     /// Frame rate and throughput next to the menu bar icon
+    /// Smoothing of 8-bit steps on the receiver
+    @Published public var deband: Deband {
+        didSet { defaults.set(Int(deband.rawValue), forKey: Key.deband) }
+    }
+
+    /// iMac panel brightness applied when a stream starts; macOS can restore a dimmer level on wake
+    @Published public var brightness: Double {
+        didSet { defaults.set(brightness, forKey: Key.brightness) }
+    }
+
     @Published public var menuBarStats: Bool {
         didSet { defaults.set(menuBarStats, forKey: Key.menuBarStats) }
     }
@@ -93,6 +105,8 @@ public final class SenderSettings: ObservableObject {
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
         sound = defaults.object(forKey: Key.sound) as? Bool ?? true
+        brightness = defaults.object(forKey: Key.brightness) as? Double ?? 1
+        deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
         language = Language(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .system
         L10n.language = language
     }

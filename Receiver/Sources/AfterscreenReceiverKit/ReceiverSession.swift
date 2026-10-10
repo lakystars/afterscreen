@@ -30,6 +30,8 @@ public protocol StreamDisplay: AnyObject {
     var volume: Double { get }
     /// Main queue
     func setVolume(_ level: Double)
+    /// Any queue: smoothing of one-level steps, from the next draw
+    func setDeband(_ level: Deband)
     /// Sound buffered for playback in seconds; nil while none plays
     var audioBuffered: Double? { get }
     var audioUnderruns: Int { get }
@@ -206,6 +208,9 @@ public final class ReceiverSession {
         case .volume:
             guard peer != nil, let level = try? LevelWire.decode(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.setVolume(level) }
+        case .deband:
+            guard peer != nil, let level = try? DebandWire.decode(m.payload) else { return }
+            display?.setDeband(level)
         case .brightness:
             guard peer != nil, let level = try? LevelWire.decode(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(level) }

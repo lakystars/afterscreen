@@ -10,6 +10,8 @@ struct FrameCounters {
     var dirtyTiles = 0
     var totalTiles = 0
     var encodeMs = 0.0
+    /// Tiles the receiver shows lossy after the latest frame
+    var lossyTiles = 0
 }
 
 enum FrameStreamerError: Error, CustomStringConvertible {
@@ -68,6 +70,7 @@ final class FrameStreamer {
             throw FrameStreamerError.tileEncoder
         }
         tile = (encoder, textureCache, TilePacker())
+        encoder.bc7MotionLimit = PathPolicy.bc7MotionTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes)
         if let layer = config.video, let video = VideoEncoder(layer: layer) {
             videoCodec = layer.codec
             encoder.motion = .video
@@ -244,12 +247,12 @@ final class FrameStreamer {
         connection.send(.tileFrame, parts: packed.parts)
         let encodeMs = out.video == nil ? out.gpuMs : (ProcessInfo.processInfo.systemUptime - out.created) * 1000
         if out.refinement {
-            count(FrameCounters(bytes: packed.wireBytes, encodeMs: encodeMs))
+            count(FrameCounters(bytes: packed.wireBytes, encodeMs: encodeMs, lossyTiles: encoder.lossyTiles))
             return
         }
         sent.tick()
         count(FrameCounters(bytes: packed.wireBytes + videoBytes, rawTileBytes: frame.data.count, dirtyTiles: frame.tileCount,
-                            totalTiles: g.tileCount, encodeMs: encodeMs))
+                            totalTiles: g.tileCount, encodeMs: encodeMs, lossyTiles: encoder.lossyTiles))
     }
 
     private func count(_ c: FrameCounters) {
@@ -259,6 +262,7 @@ final class FrameStreamer {
         counters.dirtyTiles += c.dirtyTiles
         counters.totalTiles += c.totalTiles
         if c.totalTiles > 0 || c.encodeMs > 0 { counters.encodeMs = c.encodeMs }
+        counters.lossyTiles = c.lossyTiles
         lock.unlock()
     }
 }

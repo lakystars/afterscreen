@@ -24,6 +24,8 @@ public struct SenderSnapshot {
     public var dirtyPercent = 0.0
     public var compressionRatio = 0.0
     public var encodeMs = 0.0
+    /// Tiles shown lossy (BC1 or video) after the latest frame
+    public var lossyTiles = 0
     public var cpuPercent = 0.0
     public var memoryBytes: UInt64 = 0
     public var gpuPercent = 0.0
@@ -61,6 +63,9 @@ public final class SenderSession {
     private var cursorConnection: Connection?
     private var displaySize: DisplaySize
     private var sound: Bool
+    private var deband: Deband
+    /// Panel brightness sent once the stream shows, after the receiver's display has woken; nil leaves the panel as is
+    private var brightness: Double?
     /// AudioTap, macOS 14.2 and later
     private var audioTap: AnyObject?
     private var testRun: QualityTestRun?
@@ -87,12 +92,20 @@ public final class SenderSession {
 
     /// `link`: the link to use; nil, or a link that no longer answers, takes the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
-                sound: Bool = false) {
+                sound: Bool = false, deband: Deband = .normal, brightness: Double? = nil) {
         self.target = target
         self.purpose = purpose
         self.displaySize = displaySize
         self.link = link
         self.sound = sound
+        self.deband = deband
+        self.brightness = brightness
+    }
+
+    /// Smoothing of 8-bit steps on the receiver; sent at the handshake and on each change
+    public func setDeband(_ level: Deband) {
+        deband = level
+        connection?.send(Message(type: .deband, payload: DebandWire.encode(level)))
     }
 
     /// Playback volume of this Mac's sound on the receiver, 0…1
@@ -131,6 +144,7 @@ public final class SenderSession {
 
     /// Receiver panel brightness, 0…1
     public func setBrightness(_ level: Double) {
+        brightness = level
         connection?.send(Message(type: .brightness, payload: LevelWire.encode(level)))
     }
 
@@ -252,6 +266,7 @@ public final class SenderSession {
             guard PathPolicy.isPlausible(welcome) else { return end(L10n.t("The receiver reported an invalid display size", "수신기가 잘못된 화면 크기를 보냈습니다")) }
             update { $0.peer = welcome }
             guard welcome.protocolVersion == AfterscreenProtocol.version else { return }
+            setDeband(deband)
             if purpose == .display { openCursorChannel(token: welcome.channelToken) }
             update { $0.state = L10n.t("Measuring the link", "링크 속도 측정 중") }
             probe()
@@ -341,6 +356,13 @@ public final class SenderSession {
             return end("\(error)")
         }
         self.streamer = streamer
+        if SenderSession.logStats {
+            let g = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
+            FileHandle.standardError.write(Data(String(format: "[sender] %@ path over %@, %.2f Gbps measured, BC7 motion up to %d of %d tiles\n",
+                                                       config.path.rawValue, config.linkKind.rawValue, snapshot.capacityGbps ?? 0,
+                                                       PathPolicy.bc7MotionTiles(capacityGbps: snapshot.capacityGbps, tileBytes: g.tileBytes),
+                                                       g.tileCount).utf8))
+        }
 
         let cursor = CursorTracker(displayID: display.displayID)
         cursor.onPosition = { [weak self] x, y, visible in
@@ -381,6 +403,7 @@ public final class SenderSession {
                     $0.state = L10n.t("Streaming", "스트리밍 중")
                 }
                 self.startSound()
+                if let level = self.brightness { self.setBrightness(level) }
                 self.startTimers()
             }
         }
@@ -478,6 +501,7 @@ public final class SenderSession {
             $0.dirtyPercent = c.totalTiles > 0 ? Double(c.dirtyTiles) / Double(c.totalTiles) * 100 : 0
             $0.compressionRatio = c.bytes > 0 && c.rawTileBytes > 0 ? Double(c.rawTileBytes) / Double(c.bytes) : 0
             $0.encodeMs = c.encodeMs
+            $0.lossyTiles = c.lossyTiles
             $0.cpuPercent = m.cpuPercent
             $0.memoryBytes = m.memoryBytes
             $0.gpuPercent = streamer?.gpuMeter.percentSinceLastRead() ?? 0
@@ -487,9 +511,9 @@ public final class SenderSession {
 
     private func logLine() {
         let s = snapshot, r = s.receiver
-        let line = String(format: "[sender] fps %.0f/%.0f/%.0f  %.3f Gb/s  encode %.1f ms  cpu %.1f%%  receiver cpu %.1f%% gpu %.0f%% late %d  sound %@\n",
+        let line = String(format: "[sender] fps %.0f/%.0f/%.0f  %.3f Gb/s  encode %.1f ms  cpu %.1f%%  receiver cpu %.1f%% gpu %.0f%% late %d  lossy %d tiles  sound %@\n",
                           s.captureFPS, s.sentFPS, r?.displayedFPS ?? 0, s.throughputBitsPerSecond / 1e9, s.encodeMs, s.cpuPercent,
-                          r?.cpuPercent ?? 0, r?.gpuPercent ?? 0, r?.lateFrames ?? 0,
+                          r?.cpuPercent ?? 0, r?.gpuPercent ?? 0, r?.lateFrames ?? 0, s.lossyTiles,
                           s.soundOnReceiver ? (r?.audioBufferMs.map { String(format: "%.0f ms, %d gaps", $0, r?.audioUnderruns ?? 0) } ?? "no data") : "off")
         FileHandle.standardError.write(Data(line.utf8))
     }

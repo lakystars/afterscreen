@@ -87,6 +87,12 @@ final class VideoEncoder {
         guard let pool = VTCompressionSessionGetPixelBufferPool(session),
               CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let target = out, let transfer = transfer,
               VTPixelTransferSessionTransferImage(transfer, from: source, to: target) == noErr else { return nil }
+        // Recycled pool buffers lose the BT.709 transfer tag but keep the capture's sRGB colour space,
+        // and the encoder would then convert to the BT.709 curve: tag every frame as the stream
+        CVBufferRemoveAttachment(target, kCVImageBufferCGColorSpaceKey)
+        CVBufferSetAttachment(target, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(target, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(target, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
         return target
     }
 

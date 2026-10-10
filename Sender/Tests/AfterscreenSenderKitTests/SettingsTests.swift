@@ -68,6 +68,12 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertEqual(SenderSettings(defaults: defaults).link, .ethernet)
         again.link = nil
         XCTAssertNil(SenderSettings(defaults: defaults).link)
+        XCTAssertEqual(again.deband, .normal)
+        again.deband = .strong
+        XCTAssertEqual(SenderSettings(defaults: defaults).deband, .strong)
+        XCTAssertEqual(again.brightness, 1, "full brightness until the slider moves")
+        again.brightness = 0.4
+        XCTAssertEqual(SenderSettings(defaults: defaults).brightness, 0.4, accuracy: 1e-9)
     }
 }
 

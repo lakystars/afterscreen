@@ -2,6 +2,39 @@ import AppKit
 import AfterscreenCore
 import SwiftUI
 
+/// Link menu entries: links that answer now, then a pinned link that stopped answering
+enum LinkMenu {
+    struct Choice {
+        var kind: LinkKind
+        var reachable: Bool
+    }
+
+    static func choices(available: [LinkKind], pinned: LinkKind?) -> [Choice] {
+        var list = available.map { Choice(kind: $0, reachable: true) }
+        if let pinned = pinned, !available.contains(pinned) { list.append(Choice(kind: pinned, reachable: false)) }
+        return list
+    }
+}
+
+/// How the tile path sends moving areas; the hybrid path has its own video row
+enum MotionLabel {
+    static func text(path: StreamPath, lossyTiles: Int) -> String? {
+        guard path == .tile else { return nil }
+        return lossyTiles == 0 ? L10n.t("BC7, sharp", "BC7 (선명)") : L10n.t("BC1 on \(lossyTiles) tiles", "BC1 · 타일 \(lossyTiles)개")
+    }
+}
+
+enum DebandLabel {
+    static func name(_ level: Deband) -> String {
+        switch level {
+        case .off: return L10n.t("Off", "끄기")
+        case .weak: return L10n.t("Low", "약하게")
+        case .normal: return L10n.t("Medium", "보통")
+        case .strong: return L10n.t("High", "강하게")
+        }
+    }
+}
+
 enum LinkLabel {
     static func glyph(_ kind: LinkKind?) -> String {
         switch kind {
@@ -113,16 +146,64 @@ private struct Card<Content: View>: View {
     }
 }
 
+/// Sound on the iMac: the switch, then the volume while the iMac plays it
+private struct SoundCard: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var settings: SenderSettings
+
+    init(model: AppModel) {
+        self.model = model
+        settings = model.settings
+    }
+
+    var body: some View {
+        let s = model.snapshot
+        Card(title: L10n.t("iMac sound", "iMac 소리")) {
+            Toggle(L10n.t("Play this Mac's sound on the iMac", "이 Mac의 소리를 iMac에서 재생"), isOn: $settings.sound)
+                .toggleStyle(.switch)
+                .font(.system(size: 12))
+                .help(L10n.t("This Mac stays silent while the iMac plays. Asks once for System Audio Recording permission. About 1.5 Mbps",
+                             "iMac에서 재생하는 동안 이 Mac 스피커는 소리가 나지 않습니다. 처음 한 번 시스템 오디오 녹음 권한을 묻습니다. 약 1.5Mbps를 씁니다"))
+            if settings.sound, s.soundOnReceiver, let level = model.volume {
+                HStack(spacing: 8) {
+                    Image(systemName: level > 0 ? "speaker.wave.1" : "speaker.slash").foregroundStyle(.secondary).frame(width: 18)
+                    Slider(value: Binding(get: { level }, set: { model.setVolume($0) }), in: 0...1)
+                    Image(systemName: "speaker.wave.3").foregroundStyle(.secondary)
+                }
+                .help(L10n.t("Volume of this Mac's sound on the iMac; the iMac's own volume applies on top",
+                             "iMac에서 재생하는 이 Mac 소리의 음량. iMac 자체 음량도 함께 적용됩니다"))
+                HStack {
+                    if let buffer = s.receiver?.audioBufferMs {
+                        Text(L10n.t("Sent to the iMac · \(Int(buffer)) ms buffered", "iMac으로 보내는 중 · 버퍼 \(Int(buffer))ms"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    // A denied permission still yields a tap, of silence
+                    Button(L10n.t("No sound?", "소리가 안 나나요?")) {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!)
+                    }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11))
+                    .help(L10n.t("Opens Privacy → System Audio Recording: Afterscreen needs it on",
+                                 "개인정보 보호 → 시스템 오디오 녹음을 엽니다. Afterscreen를 켜 두어야 합니다"))
+                }
+            }
+        }
+    }
+}
+
 /// Automatic, then each link that reaches the receiver now
 private struct LinkPicker: View {
     @ObservedObject var model: AppModel
     var receiver: String
 
     var body: some View {
-        Picker(L10n.t("Link", "연결"), selection: Binding(get: { model.link(for: receiver) }, set: { model.setLink($0) })) {
+        Picker(L10n.t("Link", "연결"), selection: Binding(get: { model.settings.link }, set: { model.setLink($0) })) {
             Text(L10n.t("Automatic", "자동")).tag(LinkKind?.none)
-            ForEach(model.links[receiver] ?? [], id: \.self) { kind in
-                Text("\(LinkLabel.glyph(kind)) \(LinkLabel.name(kind))").tag(LinkKind?.some(kind))
+            ForEach(LinkMenu.choices(available: model.links[receiver] ?? [], pinned: model.settings.link), id: \.kind) { choice in
+                Text("\(LinkLabel.glyph(choice.kind)) \(LinkLabel.name(choice.kind))"
+                     + (choice.reachable ? "" : L10n.t(" (not reachable now)", " (지금 연결 안 됨)")))
+                    .tag(LinkKind?.some(choice.kind))
             }
         }
         .pickerStyle(.menu)
@@ -222,6 +303,7 @@ public struct PopoverView: View {
                     Button(L10n.t("Open Settings", "설정 열기")) { model.openPrivacySettings() }
                 }
             }
+            SoundCard(model: model)
             if let report = model.testReport { QualityCard(report: report, testing: false) }
             Card(title: L10n.t("Receivers", "수신기")) {
                 if model.receivers.isEmpty {
@@ -272,32 +354,7 @@ public struct PopoverView: View {
                 Text(s.isStreaming ? "● " + L10n.t("Streaming", "스트리밍 중") : s.state).font(.system(size: 11))
                     .foregroundStyle(s.isStreaming ? .green : .secondary)
             }
-            if s.soundOnReceiver, let level = model.volume {
-                Card(title: L10n.t("iMac sound", "iMac 소리")) {
-                    HStack(spacing: 8) {
-                        Image(systemName: level > 0 ? "speaker.wave.1" : "speaker.slash").foregroundStyle(.secondary).frame(width: 18)
-                        Slider(value: Binding(get: { level }, set: { model.setVolume($0) }), in: 0...1)
-                        Image(systemName: "speaker.wave.3").foregroundStyle(.secondary)
-                    }
-                    .help(L10n.t("Volume of this Mac's sound on the iMac; the iMac's own volume applies on top",
-                                 "iMac에서 재생하는 이 Mac 소리의 음량. iMac 자체 음량도 함께 적용됩니다"))
-                    HStack {
-                        if let buffer = s.receiver?.audioBufferMs {
-                            Text(L10n.t("Sent to the iMac · \(Int(buffer)) ms buffered", "iMac으로 보내는 중 · 버퍼 \(Int(buffer))ms"))
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        // A denied permission still yields a tap, of silence
-                        Button(L10n.t("No sound?", "소리가 안 나나요?")) {
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!)
-                        }
-                        .buttonStyle(.link)
-                        .font(.system(size: 11))
-                        .help(L10n.t("Opens Privacy → System Audio Recording: Afterscreen needs it on",
-                                     "개인정보 보호 → 시스템 오디오 녹음을 엽니다. Afterscreen를 켜 두어야 합니다"))
-                    }
-                }
-            }
+            SoundCard(model: model)
             if let level = model.brightness {
                 Card(title: L10n.t("iMac brightness", "iMac 밝기")) {
                     HStack(spacing: 8) {
@@ -356,6 +413,11 @@ public struct PopoverView: View {
                 if let c = s.config {
                     Row(L10n.t("Resolution", "해상도"), "\(c.streamPixels.width)×\(c.streamPixels.height)",
                         help: L10n.t("Still areas are sent losslessly at this size", "멈춘 영역은 이 해상도로 무손실 전송합니다"))
+                    if let motion = MotionLabel.text(path: c.path, lossyTiles: s.lossyTiles) {
+                        Row(L10n.t("Moving areas", "움직이는 영역"), motion,
+                            help: L10n.t("BC7 while half the measured link covers it; past that, BC1 at half the size, which bands gradients",
+                                         "링크 실측 속도의 절반 안에서는 BC7로 선명하게, 넘으면 절반 크기인 BC1로 보냅니다. BC1은 그라데이션에 띠가 생깁니다"))
+                    }
                     if let v = c.video {
                         Row(L10n.t("Moving areas", "움직이는 영역"),
                             "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps",
@@ -366,6 +428,16 @@ public struct PopoverView: View {
                     Row(L10n.t("Compression", "압축률"), s.compressionRatio > 0 ? String(format: "%.1f×", s.compressionRatio) : "—",
                         help: L10n.t("Picture data before and after compression; 1.0× when the link carries it uncompressed",
                                      "압축 전후 데이터 비율. 링크에 여유가 있으면 압축하지 않아 1.0×"))
+                }
+                Row(label: L10n.t("Smooth gradients", "계단 완화"), value: "",
+                    help: L10n.t("Fills 8-bit steps in dark gradients on the iMac. Higher reaches wider and uses more iMac GPU",
+                                 "어두운 그라데이션의 8비트 계단을 iMac에서 부드럽게 메웁니다. 강할수록 넓게 메우고 iMac GPU를 더 씁니다")) {
+                    Picker("", selection: Binding(get: { model.settings.deband }, set: { model.setDeband($0) })) {
+                        ForEach(Deband.allCases, id: \.self) { Text(DebandLabel.name($0)).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
                 }
                 Row(L10n.t("Encode time", "인코딩 시간"), Format.ms(s.encodeMs),
                     help: L10n.t("From capture to send, per frame", "프레임 하나를 캡처해서 보내기까지 걸린 시간"))

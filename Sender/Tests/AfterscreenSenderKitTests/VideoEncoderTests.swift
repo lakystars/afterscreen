@@ -98,6 +98,50 @@ final class VideoEncoderTests: XCTestCase {
         XCTAssertEqual(picture.centreY, 129, accuracy: 4)
     }
 
+    func testEveryFrameKeepsTheCapturedValuesNotJustTheFirst() throws {
+        // Pool buffers come back without the BT.709 transfer tag; the sRGB colour space must not make the encoder convert
+        for tenBit in [false, true] {
+            let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: tenBit)
+            let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+            var outputs: [VideoEncoder.Output] = []
+            for i in 0..<6 {
+                let source = try frame(width: 2560, height: 1440, bgra: (40, 120, 200))
+                CVBufferSetAttachment(source, kCVImageBufferCGColorSpaceKey, try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB)), .shouldPropagate)
+                let done = expectation(description: "frame \(i)")
+                XCTAssertTrue(encoder.encode(source, time: 1 + Double(i) / 60, forceKeyframe: true) { outputs.append($0); done.fulfill() })
+                wait(for: [done], timeout: 5)
+            }
+            guard case let .frame(_, avcc, sets)? = outputs.last else { return XCTFail("\(String(describing: outputs.last))") }
+            let y = try decode(params: sets, sample: avcc, tenBit: tenBit).centreY
+            XCTAssertEqual(Double(y), tenBit ? 515 : 129, accuracy: tenBit ? 8 : 4, "tenBit \(tenBit): sixth frame")
+        }
+    }
+
+    func testSRGBTaggedCaptureKeepsItsValuesLikeTheTiles() throws {
+        // ScreenCaptureKit tags 8-bit frames sRGB; tiles show the values as they are, so video must too
+        for tenBit in [false, true] {
+            for tagged in [false, true] {
+                let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: tenBit)
+                let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+                let source = try frame(width: 2560, height: 1440, bgra: (40, 120, 200))
+                if tagged {
+                    // As ScreenCaptureKit delivers 8-bit sRGB: a CGColorSpace attachment and a colour space on the surface
+                    CVBufferSetAttachment(source, kCVImageBufferCGColorSpaceKey, try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB)), .shouldPropagate)
+                    let surface = try XCTUnwrap(CVPixelBufferGetIOSurface(source)?.takeUnretainedValue())
+                    IOSurfaceSetValue(surface, "IOSurfaceColorSpace" as CFString, 15 as CFNumber)
+                }
+                var output: VideoEncoder.Output?
+                let done = expectation(description: "frame")
+                XCTAssertTrue(encoder.encode(source, time: 1, forceKeyframe: true) { output = $0; done.fulfill() })
+                wait(for: [done], timeout: 5)
+                guard case let .frame(_, avcc, sets)? = output else { return XCTFail("\(String(describing: output))") }
+                let y = try decode(params: sets, sample: avcc, tenBit: tenBit).centreY
+                // BT.709 matrix on the sRGB values, video range: no conversion to the BT.709 curve
+                XCTAssertEqual(Double(y), tenBit ? 515 : 129, accuracy: tenBit ? 8 : 4, "tenBit \(tenBit) tagged \(tagged)")
+            }
+        }
+    }
+
     func testMain10LayerKeepsTenBitsThroughTheEncoder() throws {
         let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: true)
         let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
