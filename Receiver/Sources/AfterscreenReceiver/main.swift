@@ -1,5 +1,6 @@
-import AppKit
+import AfterscreenCore
 import AfterscreenReceiverKit
+import AppKit
 
 let app = NSApplication.shared
 let delegate = ReceiverAppDelegate()

@@ -1,8 +1,9 @@
 import Darwin
 import Foundation
 
-// Samples processes by name: CPU %, wakeups/s, physical footprint, lifetime peak footprint.
-// Run: swift run -c release --package-path Bench AfterscreenPidstat <seconds> <process name>...
+// Samples processes by name
+// CPU %, wakeups/s, physical footprint, lifetime peak footprint
+// Run: `swift run -c release --package-path Bench AfterscreenPidstat <seconds> <process name>...`
 
 struct Sample {
     var cpuNs: UInt64

@@ -81,7 +81,7 @@ final class VideoWireTests: XCTestCase {
         let parsed = try VideoWire.parseParams(VideoWire.params(codec: .h264, sets: sets))
         XCTAssertEqual(parsed.codec, .h264)
         XCTAssertEqual(parsed.sets, sets)
-        let frame = try VideoWire.parseFrame(VideoWire.frame(keyframe: true, avcc: Data([7, 7])))
+        let frame = try VideoWire.parseFrame(VideoWire.frame(keyframe: true, avcc: Data([7, 7])).reduce(Data(), +))
         XCTAssertTrue(frame.keyframe)
         XCTAssertEqual(frame.avcc, Data([7, 7]))
         XCTAssertThrowsError(try VideoWire.parseParams(Data([0, 1, 5, 0, 0, 0])))

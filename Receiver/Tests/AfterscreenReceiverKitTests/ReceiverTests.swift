@@ -38,6 +38,7 @@ final class FakeDisplay: StreamDisplay {
     var tileGate: DispatchSemaphore?
     var onEvent: (() -> Void)?
     let gpuMeter = GPUTimeMeter()
+    let decodeQueue = DispatchQueue(label: "fake-decode")
     var displayedFPS: Double { 0 }
     var lateFrames: Int { 0 }
     var uploadMs: Double { 0 }
@@ -107,6 +108,8 @@ final class ReceiverSessionTests: XCTestCase {
     override func setUpWithError() throws {
         listener = try Listener()
         let accepted = expectation(description: "accept")
+        // A test may connect a second sender once the first session ended
+        accepted.assertForOverFulfill = false
         listener.onAccept = { [unowned self] c in
             // As the app does: a connection during a session may be its cursor channel
             if let session = session { return session.offerChannel(c) }
@@ -261,6 +264,65 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(display.read { display.ended.map(\.relink) }, [true])
     }
 
+    func testDecodeResourcesAreFreedAfterTheAppDropsTheSession() throws {
+        let g = TileGeometry(width: 256, height: 128)
+        client.send(try JSONWire.message(.config, StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
+                                                                video: nil, linkKind: .loopback)))
+        // A frame still decoding as the session ends: the release queues behind it
+        let gate = DispatchSemaphore(value: 0)
+        display.tileGate = gate
+        client.send(Message(type: .tileFrame, payload: tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        let ended = expectation(description: "ended")
+        // As the app does: the session is dropped as soon as it reports its end
+        session.onEnd = { [unowned self] _ in
+            session = nil
+            ended.fulfill()
+        }
+        client.send(try JSONWire.message(.bye, Bye(reason: "Stopped on this Mac")))
+        client.closeAfterFlush(reason: "test")
+        wait(for: [ended], timeout: 3)
+        gate.signal()
+        waitForDisplay { [display] in display.log.contains("release") }
+    }
+
+    func testTheNextSessionPreparesAfterTheLastOneReleased() throws {
+        let g = TileGeometry(width: 256, height: 128)
+        let config = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128), video: nil, linkKind: .loopback)
+        client.send(try JSONWire.message(.config, config))
+        let gate = DispatchSemaphore(value: 0)
+        display.tileGate = gate
+        client.send(Message(type: .tileFrame, payload: tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        let ended = expectation(description: "ended")
+        session.onEnd = { [unowned self] _ in
+            session = nil
+            ended.fulfill()
+        }
+        client.send(try JSONWire.message(.bye, Bye(reason: "Switching to Ethernet", relink: true)))
+        client.closeAfterFlush(reason: "test")
+        wait(for: [ended], timeout: 3)
+
+        // The sender reconnects while the last session's decode work is still queued
+        let connected = expectation(description: "reconnect")
+        var next: Connection?
+        Connection.connect(host: "127.0.0.1", port: listener.port, interfaceName: nil, timeout: 2) { r in
+            next = try? r.get()
+            connected.fulfill()
+        }
+        wait(for: [connected], timeout: 3)
+        let second = try XCTUnwrap(next)
+        second.start(queue: queue)
+        defer { second.close(reason: "test end") }
+        second.send(.config, json: config)
+        Thread.sleep(forTimeInterval: 0.2)
+        gate.signal()
+        waitForDisplay { [display] in display.log.filter { $0 == "prepare" }.count == 2 }
+        let log = display.read { display.log }
+        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "release")), try XCTUnwrap(log.lastIndex(of: "prepare")),
+                          "the last session's release must not free the next session's texture")
+    }
+
     func testStopOnTheReceiverAsksTheSenderNotToReconnect() throws {
         let replies = expectReply { session.stop(reason: "Stopped on the receiver", pause: true) }
         let bye = try JSONWire.decode(Bye.self, from: try XCTUnwrap(replies.first).payload)
@@ -395,7 +457,7 @@ final class ReceiverSessionTests: XCTestCase {
         let g = TileGeometry(width: 256, height: 128)
         client.send(try! JSONWire.message(.config, hybridConfig))
         client.send(Message(type: .videoParams, payload: VideoWire.params(codec: .hevc, sets: [Data([1])])))
-        client.send(Message(type: .videoFrame, payload: VideoWire.frame(keyframe: true, avcc: Data([0, 0, 0, 1, 9]))))
+        client.send(.videoFrame, parts: VideoWire.frame(keyframe: true, avcc: Data([0, 0, 0, 1, 9])))
         client.send(Message(type: .tileFrame, payload: tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 2, format: .video)]).payload))
         waitForDisplay { [display] in display.tiles.count == 1 }
         XCTAssertEqual(display.read { display.log.filter { $0 != "begin" } }, ["prepare", "params", "video", "tiles"])
@@ -404,7 +466,7 @@ final class ReceiverSessionTests: XCTestCase {
     func testVideoFrameOnTheTilePathEndsSession() {
         let reason = expectEnd {
             client.send(try! JSONWire.message(.config, tileConfig))
-            client.send(Message(type: .videoFrame, payload: VideoWire.frame(keyframe: true, avcc: Data([1]))))
+            client.send(.videoFrame, parts: VideoWire.frame(keyframe: true, avcc: Data([1])))
         }
         XCTAssertTrue(reason.contains("hybrid"), reason)
         XCTAssertEqual(display.read { display.videoFrames }, 0)
@@ -920,6 +982,8 @@ final class DebandCacheTests: XCTestCase {
         let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
         enc.setRenderPipelineState(pipeline)
         enc.setFragmentTexture(picture, index: 0)
+        var still = StreamRenderer.Wave.still
+        enc.setFragmentBytes(&still, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()
@@ -987,6 +1051,14 @@ final class DebandCacheTests: XCTestCase {
         XCTAssertEqual(tile(1), 150, accuracy: 0.2, "within reach of it")
         XCTAssertEqual(tile(7), 100, accuracy: 0.2, "out of reach: kept from before")
         XCTAssertEqual(try shown(src, g, .strong)[32 * 512 + 7 * 64 + 32], 150, accuracy: 0.2, "a new level recomputes all")
+    }
+
+    func testAFullUpdateOfManyTilesKeepsAFlatPicture() throws {
+        // 4-pixel tiles: 1280 of them, a tile list past the 4 KB that setBytes takes
+        let g = TileGeometry(width: 256, height: 80, tileBlocks: 1)
+        XCTAssertGreaterThan(g.tileCount * 4, 4096)
+        let out = try shown(try source([UInt8](repeating: 100, count: 256 * 80), 256, 80), g, .weak)
+        XCTAssertEqual(out.map { abs($0 - 100) }.max() ?? 1, 0, accuracy: 0.2)
     }
 
     func testReachGrowsMarksByTheMarginWithinTheGrid() {

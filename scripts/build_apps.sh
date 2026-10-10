@@ -1,8 +1,8 @@
 #!/bin/zsh
 # Builds build/Afterscreen.app (sender, arm64, macOS 14+) and
-# build/Afterscreen Receiver.app (universal, macOS 10.15+ Intel / 11+ Apple Silicon).
-# Signs with $AFTERSCREEN_SIGN_IDENTITY, else the first Apple Development identity, else ad-hoc.
-# An ad-hoc signature changes every build, so macOS asks for privacy permissions again.
+# build/Afterscreen Receiver.app (universal, macOS 10.15+ Intel / 11+ Apple Silicon)
+# Signs with $AFTERSCREEN_SIGN_IDENTITY, else first Apple Development identity, else ad-hoc
+# Ad-hoc signature changes per build: macOS re-asks privacy permissions
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,6 +44,8 @@ bundle() { # app-path executable-src executable-name plist-content
     rm -rf "$1"
     mkdir -p "$1/Contents/MacOS" "$1/Contents/Resources"
     cp "$2" "$1/Contents/MacOS/$3"
+    # Symbols only serve debugging; stripped executables are about 45% smaller
+    strip "$1/Contents/MacOS/$3"
     print -r -- "$4" > "$1/Contents/Info.plist"
     print -n "APPL????" > "$1/Contents/PkgInfo"
     codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$1" >/dev/null
@@ -55,15 +57,16 @@ SENDER_BIN="$(swift build -c release --package-path "$ROOT/Sender" --show-bin-pa
 bundle "$OUT/Afterscreen.app" "$SENDER_BIN" Afterscreen \
     "$(plist Afterscreen io.github.lakystars.afterscreen.sender Afterscreen 14.0 '    <key>NSScreenCaptureUsageDescription</key><string>Afterscreen captures its virtual display to show it on the receiver.</string><key>NSAudioCaptureUsageDescription</key><string>Afterscreen plays the sound of this Mac on the receiver.</string>')"
 
-# SwiftPM in current Xcode only targets macOS 12+, so the receiver is built with swiftc directly
+# SwiftPM in current Xcode targets macOS 12+ only
+# Receiver builds with swiftc directly
 build_receiver() { # arch min-os
     local dir="$OUT/receiver-$1" target="$1-apple-macos$2"
     mkdir -p "$dir"
     local flags=(-target "$target" -sdk "$SDK" -O -whole-module-optimization)
     swiftc "${flags[@]}" -parse-as-library -module-name AfterscreenCore -emit-module -emit-module-path "$dir/AfterscreenCore.swiftmodule" \
-        -emit-library -static -o "$dir/libAfterscreenCore.a" "$ROOT"/Core/Sources/AfterscreenCore/*.swift
+        -emit-library -static -o "$dir/libAfterscreenCore.a" "$ROOT"/Core/Sources/AfterscreenCore/**/*.swift
     swiftc "${flags[@]}" -parse-as-library -module-name AfterscreenReceiverKit -I "$dir" -emit-module -emit-module-path "$dir/AfterscreenReceiverKit.swiftmodule" \
-        -emit-library -static -o "$dir/libAfterscreenReceiverKit.a" "$ROOT"/Receiver/Sources/AfterscreenReceiverKit/*.swift
+        -emit-library -static -o "$dir/libAfterscreenReceiverKit.a" "$ROOT"/Receiver/Sources/AfterscreenReceiverKit/**/*.swift
     swiftc "${flags[@]}" -I "$dir" -L "$dir" -lAfterscreenReceiverKit -lAfterscreenCore \
         -framework AppKit -framework Metal -framework QuartzCore -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOKit -framework SystemConfiguration -framework SwiftUI -framework AudioToolbox \
         -o "$dir/AfterscreenReceiver" "$ROOT/Receiver/Sources/AfterscreenReceiver/main.swift"

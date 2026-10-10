@@ -99,3 +99,24 @@ final class PowerSequenceTests: XCTestCase {
         XCTAssertFalse(p.powerOff(effect: .crt))
     }
 }
+
+final class RelinkHoldTests: XCTestCase {
+    func testAHoldThatRunsOutReportsIt() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let window = StreamWindow(renderer: try XCTUnwrap(StreamRenderer(device: device)), windowed: true)
+        // The wake activity and the sleep setting hang on this callback
+        let expired = expectation(description: "expired")
+        window.hold(for: 0.05) { expired.fulfill() }
+        wait(for: [expired], timeout: 2)
+    }
+
+    func testAHideBeforeTheTimeoutCancelsIt() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let window = StreamWindow(renderer: try XCTUnwrap(StreamRenderer(device: device)), windowed: true)
+        let expired = expectation(description: "expired")
+        expired.isInverted = true
+        window.hold(for: 0.05) { expired.fulfill() }
+        window.hide()
+        wait(for: [expired], timeout: 0.3)
+    }
+}

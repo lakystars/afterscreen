@@ -8,7 +8,8 @@ let package = Package(
     dependencies: [.package(path: "../Core")],
     targets: [
         .target(name: "AfterscreenReceiverKit", dependencies: [.product(name: "AfterscreenCore", package: "Core")]),
-        .executableTarget(name: "AfterscreenReceiver", dependencies: ["AfterscreenReceiverKit"]),
+        .executableTarget(name: "AfterscreenReceiver",
+                          dependencies: ["AfterscreenReceiverKit", .product(name: "AfterscreenCore", package: "Core")]),
         .testTarget(name: "AfterscreenReceiverKitTests",
                     dependencies: ["AfterscreenReceiverKit", .product(name: "AfterscreenCore", package: "Core")]),
     ]

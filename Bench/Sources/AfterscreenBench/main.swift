@@ -6,8 +6,9 @@ import AfterscreenCore
 import AfterscreenReceiverKit
 import AfterscreenSenderKit
 
-// Tile pipeline benchmark: sender encode/pack → framing → receiver parse/upload, per scenario.
-// Run: swift run -c release --package-path Bench AfterscreenBench [WxH] [--link Gbps]
+// Tile pipeline benchmark per scenario
+// Sender encode/pack → framing → receiver parse/upload
+// Run: `swift run -c release --package-path Bench AfterscreenBench [WxH] [--link Gbps]`
 
 // MARK: - Measurement
 
@@ -81,7 +82,7 @@ struct Scene {
         return s
     }
 
-    /// Desktop-like: dark text lines on white with a few coloured panels
+    /// Desktop-like: dark text lines on white, coloured panels
     static func ui(width: Int, height: Int, scroll: Int) -> Scene {
         var s = Scene(width: width, height: height)
         let space = CGColorSpaceCreateDeviceRGB()
@@ -143,7 +144,8 @@ let sizeArg = CommandLine.arguments.dropFirst().first { $0.contains("x") }?.spli
 let width = sizeArg?.first ?? 5120, height = sizeArg?.last ?? 2880
 let geometry = TileGeometry(width: width, height: height)
 let frames = 120, warmup = 20
-/// Link capacity the compression policy assumes: --link <Gbps>, default Thunderbolt 3 class
+/// Link capacity the compression policy assumes
+/// `--link <Gbps>`; default Thunderbolt 3 class
 let linkGbps = CommandLine.arguments.firstIndex(of: "--link")
     .flatMap { $0 + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[$0 + 1]) : nil } ?? 40
 
@@ -162,7 +164,7 @@ let typingRect = CGRect(x: width / 2, y: height / 2, width: 180, height: 28)
 typing.paste(photoA, rect: typingRect)
 let everything = CGRect(x: 0, y: 0, width: width, height: height)
 
-/// Scenes alternate; `dirty` is what ScreenCaptureKit reports as changed between them
+/// Scenes alternate; `dirty`: rects ScreenCaptureKit reports as changed
 let scenarios: [(String, [Scene], dirty: [CGRect])] = [
     ("full-motion video", [photoA, photoB], [everything]),
     ("video in a window", [windowA, windowB], [videoRect]),
@@ -196,7 +198,8 @@ for (name, scenes, dirty) in scenarios {
     tileTexture.ensure(geometry: geometry)
     let sEncode = Stage(), sPack = Stage(), rFrame = Stage(), rParse = Stage(), rUpload = Stage()
     var dirtyTotal = 0, rawTotal = 0, wireTotal = 0, measured = 0
-    // Socket stand-in: each read copies at most one 4 MiB socket buffer, like the kernel
+    // Socket stand-in: each read copies at most 4 MiB
+    // Same as one kernel socket buffer
     let wire = UnsafeMutableRawPointer.allocate(byteCount: 64 << 20, alignment: 16)
     var wireCount = 0, wireOffset = 0
     let reader = FrameReader { dst, count in
@@ -243,7 +246,7 @@ for (name, scenes, dirty) in scenarios {
         }
     }
 
-    // Once the picture settles, the BC7 reference follows the BC1 sent during motion
+    // Once settled, BC7 reference follows BC1 sent during motion
     if let settled = encoder.refine(now: Double(frames) / 60 + 1) {
         let packed = packer.pack(settled, geometry: geometry, compression: .none)
         let payload = packed.parts.reduce(Data(), +)

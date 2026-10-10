@@ -462,6 +462,12 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertTrue(chosen.fellBack)
     }
 
+    func testOnlyAChosenLinkThatAnswersHasFallbackRoutes() {
+        XCTAssertEqual(RoutePlanner.fallback(threeLinks, prefer: .wifi).map(\.interface), ["en5", "en12"])
+        XCTAssertEqual(RoutePlanner.fallback(threeLinks, prefer: nil), [], "automatic already tries every route")
+        XCTAssertEqual(RoutePlanner.fallback(threeLinks, prefer: .thunderbolt), [], "a gone link already fell back to all")
+    }
+
     func testUnsupportedInterfacesAreSkipped() {
         let routes = RoutePlanner.plan(local: locals, remote: ["192.168.139.9"].map { RemoteAddress($0) })
         XCTAssertTrue(routes.isEmpty)
@@ -501,5 +507,42 @@ final class CompressionPolicyTests: XCTestCase {
         XCTAssertEqual(p.next(rawBytes: 1000, queueWasFull: true), .all)
         for _ in 1..<CompressionPolicy.congestionFrames { XCTAssertEqual(p.next(rawBytes: 1000, queueWasFull: false), .all) }
         XCTAssertEqual(p.next(rawBytes: 1000, queueWasFull: false), .none)
+    }
+}
+
+final class DiscoveryTests: XCTestCase {
+    /// A resolved receiver, without the network
+    private final class Resolved: NetService {
+        override var port: Int { 4000 }
+    }
+
+    private func service(_ name: String) -> NetService {
+        Resolved(domain: "local.", type: AfterscreenProtocol.bonjourType + ".", name: name)
+    }
+
+    func testAnUnresolvedPortIsIgnored() {
+        let discovery = Discovery()
+        var list: [DiscoveredReceiver]?
+        discovery.onChange = { list = $0 }
+        discovery.netServiceDidResolveAddress(NetService(domain: "local.", type: AfterscreenProtocol.bonjourType + ".", name: "iMac"))
+        XCTAssertNil(list)
+    }
+
+    func testAReceiverStaysListedWhileAnyInterfaceReportsIt() {
+        let discovery = Discovery()
+        var list: [DiscoveredReceiver] = []
+        discovery.onChange = { list = $0 }
+        let browser = NetServiceBrowser()
+        // The browser reports one instance per interface, e.g. Thunderbolt Bridge and Wi-Fi
+        let bridge = service("iMac"), wifi = service("iMac")
+        discovery.netServiceBrowser(browser, didFind: bridge, moreComing: true)
+        discovery.netServiceBrowser(browser, didFind: wifi, moreComing: false)
+        discovery.netServiceDidResolveAddress(bridge)
+        XCTAssertEqual(list.map(\.name), ["iMac"])
+
+        discovery.netServiceBrowser(browser, didRemove: bridge, moreComing: false)
+        XCTAssertEqual(list.map(\.name), ["iMac"], "still reachable over Wi-Fi")
+        discovery.netServiceBrowser(browser, didRemove: wifi, moreComing: false)
+        XCTAssertEqual(list.map(\.name), [])
     }
 }
