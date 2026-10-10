@@ -35,6 +35,8 @@ public struct SenderSnapshot {
     public var missingLink: LinkKind?
     /// This Mac's sound goes to the receiver
     public var soundOnReceiver = false
+    /// Receiver output's level; nil while it keeps its own
+    public var outputLevel: OutputLevel?
 
     public init() {}
 
@@ -81,6 +83,9 @@ public final class SenderSession {
     private let resolution: StreamResolution
     /// AudioTap, macOS 14.2 and later
     private var audioTap: AnyObject?
+    /// This Mac's volume and mute, followed by the receiver
+    private var output: OutputWatcher?
+    private var outputSent = false
     private var testRun: QualityTestRun?
     private var connection: Connection?
     private var display: VirtualDisplay?
@@ -123,22 +128,21 @@ public final class SenderSession {
         connection?.send(Message(type: .deband, payload: DebandWire.encode(level)))
     }
 
-    /// Playback volume of this Mac's sound on the receiver, 0…1
-    public func setVolume(_ level: Double) {
-        connection?.send(Message(type: .volume, payload: LevelWire.encode(level)))
-    }
-
     /// Main queue: starts or stops this Mac's sound while streaming
     public func setSound(_ on: Bool) {
         sound = on
         guard snapshot.isStreaming else { return }
-        on ? startSound() : stopSound()
+        if on { return startSound() }
+        stopSound()
+        sendOutputLevel(playing: false)
     }
 
     private func startSound() {
         guard audioTap == nil, sound, snapshot.peer?.audioPlayback == true else { return }
         // Cursor channel from the handshake: sound never waits behind frames
         guard let channel = cursorConnection ?? connection else { return }
+        // Level first: no sound at the iMac's own level
+        sendOutputLevel(playing: true)
         if #available(macOS 14.2, *) {
             audioTap = AudioTap(onSamples: { rate, channels, samples in
                 channel.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: rate, channels: channels, samples: samples)))
@@ -149,12 +153,34 @@ public final class SenderSession {
             })
         }
         update { $0.soundOnReceiver = audioTap != nil }
+        guard audioTap != nil else { return sendOutputLevel(playing: false) }
+        if output == nil {
+            output = OutputWatcher { [weak self] _ in
+                guard let self = self else { return }
+                self.sendOutputLevel(playing: self.audioTap != nil)
+            }
+        }
     }
 
+    /// Receiver keeps this Mac's level across a tap rebuild
     private func stopSound() {
         if #available(macOS 14.2, *) { (audioTap as? AudioTap)?.stop() }
         audioTap = nil
+        output?.stop()
+        output = nil
         update { $0.soundOnReceiver = false }
+    }
+
+    /// Receiver's output takes this Mac's volume and mute
+    /// nil returns its own: sound off or fixed-volume output
+    /// Sent with the sound, never queued behind frames
+    private func sendOutputLevel(playing: Bool) {
+        let level = playing ? SystemOutput().level : nil
+        // First send always goes: a relinked receiver holds the last level
+        guard !outputSent || level != snapshot.outputLevel else { return }
+        outputSent = true
+        update { $0.outputLevel = level }
+        (cursorConnection ?? connection)?.send(Message(type: .volume, payload: OutputLevelWire.encode(level)))
     }
 
     /// Receiver panel brightness, 0…1
@@ -418,6 +444,7 @@ public final class SenderSession {
                     $0.state = L10n.t("Streaming", "스트리밍 중")
                 }
                 self.startSound()
+                self.sendOutputLevel(playing: self.audioTap != nil)
                 if let level = self.brightness { self.setBrightness(level) }
                 self.startTimers()
             }

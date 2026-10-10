@@ -122,7 +122,7 @@ private struct Card<Content: View>: View {
     }
 }
 
-/// iMac sound: switch, then volume while the iMac plays
+/// iMac sound: switch, then status while the iMac plays
 private struct SoundCard: View {
     @ObservedObject var model: AppModel
     @ObservedObject var settings: SenderSettings
@@ -138,21 +138,12 @@ private struct SoundCard: View {
             Toggle(L10n.t("Play this Mac's sound on the iMac", "이 Mac의 소리를 iMac에서 재생"), isOn: $settings.sound)
                 .toggleStyle(.switch)
                 .font(.system(size: 12))
-                .help(L10n.t("This Mac stays silent while the iMac plays. Asks once for System Audio Recording permission. About 1.5 Mbps",
-                             "iMac에서 재생하는 동안 이 Mac 스피커는 소리가 나지 않습니다. 처음 한 번 시스템 오디오 녹음 권한을 묻습니다. 약 1.5Mbps를 씁니다"))
-            if settings.sound, s.soundOnReceiver, let level = model.volume {
-                HStack(spacing: 8) {
-                    Image(systemName: level > 0 ? "speaker.wave.1" : "speaker.slash").foregroundStyle(.secondary).frame(width: 18)
-                    Slider(value: Binding(get: { level }, set: { model.setVolume($0) }), in: 0...1)
-                    Image(systemName: "speaker.wave.3").foregroundStyle(.secondary)
-                }
-                .help(L10n.t("Volume of this Mac's sound on the iMac; the iMac's own volume applies on top",
-                             "iMac에서 재생하는 이 Mac 소리의 음량. iMac 자체 음량도 함께 적용됩니다"))
+                .help(L10n.t("This Mac stays silent while the iMac plays. The iMac's volume and mute follow this Mac's. Asks once for System Audio Recording permission. About 1.5 Mbps",
+                             "iMac에서 재생하는 동안 이 Mac 스피커는 소리가 나지 않습니다. iMac 음량과 음소거는 이 Mac을 따릅니다. 처음 한 번 시스템 오디오 녹음 권한을 묻습니다. 약 1.5Mbps를 씁니다"))
+            if settings.sound, s.soundOnReceiver {
                 HStack {
-                    if let buffer = s.receiver?.audioBufferMs {
-                        Text(L10n.t("Sent to the iMac · \(Int(buffer)) ms buffered", "iMac으로 보내는 중 · 버퍼 \(Int(buffer))ms"))
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
+                    Text(SoundCard.status(s))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
                     // A denied permission still yields a silent tap
                     Button(L10n.t("No sound?", "소리가 안 나나요?")) {
@@ -165,6 +156,19 @@ private struct SoundCard: View {
                 }
             }
         }
+    }
+
+    /// Sent to the iMac · volume 44% · 30 ms buffered
+    private static func status(_ s: SenderSnapshot) -> String {
+        var parts = [L10n.t("Sent to the iMac", "iMac으로 보내는 중")]
+        if let level = s.outputLevel {
+            parts.append(level.muted ? L10n.t("muted", "음소거")
+                                     : L10n.t("volume \(Int((level.volume * 100).rounded()))%", "음량 \(Int((level.volume * 100).rounded()))%"))
+        }
+        if let buffer = s.receiver?.audioBufferMs {
+            parts.append(L10n.t("\(Int(buffer)) ms buffered", "버퍼 \(Int(buffer))ms"))
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

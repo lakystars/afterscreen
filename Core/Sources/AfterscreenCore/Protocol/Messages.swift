@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 7
+    public static let version = 8
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -135,14 +135,12 @@ public struct ReceiverStats: Codable, Equatable {
     public var brightness: Double?
     /// Sound buffered for playback; nil while no sound arrives
     public var audioBufferMs: Double?
-    /// Playback volume of the sender's sound, 0…1
-    public var volume: Double?
     /// Per session; each underrun is an audible gap
     public var audioUnderruns: Int?
 
     public init(receivedFPS: Double, displayedFPS: Double, uploadMs: Double, decompressMs: Double, lateFrames: Int,
                 cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, brightness: Double?, audioBufferMs: Double? = nil,
-                volume: Double? = nil, audioUnderruns: Int? = nil) {
+                audioUnderruns: Int? = nil) {
         self.receivedFPS = receivedFPS
         self.displayedFPS = displayedFPS
         self.uploadMs = uploadMs
@@ -153,7 +151,6 @@ public struct ReceiverStats: Codable, Equatable {
         self.gpuPercent = gpuPercent
         self.brightness = brightness
         self.audioBufferMs = audioBufferMs
-        self.volume = volume
         self.audioUnderruns = audioUnderruns
     }
 }
@@ -401,7 +398,7 @@ public enum AudioWire {
     }
 }
 
-/// brightness, volume: f32 level, 0…1
+/// brightness: f32 level, 0…1
 public enum LevelWire {
     public static func encode(_ level: Double) -> Data {
         var w = ByteWriter(capacity: 4)
@@ -413,6 +410,25 @@ public enum LevelWire {
         var r = ByteReader(data)
         let v = Double(try r.f32())
         return v.isNaN ? 0 : min(1, max(0, v))
+    }
+}
+
+/// volume: f32 level, u8 muted
+/// Empty: receiver returns to its own level
+public enum OutputLevelWire {
+    public static func encode(_ level: OutputLevel?) -> Data {
+        guard let level = level else { return Data() }
+        var w = ByteWriter(capacity: 5)
+        w.f32(Float(level.volume.isNaN ? 0 : min(1, max(0, level.volume))))
+        w.u8(level.muted ? 1 : 0)
+        return w.data
+    }
+
+    public static func decode(_ data: Data) throws -> OutputLevel? {
+        guard !data.isEmpty else { return nil }
+        var r = ByteReader(data)
+        let v = Double(try r.f32()), muted = try r.u8() != 0
+        return OutputLevel(volume: v.isNaN ? 0 : min(1, max(0, v)), muted: muted)
     }
 }
 

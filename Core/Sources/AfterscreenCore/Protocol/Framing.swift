@@ -13,6 +13,7 @@ public enum MessageType: UInt8, CaseIterable {
     /// Opens the second connection carrying cursor and sound
     case cursorChannel = 0x23
     case audio = 0x24
+    /// Sender's output volume and mute, set on the receiver
     case volume = 0x25
     case deband = 0x26
     case probe = 0x30

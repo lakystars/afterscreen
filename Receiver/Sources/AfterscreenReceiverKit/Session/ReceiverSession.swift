@@ -38,10 +38,9 @@ public protocol StreamDisplay: AnyObject {
     func setBrightness(_ level: Double)
     /// Any queue
     func playAudio(_ packet: AudioWire.Packet)
-    /// Playback volume of the sender's sound, 0…1
-    var volume: Double { get }
-    /// Main queue
-    func setVolume(_ level: Double)
+    /// Main queue: output volume and mute follow the sender's
+    /// nil returns the iMac's own level
+    func followOutput(_ level: OutputLevel?)
     /// Any queue: smoothing of one-level steps, from the next draw
     func setDeband(_ level: Deband)
     /// Sound buffered for playback in seconds; nil while none plays
@@ -238,8 +237,7 @@ public final class ReceiverSession {
         case .audio:
             audio(m)
         case .volume:
-            guard currentPeer != nil, let level = try? LevelWire.decode(m.payload) else { return }
-            DispatchQueue.main.async { [weak self] in self?.display?.setVolume(level) }
+            volume(m)
         case .deband:
             guard currentPeer != nil, let level = try? DebandWire.decode(m.payload) else { return }
             record { $0.deband = level }
@@ -275,6 +273,13 @@ public final class ReceiverSession {
         }
     }
 
+    /// Usually on the cursor channel, ahead of the sound
+    private func volume(_ m: Message) {
+        // `try?` would fold the nil release into a decode failure
+        guard currentPeer != nil, case .success(let level) = Result(catching: { try OutputLevelWire.decode(m.payload) }) else { return }
+        DispatchQueue.main.async { [weak self] in self?.display?.followOutput(level) }
+    }
+
     private func audio(_ m: Message) {
         guard currentPeer != nil, let packet = try? AudioWire.decode(m.payload) else { return }
         display?.playAudio(packet)
@@ -297,6 +302,7 @@ public final class ReceiverSession {
             guard self.cursorChannel === c else { return self.adopt(c, first: m) }
             if m.type == .cursorPos || m.type == .cursorImage { self.cursor(m) }
             if m.type == .audio { self.audio(m) }
+            if m.type == .volume { self.volume(m) }
         }
         c.start(queue: queue)
         // Closes a connection that never presents the token
@@ -346,7 +352,7 @@ public final class ReceiverSession {
                                   uploadMs: display.uploadMs, decompressMs: display.decodeMs, lateFrames: display.lateFrames,
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
                                   gpuPercent: display.gpuMeter.percentSinceLastRead(), brightness: display.brightness,
-                                  audioBufferMs: display.audioBuffered.map { $0 * 1000 }, volume: display.volume,
+                                  audioBufferMs: display.audioBuffered.map { $0 * 1000 },
                                   audioUnderruns: display.audioUnderruns)
         record {
             $0.receiver = stats

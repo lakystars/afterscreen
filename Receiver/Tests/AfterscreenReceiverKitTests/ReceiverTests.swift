@@ -72,9 +72,8 @@ final class FakeDisplay: StreamDisplay {
     func setBrightness(_ level: Double) { record { brightnessSet.append(level) } }
     var audioPackets: [AudioWire.Packet] = []
     func playAudio(_ packet: AudioWire.Packet) { record { audioPackets.append(packet) } }
-    var volume = 0.6
-    var volumeSet: [Double] = []
-    func setVolume(_ level: Double) { record { volumeSet.append(level) } }
+    var outputsFollowed: [OutputLevel?] = []
+    func followOutput(_ level: OutputLevel?) { record { outputsFollowed.append(level) } }
     var debandSet: [Deband] = []
     func setDeband(_ level: Deband) { record { debandSet.append(level) } }
     var onRedrawNeeded: (() -> Void)?
@@ -203,11 +202,12 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertTrue(display.read { display.brightnessSet.isEmpty })
     }
 
-    func testVolumeMessageSetsThePlaybackVolume() throws {
+    func testVolumeMessagesSetAndReleaseTheOutputLevel() throws {
         _ = try token()
-        client.send(Message(type: .volume, payload: LevelWire.encode(0.3)))
-        waitForDisplay { [display] in !display.volumeSet.isEmpty }
-        XCTAssertEqual(display.read { display.volumeSet.first } ?? 0, 0.3, accuracy: 1e-6)
+        client.send(Message(type: .volume, payload: OutputLevelWire.encode(OutputLevel(volume: 0.25, muted: true))))
+        client.send(Message(type: .volume, payload: OutputLevelWire.encode(nil)))
+        waitForDisplay { [display] in display.outputsFollowed.count == 2 }
+        XCTAssertEqual(display.read { display.outputsFollowed }, [OutputLevel(volume: 0.25, muted: true), nil])
     }
 
     func testARedrawRequestDrawsOnTheDecodeQueue() throws {
@@ -348,7 +348,6 @@ final class ReceiverSessionTests: XCTestCase {
         client.send(try! JSONWire.message(.config, tileConfig))
         wait(for: [e], timeout: 3)
         XCTAssertEqual(stats?.brightness, 0.4)
-        XCTAssertEqual(stats?.volume, 0.6)
         XCTAssertEqual(session.telemetry.receiver, stats, "the HUD shows what the sender is told")
         XCTAssertEqual(session.telemetry.shownFPS.values.count, 1)
     }

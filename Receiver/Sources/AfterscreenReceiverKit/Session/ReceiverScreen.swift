@@ -31,6 +31,7 @@ public final class ReceiverScreen: StreamDisplay {
     private var snapshotSignal: DispatchSourceSignal?
     private let window: StreamWindow
     private let audio = AudioPlayer()
+    private let output = OutputMirror()
     /// Held while a stream shows; input arrives on the sender
     /// Without it the iMac idles into display sleep
     private var awake: NSObjectProtocol?
@@ -113,15 +114,24 @@ public final class ReceiverScreen: StreamDisplay {
     public func end(reason: String, relink: Bool) {
         audio.stop()
         // Link or size change: the next session takes this window
-        // Power effects skipped
+        // Power effects skipped; output level kept for the sender's return
         guard !relink else {
             return window.hold(for: StreamWindow.relinkWait) { [weak self] in
                 self?.releaseAwake()
+                self?.output.restore()
                 self?.onRelinkTimeout?()
             }
         }
         window.hide()
         releaseAwake()
+        output.restore()
+    }
+
+    /// Main queue: puts back the iMac's own output level
+    /// Sound stops first: no tail at the iMac's own level
+    public func restoreOutput() {
+        audio.stop()
+        output.restore()
     }
 
     private func releaseAwake() {
@@ -159,10 +169,9 @@ public final class ReceiverScreen: StreamDisplay {
 
     public var audioUnderruns: Int { audio.underruns }
 
-    public var volume: Double { audio.volume }
-
-    public func setVolume(_ level: Double) {
-        audio.volume = level
+    public func followOutput(_ level: OutputLevel?) {
+        guard level != nil else { return restoreOutput() }
+        output.follow(level)
     }
 
     public func setDeband(_ level: Deband) {

@@ -1,3 +1,4 @@
+import AfterscreenCore
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -30,7 +31,7 @@ final class AudioTap {
     private var tap = AudioObjectID(kAudioObjectUnknown)
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var proc: AudioDeviceIOProcID?
-    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    private var listeners: [AudioListener] = []
     private let queue = DispatchQueue(label: "afterscreen.audio", qos: .userInteractive)
 
     /// `onSamples`: audio queue, about 10 ms of interleaved 16-bit samples
@@ -44,7 +45,7 @@ final class AudioTap {
         guard AudioHardwareCreateProcessTap(description, &tap) == noErr else { return nil }
         var format = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var formatAddress = AudioTap.address(kAudioTapPropertyFormat)
+        var formatAddress = AudioObjectPropertyAddress(kAudioTapPropertyFormat)
         guard AudioObjectGetPropertyData(tap, &formatAddress, 0, nil, &size, &format) == noErr,
               format.mFormatID == kAudioFormatLinearPCM, format.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
             stop()
@@ -64,7 +65,7 @@ final class AudioTap {
         // 512 frames, about 10 ms
         // Receiver's 30 ms buffer expects packets of that order
         var frames: UInt32 = 512
-        var framesAddress = AudioTap.address(kAudioDevicePropertyBufferFrameSize)
+        var framesAddress = AudioObjectPropertyAddress(kAudioDevicePropertyBufferFrameSize)
         AudioObjectSetPropertyData(aggregate, &framesAddress, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
         let rate = Int(format.mSampleRate), channels = Int(format.mChannelsPerFrame)
         let interleaved = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
@@ -84,18 +85,15 @@ final class AudioTap {
             return nil
         }
         // New output device can change the tap's clock and format
-        listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, onChange)
-        listen(tap, kAudioTapPropertyFormat, onChange)
+        listeners = [(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice), (tap, kAudioTapPropertyFormat)]
+            .compactMap { AudioListener($0, AudioObjectPropertyAddress($1), handler: onChange) }
     }
 
     deinit { stop() }
 
     /// Unmutes the Mac's own output
     func stop() {
-        for (object, address, block) in listeners {
-            var a = address
-            AudioObjectRemovePropertyListenerBlock(object, &a, DispatchQueue.main, block)
-        }
+        listeners.forEach { $0.remove() }
         listeners = []
         if let proc = proc {
             AudioDeviceStop(aggregate, proc)
@@ -110,17 +108,5 @@ final class AudioTap {
             AudioHardwareDestroyProcessTap(tap)
             tap = AudioObjectID(kAudioObjectUnknown)
         }
-    }
-
-    private func listen(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ onChange: @escaping () -> Void) {
-        var address = AudioTap.address(selector)
-        let block: AudioObjectPropertyListenerBlock = { _, _ in onChange() }
-        if AudioObjectAddPropertyListenerBlock(object, &address, DispatchQueue.main, block) == noErr {
-            listeners.append((object, address, block))
-        }
-    }
-
-    private static func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
     }
 }

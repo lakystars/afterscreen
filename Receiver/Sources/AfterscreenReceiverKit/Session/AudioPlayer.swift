@@ -86,25 +86,12 @@ final class AudioPlayer {
     /// Three queue buffers of 10 ms
     static let bufferSeconds = 0.01
 
-    private static let volumeKey = "volume"
     private let lock = NSLock()
     private var buffer: AudioJitterBuffer?
     private var queue: AudioQueueRef?
     private var format: (rate: Int, channels: Int)?
 
     deinit { stop() }
-
-    /// Playback volume, 0…1; kept across sessions
-    /// Scaled further by the Mac's output volume
-    var volume: Double {
-        get { UserDefaults.standard.object(forKey: AudioPlayer.volumeKey) as? Double ?? 1 }
-        set {
-            UserDefaults.standard.set(newValue, forKey: AudioPlayer.volumeKey)
-            lock.lock()
-            if let q = queue { AudioQueueSetParameter(q, kAudioQueueParam_Volume, Float(newValue)) }
-            lock.unlock()
-        }
-    }
 
     /// Any thread
     func play(_ packet: AudioWire.Packet) {
@@ -178,8 +165,8 @@ final class AudioPlayer {
             memset(buffer.pointee.mAudioData, 0, Int(buffer.pointee.mAudioDataBytesCapacity))
             AudioQueueEnqueueBuffer(created, buffer, 0, nil)
         }
+        // Full gain: the iMac's output carries the sender's volume
         queue = created
-        AudioQueueSetParameter(created, kAudioQueueParam_Volume, Float(volume))
         AudioQueueStart(created, nil)
     }
 

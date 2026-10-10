@@ -69,6 +69,16 @@ final class MessagesTests: XCTestCase {
         XCTAssertThrowsError(try LevelWire.decode(Data([1, 2])))
     }
 
+    func testOutputLevelWireRoundTripsAndClamps() throws {
+        let level = OutputLevel(volume: 0.4375, muted: true)
+        XCTAssertEqual(try OutputLevelWire.decode(OutputLevelWire.encode(level)), level)
+        XCTAssertEqual(try OutputLevelWire.decode(OutputLevelWire.encode(OutputLevel(volume: 1.7, muted: false)))?.volume, 1)
+        XCTAssertEqual(try OutputLevelWire.decode(OutputLevelWire.encode(OutputLevel(volume: .nan, muted: false)))?.volume, 0)
+        XCTAssertTrue(OutputLevelWire.encode(nil).isEmpty, "empty hands the level back")
+        XCTAssertNil(try OutputLevelWire.decode(Data()))
+        XCTAssertThrowsError(try OutputLevelWire.decode(Data([0, 0, 0, 0])))
+    }
+
     func testPingRoundTripAndTruncation() throws {
         XCTAssertEqual(try PingWire.decode(PingWire.encode(123_456_789_012)), 123_456_789_012)
         XCTAssertThrowsError(try PingWire.decode(Data([1, 2])))

@@ -20,9 +20,6 @@ public final class AppModel: ObservableObject {
     /// After a change: slider value until the receiver reports it
     @Published public private(set) var brightness: Double?
     private var brightnessSetAt = 0.0
-    /// Receiver playback volume, held the same way as brightness
-    @Published public private(set) var volume: Double?
-    private var volumeSetAt = 0.0
 
     public let settings: SenderSettings
     private var session: SenderSession?
@@ -127,7 +124,6 @@ public final class AppModel: ObservableObject {
             if s.isStreaming { self.auto.streamed() }
             let now = ProcessInfo.processInfo.systemUptime
             if now - self.brightnessSetAt > 1.5, self.brightness != s.receiver?.brightness { self.brightness = s.receiver?.brightness }
-            if now - self.volumeSetAt > 1.5, self.volume != s.receiver?.volume { self.volume = s.receiver?.volume }
         }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
@@ -137,7 +133,6 @@ public final class AppModel: ObservableObject {
                 self.reconnect = nil
             }
             self.brightness = nil
-            self.volume = nil
             self.session = nil
             self.activeReceiver = nil
             self.lastMessage = reason
@@ -171,12 +166,6 @@ public final class AppModel: ObservableObject {
     public func setDeband(_ level: Deband) {
         settings.deband = level
         session?.setDeband(level)
-    }
-
-    public func setVolume(_ level: Double) {
-        volume = level
-        volumeSetAt = ProcessInfo.processInfo.systemUptime
-        session?.setVolume(level)
     }
 
     public func stopTest() {

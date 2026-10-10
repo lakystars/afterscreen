@@ -4,7 +4,7 @@ Turn an iMac into an extended display for an Apple Silicon Mac, at the iMac's na
 
 - **5K at 60 fps** over Thunderbolt Bridge or USB networking, with no video codec on the path: the picture goes out as GPU texture blocks that the iMac's GPU draws directly.
 - **Slower links keep text sharp.** Still content stays lossless at native resolution; only the parts that move go out as HEVC or H.264 video.
-- **The Mac's sound plays on the iMac's speakers**, with volume and iMac brightness controls in the menu bar.
+- **The Mac's sound plays on the iMac's speakers** at the Mac's own volume, with iMac brightness control in the menu bar.
 - **Picture quality tools**: gradient smoothing for 8-bit banding, a 10-bit output, bicubic scaling for reduced streams.
 - **A quality test** that measures the highest resolution and frame rate your link sustains.
 - **English and Korean** interface.
@@ -63,7 +63,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 - A 10-bit output on the iMac, and HEVC Main10 for the video layer where the iMac supports it.
 
 **Sound and controls**
-- The Mac's sound plays on the iMac's speakers (the Mac stays silent meanwhile), with a switch and a volume slider at the top of the menu.
+- The Mac's sound plays on the iMac's speakers (the Mac stays silent meanwhile), with a switch at the top of the menu. The iMac's volume and mute follow the Mac's volume keys and menu bar, and go back to the iMac's own level when the sound stops.
 - iMac brightness slider. The value is remembered and applied at every connection, full brightness by default.
 - The pointer travels on a connection of its own and never waits behind frames.
 
@@ -160,7 +160,7 @@ Sender (**Settings…** in the menu):
 | Menu bar | The icon only (default), or also the frame rate and throughput. |
 | Language | System, English or Korean. |
 
-In the menu while streaming: sound on the iMac and its volume, iMac brightness, the link, and Smooth gradients (medium by default).
+In the menu while streaming: sound on the iMac, iMac brightness, the link, and Smooth gradients (medium by default).
 
 Receiver (**Settings…** in its menu):
 

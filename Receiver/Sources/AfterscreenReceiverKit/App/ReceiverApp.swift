@@ -10,6 +10,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private var session: ReceiverSession?
     private var screen: ReceiverScreen?
     private var hardware: Welcome!
+    private var terminateSignal: DispatchSourceSignal?
     /// Keep first: sets UI language used by later properties
     private let settings = ReceiverSettings()
     private var lastSummary = L10n.t("No session yet", "아직 연결한 적 없음")
@@ -28,6 +29,12 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     public override init() {}
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        // Default SIGTERM exits without applicationWillTerminate
+        signal(SIGTERM, SIG_IGN)
+        let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        terminate.setEventHandler { NSApp.terminate(nil) }
+        terminate.resume()
+        terminateSignal = terminate
         let name = Host.current().localizedName ?? "iMac"
         hardware = HardwareInfo.welcome(name: name)
         // Development: report another panel, e.g. --panel 5120x2880
@@ -70,6 +77,12 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         } catch {
             state("Cannot listen: \(error)", "연결을 받을 수 없습니다: \(error)")
         }
+    }
+
+    /// Quit mid-stream: the iMac gets its own volume back
+    /// SIGTERM, as from `kill`, quits through here too
+    public func applicationWillTerminate(_ notification: Notification) {
+        screen?.restoreOutput()
     }
 
     private func publish(port: UInt16, name: String) {
