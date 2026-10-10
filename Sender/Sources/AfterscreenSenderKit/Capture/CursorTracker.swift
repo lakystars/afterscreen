@@ -22,14 +22,23 @@ final class CursorTracker {
     var onImage: ((CursorImage) -> Void)?
 
     private let displayID: CGDirectDisplayID
+    private let crop: CGRect?
     private var timer: DispatchSourceTimer?
     private var rate = CursorPollRate()
     private var lastPosition: (Float, Float, Bool)?
     private var lastImage: Int?
     private var lastSeed: Int32?
 
-    init(displayID: CGDirectDisplayID) {
+    /// `crop`: display points the stream shows; nil for all
+    init(displayID: CGDirectDisplayID, crop: CGRect? = nil) {
         self.displayID = displayID
+        self.crop = crop
+    }
+
+    /// Global points the stream shows
+    static func area(display: CGRect, crop: CGRect?) -> CGRect {
+        guard let c = crop else { return display }
+        return CGRect(x: display.minX + c.minX, y: display.minY + c.minY, width: c.width, height: c.height)
     }
 
     /// Quartz global coordinates (top-left origin); visible inside [min, max)
@@ -100,7 +109,7 @@ final class CursorTracker {
 
     private func poll() {
         guard let location = CGEvent(source: nil)?.location else { return }
-        let p = CursorTracker.normalize(point: location, displayBounds: CGDisplayBounds(displayID))
+        let p = CursorTracker.normalize(point: location, displayBounds: CursorTracker.area(display: CGDisplayBounds(displayID), crop: crop))
         let moved = lastPosition.map { CursorTracker.isMove(from: $0, to: p) } ?? true
         if moved {
             lastPosition = p

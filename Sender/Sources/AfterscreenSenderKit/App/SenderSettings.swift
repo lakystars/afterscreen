@@ -20,6 +20,48 @@ public enum StreamResolution: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the iMac shows
+/// Extend: a display of its own, as macOS arranges it
+/// Mirror: this Mac's main display, letterboxed to the panel
+public enum DisplayRole: String, CaseIterable, Identifiable {
+    case extend, mirror
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .extend: return L10n.t("Extend", "확장")
+        case .mirror: return L10n.t("Mirror", "복제")
+        }
+    }
+
+    public static var help: String {
+        L10n.t("Extend: the iMac is a display of its own. Mirror: it shows this Mac's main display; black bars fill the rest when the shapes differ",
+               "확장: iMac이 별도의 디스플레이가 됩니다. 복제: 이 Mac의 주 디스플레이를 그대로 보여 주고, 화면 비율이 다르면 남는 곳은 검게 둡니다")
+    }
+}
+
+/// Mirror's shape, as macOS's "Optimize for"
+/// This Mac: its own resolution, letterboxed on the iMac
+/// iMac: the desktop takes the iMac's shape; this Mac letterboxes
+public enum MirrorFit: String, CaseIterable, Identifiable {
+    case mac, iMac
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .mac: return L10n.t("This Mac", "이 Mac")
+        case .iMac: return "iMac"
+        }
+    }
+
+    public static var help: String {
+        L10n.t("This Mac: it keeps its resolution and the iMac shows black bars where the shapes differ. iMac: the desktop takes the iMac's shape and resolution, sharp and edge to edge there; this Mac shows it with bars",
+               "이 Mac: 해상도를 그대로 두고, 비율이 다르면 iMac에 검은 여백이 생깁니다. iMac: 데스크톱을 iMac의 비율과 해상도로 바꿔 iMac에 꽉 차고 선명하게 보이고, 이 Mac 화면에 여백이 생깁니다")
+    }
+}
+
 /// Virtual display "looks like" size, scaled from receiver default points
 public enum DisplaySize: String, CaseIterable, Identifiable {
     case larger, standard, more, most
@@ -68,6 +110,15 @@ public final class SenderSettings: ObservableObject {
         static let deband = "deband"
         static let brightness = "brightness"
         static let streamResolution = "streamResolution"
+        static let displayRole = "displayRole"
+        static let mirrorFit = "mirrorFit"
+    }
+
+    @Published public var displayRole: DisplayRole {
+        didSet { defaults.set(displayRole.rawValue, forKey: Key.displayRole) }
+    }
+    @Published public var mirrorFit: MirrorFit {
+        didSet { defaults.set(mirrorFit.rawValue, forKey: Key.mirrorFit) }
     }
 
     @Published public var displaySize: DisplaySize {
@@ -124,6 +175,8 @@ public final class SenderSettings: ObservableObject {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        displayRole = defaults.enumValue(forKey: Key.displayRole, default: .extend)
+        mirrorFit = defaults.enumValue(forKey: Key.mirrorFit, default: .mac)
         displaySize = defaults.enumValue(forKey: Key.displaySize, default: .standard)
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)

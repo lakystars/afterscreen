@@ -121,6 +121,12 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertEqual(SenderSettings(defaults: defaults).streamResolution, .reduced)
         again.brightness = 0.4
         XCTAssertEqual(SenderSettings(defaults: defaults).brightness, 0.4, accuracy: 1e-9)
+        XCTAssertEqual(again.displayRole, .extend)
+        again.displayRole = .mirror
+        XCTAssertEqual(SenderSettings(defaults: defaults).displayRole, .mirror)
+        XCTAssertEqual(again.mirrorFit, .mac, "the Mac keeps its resolution unless asked")
+        again.mirrorFit = .iMac
+        XCTAssertEqual(SenderSettings(defaults: defaults).mirrorFit, .iMac)
     }
 }
 

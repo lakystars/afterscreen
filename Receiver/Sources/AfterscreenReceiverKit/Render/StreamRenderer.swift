@@ -184,7 +184,8 @@ final class StreamRenderer {
         return fwidth(uv.x * float(tex.get_width())) < 0.99;
     }
 
-    static float4 catmullRom(texture2d<float> tex, float2 uv) {
+    // `lo`, `hi`: uv bounds kept by the taps, centres included
+    static float4 catmullRom(texture2d<float> tex, float2 uv, float2 lo = 0.0, float2 hi = 1.0) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         float2 size = float2(tex.get_width(), tex.get_height());
         float2 pos = uv * size;
@@ -194,7 +195,8 @@ final class StreamRenderer {
         float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
         float2 w3 = f * f * (-0.5 + 0.5 * f);
         float2 w12 = w1 + w2;
-        float2 p0 = (t1 - 1.0) / size, p12 = (t1 + w2 / w12) / size, p3 = (t1 + 2.0) / size;
+        float2 a = lo + 0.5 / size, b = hi - 0.5 / size;
+        float2 p0 = clamp((t1 - 1.0) / size, a, b), p12 = clamp((t1 + w2 / w12) / size, a, b), p3 = clamp((t1 + 2.0) / size, a, b);
         return saturate(tex.sample(s, float2(p0.x, p0.y)) * (w0.x * w0.y)
                       + tex.sample(s, float2(p12.x, p0.y)) * (w12.x * w0.y)
                       + tex.sample(s, float2(p3.x, p0.y)) * (w3.x * w0.y)
@@ -206,9 +208,9 @@ final class StreamRenderer {
                       + tex.sample(s, float2(p3.x, p3.y)) * (w3.x * w3.y));
     }
 
-    static float3 picture(texture2d<float> tex, float2 uv, bool up) {
+    static float3 picture(texture2d<float> tex, float2 uv, bool up, float2 lo = 0.0, float2 hi = 1.0) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
-        return up ? catmullRom(tex, uv).rgb : tex.sample(s, uv).rgb;
+        return up ? catmullRom(tex, uv, lo, hi).rgb : tex.sample(s, uv).rgb;
     }
 
     // Power effect: each tile opens after a jittered centre-distance delay
@@ -253,6 +255,31 @@ final class StreamRenderer {
     }
 
     // grid: tiles per row, tile edge px, stream width, height
+    static bool videoTile(device const uchar *mask, constant uint4 &grid, int2 t) {
+        int rows = int((grid.w + grid.y - 1) / grid.y);
+        return t.x >= 0 && t.y >= 0 && t.x < int(grid.x) && t.y < rows && mask[t.y * int(grid.x) + t.x] != 0;
+    }
+
+    // Uv bounds for scaling a BC7 tile up
+    // Video neighbours hold stale BC7 texels: stop at that side
+    // Only pixels within 2 texels of an edge look
+    static void bc7Bounds(device const uchar *mask, constant uint4 &grid, uint2 p, float2 uv, thread float2 &lo, thread float2 &hi) {
+        int2 t = int2(p / grid.y);
+        float edge = float(grid.y);
+        float2 size = float2(grid.zw), inTile = uv * size - float2(t) * edge;
+        bool l = inTile.x < 2.0, r = inTile.x > edge - 2.0, u = inTile.y < 2.0, d = inTile.y > edge - 2.0;
+        if (!(l || r || u || d)) return;
+        bool v[3][3];
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) v[dy + 1][dx + 1] = videoTile(mask, grid, t + int2(dx, dy));
+        float2 tileLo = float2(t) * edge / size, tileHi = min(float2(t + 1) * edge / size, 1.0);
+        // Diagonals count only for pixels near that corner
+        if (l && (v[1][0] || (u && v[0][0]) || (d && v[2][0]))) lo.x = tileLo.x;
+        if (r && (v[1][2] || (u && v[0][2]) || (d && v[2][2]))) hi.x = tileHi.x;
+        if (u && (v[0][1] || (l && v[0][0]) || (r && v[0][2]))) lo.y = tileLo.y;
+        if (d && (v[2][1] || (l && v[2][0]) || (r && v[2][2]))) hi.y = tileHi.y;
+    }
+
     // Masked tiles show video (NV12, BT.709 video range); others BC7
     fragment float4 hybridFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                                    texture2d<float> luma [[texture(1)]], texture2d<float> chroma [[texture(2)]],
@@ -264,7 +291,11 @@ final class StreamRenderer {
         float2 uv = waveUV(in.uv, w, k);
         if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
         uint2 p = min(uint2(uv * float2(grid.zw)), grid.zw - uint2(1));
-        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) return float4(picture(tex, uv, up) * k, 1.0);
+        if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) {
+            float2 lo = 0.0, hi = 1.0;
+            if (up) bc7Bounds(mask, grid, p, uv, lo, hi);
+            return float4(picture(tex, uv, up, lo, hi) * k, 1.0);
+        }
         // Luma carries the detail: Catmull-Rom when scaled up
         // Half-resolution chroma stays bilinear
         float y = ((videoUp ? catmullRom(luma, uv).r : luma.sample(s, uv).r) - 16.0 / 255.0) * (255.0 / 219.0);
@@ -315,7 +346,8 @@ final class StreamRenderer {
         sizeLock.unlock()
     }
 
-    /// Any queue: the next draw is also saved as /tmp/afterscreen-receiver-<time>.png
+    /// Any queue: saves the next draw under /tmp/afterscreen-receiver-<time>
+    /// `.png` the picture, `-screen.png` as shown
     func requestSnapshot() {
         sizeLock.lock()
         snapshotRequested = true
@@ -613,7 +645,7 @@ final class StreamRenderer {
         let snapshot = snapshotRequested
         snapshotRequested = false
         sizeLock.unlock()
-        if snapshot { encodeSnapshot(cb, content: content, videoTiles: mask.shown > 0 ? mask.bytes : [], bind: bind) }
+        if snapshot { encodeSnapshot(cb, content: content, screen: size, picture: rect, videoTiles: mask.shown > 0 ? mask.bytes : [], bind: bind) }
         cb.present(drawable)
         statsLock.lock()
         lastDraw = CACurrentMediaTime()
@@ -625,12 +657,25 @@ final class StreamRenderer {
 }
 
 extension StreamRenderer {
-    /// Same draw at stream size into a texture
-    /// Copied out and written once the GPU is done
+    /// Same draw into textures, written once the GPU is done
+    /// Stream size: the picture alone, for pixel checks
+    /// Screen size: as shown, letterbox included
     /// `videoTiles`: hybrid mask, one byte per tile (1 = video)
-    /// Saved next to the image
-    fileprivate func encodeSnapshot(_ cb: MTLCommandBuffer, content: CGSize, videoTiles: [UInt8], bind: (MTLRenderCommandEncoder) -> Void) {
-        let w = Int(content.width), h = Int(content.height)
+    fileprivate func encodeSnapshot(_ cb: MTLCommandBuffer, content: CGSize, screen: CGSize, picture: CGRect, videoTiles: [UInt8],
+                                    bind: (MTLRenderCommandEncoder) -> Void) {
+        // Milliseconds: snapshots within one second stay apart
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamp = formatter.string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let base = "/tmp/afterscreen-receiver-\(stamp)"
+        encodeCapture(cb, size: content, picture: CGRect(origin: .zero, size: content), path: base + ".png", mask: videoTiles, bind: bind)
+        encodeCapture(cb, size: screen, picture: picture, path: base + "-screen.png", mask: [], bind: bind)
+    }
+
+    /// `mask` saved next to the image when not empty
+    private func encodeCapture(_ cb: MTLCommandBuffer, size: CGSize, picture: CGRect, path: String, mask: [UInt8],
+                               bind: (MTLRenderCommandEncoder) -> Void) {
+        let w = Int(size.width), h = Int(size.height)
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: StreamRenderer.drawableFormat, width: w, height: h, mipmapped: false)
         desc.usage = .renderTarget
         desc.storageMode = .private
@@ -639,9 +684,11 @@ extension StreamRenderer {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         pass.colorAttachments[0].storeAction = .store
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
-        enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(w), height: Double(h), znear: 0, zfar: 1))
+        enc.setViewport(MTLViewport(originX: Double(picture.minX), originY: Double(picture.minY),
+                                    width: Double(picture.width), height: Double(picture.height), znear: 0, zfar: 1))
         bind(enc)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
@@ -652,10 +699,9 @@ extension StreamRenderer {
         cb.addCompletedHandler { _ in
             let words = Array(UnsafeBufferPointer(start: buffer.contents().assumingMemoryBound(to: UInt32.self), count: w * h))
             DispatchQueue.global(qos: .utility).async {
-                let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
-                let url = URL(fileURLWithPath: "/tmp/afterscreen-receiver-\(stamp).png")
+                let url = URL(fileURLWithPath: path)
                 let result = (try? ScreenSnapshot.writePNG(words: words, width: w, height: h, to: url)) != nil ? url.path : "failed"
-                if !videoTiles.isEmpty { try? Data(videoTiles).write(to: url.deletingPathExtension().appendingPathExtension("mask")) }
+                if !mask.isEmpty { try? Data(mask).write(to: url.deletingPathExtension().appendingPathExtension("mask")) }
                 FileHandle.standardError.write(Data("[receiver] Snapshot: \(result)\n".utf8))
             }
         }

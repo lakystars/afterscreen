@@ -158,7 +158,7 @@ private struct SoundCard: View {
         }
     }
 
-    /// Sent to the iMac · volume 44% · 30 ms buffered
+    /// e.g. "Sent to the iMac · volume 44% · 30 ms"
     private static func status(_ s: SenderSnapshot) -> String {
         var parts = [L10n.t("Sent to the iMac", "iMac으로 보내는 중")]
         if let level = s.outputLevel {
@@ -169,6 +169,33 @@ private struct SoundCard: View {
             parts.append(L10n.t("\(Int(buffer)) ms buffered", "버퍼 \(Int(buffer))ms"))
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Extend or mirror, and the mirror's fit
+/// Redraws alone on a settings change
+private struct RoleRows: View {
+    @ObservedObject var settings: SenderSettings
+
+    var body: some View {
+        Row(label: L10n.t("Use as", "사용 방식"), value: "", help: DisplayRole.help) {
+            Picker("", selection: $settings.displayRole) {
+                ForEach(DisplayRole.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        if settings.displayRole == .mirror {
+            Row(label: L10n.t("Optimize for", "맞춤 대상"), value: "", help: MirrorFit.help) {
+                Picker("", selection: $settings.mirrorFit) {
+                    ForEach(MirrorFit.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
+        }
     }
 }
 
@@ -392,6 +419,7 @@ public struct PopoverView: View {
                 }
             }
             Card(title: StatName.picture) {
+                RoleRows(settings: model.settings)
                 Row(StatName.frames,
                     "\(Int(s.captureFPS.rounded())) · \(Int(s.sentFPS.rounded())) · \(Int((s.receiver?.displayedFPS ?? 0).rounded()))",
                     help: L10n.t("Per second: frames the Mac drew, sent, and the iMac showed", "초당 Mac이 그린 프레임, 보낸 프레임, iMac이 표시한 프레임"))

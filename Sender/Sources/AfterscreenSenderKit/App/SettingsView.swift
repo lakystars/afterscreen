@@ -15,6 +15,18 @@ public struct SettingsView: View {
     public var body: some View {
         Form {
             Section(L10n.t("Display", "디스플레이")) {
+                Picker(L10n.t("Use as", "사용 방식"), selection: $settings.displayRole) {
+                    ForEach(DisplayRole.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .help(DisplayRole.help)
+                if settings.displayRole == .mirror {
+                    Picker(L10n.t("Optimize for", "맞춤 대상"), selection: $settings.mirrorFit) {
+                        ForEach(MirrorFit.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .help(MirrorFit.help)
+                }
                 Picker(L10n.t("Size", "크기"), selection: $settings.displaySize) {
                     ForEach(DisplaySize.allCases) { size in
                         let p = size.points(for: panelPoints)
@@ -22,8 +34,12 @@ public struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.radioGroup)
-                Text(L10n.t("Applies while streaming. System Settings → Displays lists the same sizes.",
-                            "스트리밍 중에도 바로 적용됩니다. 시스템 설정 → 디스플레이에도 같은 크기가 있습니다."))
+                .disabled(settings.displayRole == .mirror && settings.mirrorFit == .mac)
+                Text(settings.displayRole == .mirror && settings.mirrorFit == .mac
+                     ? L10n.t("Mirroring for this Mac shows its main display at its own size; the size applies when the iMac is the fit.",
+                              "이 Mac에 맞춘 복제는 주 디스플레이를 그 크기 그대로 보여 줍니다. 크기는 확장이나 iMac에 맞춘 복제에 적용됩니다.")
+                     : L10n.t("Applies while streaming. System Settings → Displays lists the same sizes.",
+                              "스트리밍 중에도 바로 적용됩니다. 시스템 설정 → 디스플레이에도 같은 크기가 있습니다."))
                     .font(.caption).foregroundStyle(.secondary)
                 Picker(L10n.t("Transfer resolution", "전송 해상도"), selection: $settings.streamResolution) {
                     ForEach(StreamResolution.allCases) { Text($0.title).tag($0) }

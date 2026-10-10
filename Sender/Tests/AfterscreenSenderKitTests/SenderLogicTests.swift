@@ -122,6 +122,78 @@ final class PathPolicyTests: XCTestCase {
         XCTAssertEqual(PathPolicy.choose(link: .ethernet, capacityGbps: 9.4, welcome: welcome(panel: fiveK))?.path, .tile)
     }
 
+    func testMirrorStreamsTheSourcePixelsTheReceiverLetterboxes() {
+        let macBook = PixelSize(width: 3024, height: 1964)
+        let c = PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK), source: macBook)
+        XCTAssertEqual(c?.streamPixels, macBook, "smaller than the panel: no upscale before sending")
+        XCTAssertEqual(PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK),
+                                         source: PixelSize(width: 6016, height: 3384))?.streamPixels, fiveK, "larger: fit to the panel")
+        XCTAssertEqual(PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK),
+                                         source: PixelSize(width: 3456, height: 2234))?.streamPixels, PixelSize(width: 3456, height: 2232),
+                       "block-aligned")
+        let wifi = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto, source: macBook)
+        XCTAssertEqual(wifi?.streamPixels, macBook, "within four fifths of the panel: still areas 1:1 over Wi-Fi")
+        XCTAssertEqual(wifi?.video?.pixels, PixelSize(width: 2416, height: 1568), "moving areas at four fifths, as extend sends")
+        XCTAssertEqual(PathPolicy.choose(link: .ethernet, capacityGbps: 0.9, welcome: welcome(panel: fiveK), resolution: .auto,
+                                         source: macBook)?.video?.pixels, macBook, "unreduced link: video at the stream's size")
+        let extend = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto)
+        let large = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto, source: fiveK)
+        XCTAssertEqual(large?.streamPixels, extend?.streamPixels)
+        XCTAssertEqual(large?.video?.pixels, extend?.video?.pixels, "a panel-sized source: video as in extend, not shrunk twice")
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.17, welcome: welcome(panel: fiveK), resolution: .auto,
+                                         source: PixelSize(width: 2048, height: 1330))?.streamPixels, PixelSize(width: 2048, height: 1328))
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto,
+                                         source: PixelSize(width: 4096, height: 2660))?.streamPixels, PixelSize(width: 3544, height: 2304),
+                       "larger than four fifths: fit within 4096 × 2304")
+        XCTAssertEqual(PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK), resolution: .reduced,
+                                         source: macBook)?.streamPixels, macBook, "four fifths caps pixels; it never shrinks a smaller source")
+    }
+
+    func testMirrorSourcePixelsFollowRotation() {
+        XCTAssertEqual(MirrorSource.pixels(bounds: CGSize(width: 1512, height: 982), scale: 2), PixelSize(width: 3024, height: 1964))
+        XCTAssertEqual(MirrorSource.pixels(bounds: CGSize(width: 982, height: 1512), scale: 2), PixelSize(width: 1964, height: 3024))
+        XCTAssertEqual(MirrorSource.pixels(bounds: CGSize(width: 2048, height: 1330), scale: 1), PixelSize(width: 2048, height: 1330))
+    }
+
+    func testTheCaptureRegionHasTheStreamsShape() {
+        let lowDPI = MirrorSource(displayID: 1, pixels: PixelSize(width: 2048, height: 1330), scale: 1)
+        XCTAssertEqual(lowDPI.region(for: PixelSize(width: 2048, height: 1328)), CGRect(x: 0, y: 0, width: 2048, height: 1328),
+                       "alignment only: 1:1, last rows dropped instead of resampling")
+        let retina = MirrorSource(displayID: 1, pixels: PixelSize(width: 3456, height: 2234), scale: 2)
+        XCTAssertEqual(retina.region(for: PixelSize(width: 3456, height: 2232)), CGRect(x: 0, y: 0, width: 1728, height: 1116))
+        for (source, stream) in [(PixelSize(width: 3024, height: 1964), PixelSize(width: 2416, height: 1568)),
+                                 (PixelSize(width: 1964, height: 3024), PixelSize(width: 1868, height: 2880)),
+                                 (PixelSize(width: 6016, height: 3384), PixelSize(width: 5120, height: 2880))] {
+            let r = MirrorSource(displayID: 1, pixels: source, scale: 2).region(for: stream)
+            XCTAssertEqual(r.width / r.height, CGFloat(stream.width) / CGFloat(stream.height), accuracy: 1e-9, "scaled: no bars inside the stream")
+            XCTAssertLessThanOrEqual(r.width * 2, CGFloat(source.width) + 1e-9)
+            XCTAssertLessThanOrEqual(r.height * 2, CGFloat(source.height) + 1e-9)
+        }
+    }
+
+    func testTheIMacFitMirrorsTheMainDisplayNeverTheVirtualOne() {
+        let builtIn: (CGDirectDisplayID) -> Bool = { $0 == 1 }
+        let none: (CGDirectDisplayID) -> CGDirectDisplayID = { _ in 0 }
+        func source(_ online: [CGDirectDisplayID], _ active: [CGDirectDisplayID], main: CGDirectDisplayID,
+                    mirrorOf: @escaping (CGDirectDisplayID) -> CGDirectDisplayID = none) -> CGDirectDisplayID? {
+            DisplayMirror.source(online: online, active: active, main: main, builtIn: builtIn, mirrorOf: mirrorOf, excluding: 9)
+        }
+        XCTAssertEqual(source([1, 2, 9], [1, 2, 9], main: 2), 2, "the main display")
+        XCTAssertEqual(source([1, 2, 9], [1, 2, 9], main: 9), 1, "virtual display made main earlier: the built-in")
+        XCTAssertEqual(source([3, 9], [3, 9], main: 9), 3)
+        XCTAssertNil(source([9], [9], main: 9))
+        XCTAssertEqual(source([1, 9], [9], main: 9, mirrorOf: { $0 == 1 ? 9 : 0 }), 1,
+                       "macOS restored the mirror set: the built-in is no longer active, yet it is the source")
+    }
+
+    func testThePointerMapsOntoTheCroppedArea() {
+        let display = CGRect(x: -2048, y: 0, width: 2048, height: 1330)
+        let area = CursorTracker.area(display: display, crop: CGRect(x: 0, y: 0, width: 2048, height: 1328))
+        XCTAssertEqual(CursorTracker.normalize(point: CGPoint(x: -1024, y: 1327.9), displayBounds: area).y, 1327.9 / 1328, accuracy: 1e-6)
+        XCTAssertFalse(CursorTracker.normalize(point: CGPoint(x: -1024, y: 1329), displayBounds: area).visible, "the dropped rows are off the stream")
+        XCTAssertEqual(CursorTracker.area(display: display, crop: nil), display)
+    }
+
     func testSlowLinksUseHybridAtPanelPixelsWithA4KVideoLayer() {
         for (link, gbps) in [(LinkKind.usb, 1.0), (.ethernet, 0.94), (.wifi, 0.6), (.wifi, 5)] {
             let c = PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome(panel: fiveK))

@@ -44,8 +44,25 @@ public final class AppModel: ObservableObject {
         paths.start(queue: .global(qos: .utility))
         settings.$displaySize.dropFirst().sink { [weak self] size in self?.session?.setDisplaySize(size) }.store(in: &cancellables)
         settings.$sound.dropFirst().sink { [weak self] on in self?.session?.setSound(on) }.store(in: &cancellables)
-        settings.$streamResolution.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.restartForResolution() }
+        settings.$streamResolution.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.restart(L10n.t("Changing the resolution", "해상도를 바꾸는 중")) }
             .store(in: &cancellables)
+        settings.$displayRole.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] role in
+                self?.restart(role == .mirror ? L10n.t("Switching to mirroring", "복제로 바꾸는 중") : L10n.t("Switching to extending", "확장으로 바꾸는 중"))
+            }
+            .store(in: &cancellables)
+        settings.$mirrorFit.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard self?.settings.displayRole == .mirror else { return }
+                self?.restart(L10n.t("Changing what the mirror fits", "복제 맞춤을 바꾸는 중"))
+            }
+            .store(in: &cancellables)
+        // Mirror follows the main display's identity and size
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let source = self?.session?.mirrorSource, source != MirrorSource.main else { return }
+            self?.restart(L10n.t("The mirrored display changed", "복제하는 디스플레이가 바뀌었습니다"))
+        }
         // Text resolves at render time; language change redraws popover
         settings.$language.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         // Published fires before the new value is stored
@@ -93,11 +110,12 @@ public final class AppModel: ObservableObject {
         session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"), relink: true)
     }
 
-    /// A new transfer resolution takes a new session
-    private func restartForResolution() {
-        guard let session = session, !isTesting, let receiver = receivers.first(where: { $0.name == activeReceiver }) else { return }
-        reconnect = receiver
-        session.stop(reason: L10n.t("Changing the resolution", "해상도를 바꾸는 중"), relink: true)
+    /// New transfer size or display role: a new session
+    private func restart(_ reason: String) {
+        guard let session = session, !isTesting else { return }
+        // Bonjour may drop the receiver; the session keeps its target
+        reconnect = receivers.first { $0.name == activeReceiver } ?? session.target
+        session.stop(reason: reason, relink: true)
     }
 
     private func start(_ receiver: DiscoveredReceiver, manual: Bool) {
@@ -117,7 +135,8 @@ public final class AppModel: ObservableObject {
         }
         retry?.cancel()
         let session = SenderSession(target: receiver, displaySize: settings.displaySize, link: settings.link, sound: settings.sound,
-                                    deband: settings.deband, brightness: settings.brightness, resolution: settings.streamResolution)
+                                    deband: settings.deband, brightness: settings.brightness, resolution: settings.streamResolution,
+                                    role: settings.displayRole, fit: settings.mirrorFit)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.snapshot = s

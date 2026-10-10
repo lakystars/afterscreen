@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import AfterscreenCore
 
@@ -64,7 +65,7 @@ public final class SenderSession {
     /// The receiver's user stopped the stream
     public private(set) var pausedByReceiver = false
 
-    private let target: DiscoveredReceiver
+    let target: DiscoveredReceiver
     private let purpose: Purpose
     private let link: LinkKind?
     private var route: Route?
@@ -81,6 +82,12 @@ public final class SenderSession {
     private var brightness: Double?
     /// Ignored by the quality test, which measures the panel
     private let resolution: StreamResolution
+    private let role: DisplayRole
+    private let fit: MirrorFit
+    /// Mirror for this Mac: the display copied, per session
+    private(set) var mirrorSource: MirrorSource?
+    /// Mirror for the iMac: macOS mirrors into the virtual display
+    private var osMirror: DisplayMirror?
     /// AudioTap, macOS 14.2 and later
     private var audioTap: AnyObject?
     /// This Mac's volume and mute, followed by the receiver
@@ -111,7 +118,8 @@ public final class SenderSession {
 
     /// `link`: link to use; nil or unreachable uses the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
-                sound: Bool = false, deband: Deband = .normal, brightness: Double? = nil, resolution: StreamResolution = .panel) {
+                sound: Bool = false, deband: Deband = .normal, brightness: Double? = nil, resolution: StreamResolution = .panel,
+                role: DisplayRole = .extend, fit: MirrorFit = .mac) {
         self.target = target
         self.purpose = purpose
         self.displaySize = displaySize
@@ -120,6 +128,8 @@ public final class SenderSession {
         self.deband = deband
         self.brightness = brightness
         self.resolution = resolution
+        self.role = role
+        self.fit = fit
     }
 
     /// Receiver 8-bit step smoothing; sent at handshake and on change
@@ -176,7 +186,7 @@ public final class SenderSession {
     /// Sent with the sound, never queued behind frames
     private func sendOutputLevel(playing: Bool) {
         let level = playing ? SystemOutput().level : nil
-        // First send always goes: a relinked receiver holds the last level
+        // First send always goes; relinked receivers hold the last level
         guard !outputSent || level != snapshot.outputLevel else { return }
         outputSent = true
         update { $0.outputLevel = level }
@@ -290,6 +300,9 @@ public final class SenderSession {
         cursorConnection?.close(reason: reason)
         cursorConnection = nil
         stopSound()
+        // Unmirror before the virtual display goes: this Mac's mode returns
+        osMirror?.stop()
+        osMirror = nil
         display = nil
         connection?.close(reason: reason)
         update {
@@ -316,14 +329,7 @@ public final class SenderSession {
             guard let result = try? JSONWire.decode(ProbeResult.self, from: m.payload),
                   let welcome = snapshot.peer, let link = snapshot.link else { return }
             update { $0.capacityGbps = result.gbps }
-            guard let config = PathPolicy.choose(link: link, capacityGbps: result.gbps, welcome: welcome,
-                                                 resolution: purpose == .qualityTest ? .panel : resolution) else {
-                return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
-                                  "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
-            }
-            if purpose == .qualityTest { return startQualityTest(config) }
-            connection?.send(.config, json: config)
-            beginStreaming(config, welcome: welcome)
+            configure(link: link, gbps: result.gbps, welcome: welcome)
         case .pong:
             if let ts = try? PingWire.decode(m.payload) {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds &- ts) / 1e6
@@ -342,6 +348,65 @@ public final class SenderSession {
             end(bye?.reason ?? "Receiver stopped")
         default:
             break
+        }
+    }
+
+    /// Picks the path and size, then starts the picture
+    /// Mirror waits up to 2 s for a main display change
+    /// For example, a virtual display that was main just left
+    private func configure(link: LinkKind, gbps: Double, welcome: Welcome, attempt: Int = 0) {
+        guard !ended else { return }
+        if purpose == .display, role == .mirror, fit == .mac {
+            guard let source = MirrorSource.main else {
+                guard attempt < 8 else { return end(L10n.t("No display to mirror", "복제할 디스플레이가 없습니다")) }
+                return DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    self?.configure(link: link, gbps: gbps, welcome: welcome, attempt: attempt + 1)
+                }
+            }
+            mirrorSource = source
+        }
+        guard let config = PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome,
+                                             resolution: purpose == .qualityTest ? .panel : resolution, source: mirrorSource?.pixels) else {
+            return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
+                              "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
+        }
+        if purpose == .qualityTest { return startQualityTest(config) }
+        connection?.send(.config, json: config)
+        beginStreaming(config, welcome: welcome)
+    }
+
+    /// macOS takes a moment to accept a new virtual display
+    /// Retries for up to 3 s; capture starts meanwhile
+    private func mirror(into display: VirtualDisplay, attempt: Int = 1) {
+        guard !ended, osMirror == nil else { return }
+        if let source = DisplayMirror.source(excluding: display.displayID), let mirror = DisplayMirror(source: source, into: display.displayID) {
+            osMirror = mirror
+            if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] mirroring display \(source), try \(attempt)\n".utf8)) }
+            return
+        }
+        guard attempt < 15 else {
+            if SenderSession.logStats {
+                FileHandle.standardError.write(Data("[sender] mirroring refused: \(DisplayMirror.lastError ?? "no source display")\n".utf8))
+            }
+            return end(L10n.t("macOS did not mirror this Mac's display", "macOS가 이 Mac의 디스플레이를 미러링하지 않았습니다"))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak display] in
+            guard let display = display else { return }
+            self?.mirror(into: display, attempt: attempt + 1)
+        }
+    }
+
+    /// macOS may restore an earlier mirror set for this display
+    /// Checked for 2 s after the display appears
+    private func keepExtended(_ display: VirtualDisplay, attempt: Int = 1) {
+        guard !ended else { return }
+        if DisplayMirror.release(display.displayID), SenderSession.logStats {
+            FileHandle.standardError.write(Data("[sender] undid a restored mirror set, check \(attempt)\n".utf8))
+        }
+        guard attempt < 8 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak display] in
+            guard let display = display else { return }
+            self?.keepExtended(display, attempt: attempt + 1)
         }
     }
 
@@ -385,14 +450,20 @@ public final class SenderSession {
             $0.config = config
             $0.state = L10n.t("Starting the display", "디스플레이 준비 중")
         }
-        do {
-            let modes = PathPolicy.displayModes(welcome: welcome, stream: config.streamPixels, size: displaySize)
-            display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: config.streamPixels, hiDPI: welcome.isRetina,
-                                         modes: modes.all, initial: modes.initial)
-        } catch {
-            return end("\(error)")
+        // Mirror captures the main display; extend adds a display
+        if mirrorSource == nil {
+            do {
+                let modes = PathPolicy.displayModes(welcome: welcome, stream: config.streamPixels, size: displaySize)
+                display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: config.streamPixels, hiDPI: welcome.isRetina,
+                                             modes: modes.all, initial: modes.initial)
+            } catch {
+                return end("\(error)")
+            }
         }
-        guard let display = display, let connection = connection else { return }
+        if purpose == .display, let display = display {
+            role == .mirror ? mirror(into: display) : keepExtended(display)
+        }
+        guard let displayID = mirrorSource?.displayID ?? display?.displayID, let connection = connection else { return }
         let streamer: FrameStreamer
         do {
             streamer = try FrameStreamer(config: config, capacityGbps: snapshot.capacityGbps, connection: connection)
@@ -402,21 +473,22 @@ public final class SenderSession {
         self.streamer = streamer
         if SenderSession.logStats {
             let g = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
-            FileHandle.standardError.write(Data(String(format: "[sender] %@ path over %@, %.2f Gbps measured, BC7 motion up to %d of %d tiles\n",
+            FileHandle.standardError.write(Data(String(format: "[sender] %@ path over %@, %.2f Gbps measured, BC7 motion up to %d of %d tiles, %@ %dx%d\n",
                                                        config.path.rawValue, config.linkKind.rawValue, snapshot.capacityGbps ?? 0,
                                                        PathPolicy.bc7MotionTiles(capacityGbps: snapshot.capacityGbps, tileBytes: g.tileBytes),
-                                                       g.tileCount).utf8))
+                                                       g.tileCount, role == .mirror ? "mirror-\(fit.rawValue)" : role.rawValue,
+                                                       config.streamPixels.width, config.streamPixels.height).utf8))
         }
 
-        let cursor = CursorTracker(displayID: display.displayID)
+        let crop = mirrorSource?.region(for: config.streamPixels)
+        let cursor = CursorTracker(displayID: displayID, crop: crop)
         cursor.onPosition = { [weak self] x, y, visible in
             guard let self = self else { return }
             (self.cursorConnection ?? self.connection)?.send(Message(type: .cursorPos, payload: CursorWire.pos(x: x, y: y, visible: visible)))
         }
-        cursor.onImage = { [weak self, weak display] image in
-            guard let display = display else { return }
+        cursor.onImage = { [weak self] image in
             // Points → stream pixels; receiver needs no display size
-            let k = Double(config.streamPixels.width) / max(1, Double(display.bounds.width))
+            let k = Double(config.streamPixels.width) / max(1, Double(crop?.width ?? CGDisplayBounds(displayID).width))
             func px(_ v: Int) -> Int { Int((Double(v) * k).rounded()) }
             guard let self = self else { return }
             (self.cursorConnection ?? self.connection)?.send(Message(type: .cursorImage, payload: CursorWire.image(
@@ -425,7 +497,7 @@ public final class SenderSession {
         cursor.start()
         self.cursor = cursor
 
-        let capture = Capture(displayID: display.displayID, size: config.streamPixels)
+        let capture = Capture(displayID: displayID, size: config.streamPixels, crop: crop)
         capture.onFrame = { [weak streamer] frame in streamer?.offer(frame) }
         capture.onStop = { [weak self] reason in DispatchQueue.main.async { self?.end(L10n.t("Screen capture stopped: \(reason)", "화면 캡처가 멈췄습니다: \(reason)")) } }
         self.capture = capture

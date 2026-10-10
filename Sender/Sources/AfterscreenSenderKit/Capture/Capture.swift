@@ -27,18 +27,21 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private let displayID: CGDirectDisplayID
     private let size: PixelSize
+    private let crop: CGRect?
     private let queue = DispatchQueue(label: "afterscreen.capture", qos: .userInteractive, autoreleaseFrequency: .workItem)
     private var stream: SCStream?
 
-    init(displayID: CGDirectDisplayID, size: PixelSize) {
+    /// `crop`: display points captured; nil for the whole display
+    init(displayID: CGDirectDisplayID, size: PixelSize, crop: CGRect? = nil) {
         self.displayID = displayID
         self.size = size
+        self.crop = crop
     }
 
-    /// 8-bit BGRA: the virtual display composites in 8-bit
-    /// 10-bit capture adds no levels, only WindowServer work
+    /// 8-bit BGRA: BC7 tiles hold 8 bits per channel
+    /// 10-bit capture adds WindowServer work, no levels
     /// sRGB keeps SDR colour
-    static func configuration(size: PixelSize) -> SCStreamConfiguration {
+    static func configuration(size: PixelSize, crop: CGRect? = nil) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = size.width
         config.height = size.height
@@ -47,7 +50,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.showsCursor = false
         config.queueDepth = 3
         // Ceiling, not target: display composites only as fast as consumed
+        // 60 Hz ceiling drops ProMotion frames; the gate paces sends
         config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
+        if let crop = crop { config.sourceRect = crop }
         return config
     }
 
@@ -63,9 +68,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                     try await Task.sleep(nanoseconds: 150_000_000)
                 }
                 guard let display = display else {
-                    throw NSError(domain: "Afterscreen", code: 1, userInfo: [NSLocalizedDescriptionKey: "Virtual display not visible to ScreenCaptureKit"])
+                    throw NSError(domain: "Afterscreen", code: 1, userInfo: [NSLocalizedDescriptionKey: "Display not visible to ScreenCaptureKit"])
                 }
-                let config = Capture.configuration(size: size)
+                let config = Capture.configuration(size: size, crop: crop)
                 let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: config, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
                 try await stream.startCapture()

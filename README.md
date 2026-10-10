@@ -1,6 +1,6 @@
 # Afterscreen
 
-Turn an iMac into an extended display for an Apple Silicon Mac, at the iMac's native resolution: up to 5120 × 2880 at 60 fps. Connect the two Macs with a Thunderbolt cable, a USB-C cable, an Ethernet cable or plain Wi-Fi. Afterscreen is two menu bar apps, one on each Mac, built only on Apple frameworks: no capture cards, no drivers, no third-party libraries.
+Turn an iMac into an extended or mirrored display for an Apple Silicon Mac, at the iMac's native resolution: up to 5120 × 2880 at 60 fps. Connect the two Macs with a Thunderbolt cable, a USB-C cable, an Ethernet cable or plain Wi-Fi. Afterscreen is two menu bar apps, one on each Mac, built only on Apple frameworks: no capture cards, no drivers, no third-party libraries.
 
 - **5K at 60 fps** over Thunderbolt Bridge or USB networking, with no video codec on the path: the picture goes out as GPU texture blocks that the iMac's GPU draws directly.
 - **Slower links keep text sharp.** Still content stays lossless at native resolution; only the parts that move go out as HEVC or H.264 video.
@@ -37,7 +37,7 @@ The receiver detects its own hardware decoders at run time, so the "Video for sl
 
 ## How it works
 
-The sender creates a virtual display the size of the iMac's panel, captures it with ScreenCaptureKit and streams it over TCP. The receiver shows it full screen above the iMac's menu bar and Dock. A short throughput probe at the start of each session picks one of two picture paths:
+The sender creates a virtual display the size of the iMac's panel, captures it with ScreenCaptureKit and streams it over TCP. In mirror mode it captures the Mac's main display instead, at the pixels that display draws. The receiver shows the stream full screen above the iMac's menu bar and Dock, letterboxed when its shape differs from the panel. A short throughput probe at the start of each session picks one of two picture paths:
 
 | Link | Picture path |
 |---|---|
@@ -49,6 +49,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 ## Features
 
 **Display**
+- Extend or mirror, chosen in the menu. Mirroring shows the Mac's main display the way macOS, AirPlay and Sidecar do: the Mac keeps its resolution, and the iMac shows the picture centred at its own shape with black bars around it. The stream carries the main display's own pixels, never upscaled before sending. Over Wi-Fi still areas stay 1:1 and only moving areas go at four fifths. Optimize for iMac turns the mirror the other way, as macOS's own "Optimize for": the desktop takes the iMac's shape and resolution and fills it edge to edge, while the Mac's panel shows it with bars; the Mac returns to its own resolution when the session ends. Changing the Mac's resolution or main display starts a new session at the new size.
 - Extended desktop at the iMac's native resolution, with four "looks like" sizes (Larger text, Default, More space, Most space) that also appear in System Settings → Displays. Changes apply while streaming.
 - Transfer resolution: automatic, panel resolution, or four fifths. Automatic sends the panel's resolution over cables and four fifths over Wi-Fi (5120 × 2880 or 4096 × 2304 on a 5K iMac). At four fifths the desktop switches to exactly half the stream's size, so the Mac draws the very pixels it sends; the size is worked out from the connected iMac's own panel.
 
@@ -160,7 +161,7 @@ Sender (**Settings…** in the menu):
 | Menu bar | The icon only (default), or also the frame rate and throughput. |
 | Language | System, English or Korean. |
 
-In the menu while streaming: sound on the iMac, iMac brightness, the link, and Smooth gradients (medium by default).
+In the menu while streaming: sound on the iMac, iMac brightness, the link, Use as (Extend or Mirror), and Smooth gradients (medium by default).
 
 Receiver (**Settings…** in its menu):
 
@@ -187,6 +188,8 @@ Receiver (**Settings…** in its menu):
 | Link quality | 100, minus penalties for retransmits, jitter and a link slower than the stream needs |
 | MTU | Packet size; 9000 is recommended on Thunderbolt and USB |
 | Frames: captured · sent · shown | Frames per second the Mac drew, sent, and the iMac showed |
+| Use as | Extend: the iMac is a display of its own. Mirror: it shows the Mac's main display |
+| Optimize for | While mirroring. This Mac: it keeps its resolution. iMac: the desktop takes the iMac's resolution |
 | Dropped / min | Frames replaced by a newer one before they could be sent |
 | Resolution | Size of the stream |
 | Moving areas | Tile path: BC7, or BC1 and how many tiles. Hybrid path: video codec, layer size and bitrate |

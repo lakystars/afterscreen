@@ -17,15 +17,24 @@ public enum PathPolicy {
     static let widthRange = 640...7680
     static let heightRange = 480...4320
 
-    public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome, resolution: StreamResolution = .panel) -> StreamConfig? {
+    /// `source`: mirrored display's pixels; nil streams a panel-sized display
+    public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome, resolution: StreamResolution = .panel,
+                              source: PixelSize? = nil) -> StreamConfig? {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
-        let panel = streamPixels(panel: aligned(welcome.panelPixels), link: link, resolution: resolution)
+        let panel = streamPixels(panel: aligned(welcome.panelPixels), link: link, resolution: resolution, source: source)
         let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link)
         if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps { return tiles }
         guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
         let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
         let rate = bitrate(capacityGbps: capacityGbps)
-        let video = VideoLayer(codec: codec, pixels: videoPixels(panel, bitrate: rate, codec: codec), bitrate: rate,
+        // Mirror keeps still areas 1:1 where extend sends four fifths
+        // Moving areas take the four fifths: video cost unchanged
+        let motion = source.map { s -> PixelSize in
+            guard reduces(link: link, resolution: resolution) else { return panel }
+            let full = aligned(fit(s, within: aligned(welcome.panelPixels)))
+            return fit(aligned(PixelSize(width: full.width * 4 / 5, height: full.height * 4 / 5)), within: panel)
+        } ?? panel
+        let video = VideoLayer(codec: codec, pixels: videoPixels(motion, bitrate: rate, codec: codec), bitrate: rate,
                                tenBit: codec == .hevc && welcome.hevcMain10Decode)
         return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link)
     }
@@ -35,9 +44,17 @@ public enum PathPolicy {
     /// Holds 60 fps of full-screen motion over Wi-Fi
     /// Virtual display keeps panel size; desktop looks unchanged
     /// Receiver scales the stream up by 1.25
-    static func streamPixels(panel: PixelSize, link: LinkKind, resolution: StreamResolution) -> PixelSize {
-        let reduce = resolution == .reduced || (resolution == .auto && link == .wifi)
-        return reduce ? aligned(PixelSize(width: panel.width * 4 / 5, height: panel.height * 4 / 5)) : panel
+    /// Mirror: the source's own pixels within that size
+    /// A smaller source goes 1:1; resampling only blurs it
+    /// The receiver scales once and letterboxes the rest
+    static func streamPixels(panel: PixelSize, link: LinkKind, resolution: StreamResolution, source: PixelSize? = nil) -> PixelSize {
+        let reduce = reduces(link: link, resolution: resolution)
+        let limit = reduce ? aligned(PixelSize(width: panel.width * 4 / 5, height: panel.height * 4 / 5)) : panel
+        return source.map { aligned(fit($0, within: limit)) } ?? limit
+    }
+
+    static func reduces(link: LinkKind, resolution: StreamResolution) -> Bool {
+        resolution == .reduced || (resolution == .auto && link == .wifi)
     }
 
     /// Virtual display modes and the initial one
