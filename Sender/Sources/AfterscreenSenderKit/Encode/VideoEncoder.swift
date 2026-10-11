@@ -61,6 +61,11 @@ final class VideoEncoder {
         VTCompressionSessionInvalidate(session)
     }
 
+    /// Encoding queue; applies from the next frames
+    func setBitrate(_ bitsPerSecond: Int) {
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitsPerSecond as CFNumber)
+    }
+
     /// `time` in seconds; frames arrive only during motion
     /// Timestamps therefore carry the gaps
     /// `completion`: once per accepted frame, submission order, encoder thread

@@ -32,6 +32,12 @@ public struct SenderSnapshot {
     public var memoryBytes: UInt64 = 0
     public var gpuPercent = 0.0
     public var receiver: ReceiverStats?
+    /// Video bitrate now; nil on the tile path
+    public var videoBitrate: Int?
+    /// Video bitrate from the link probe
+    public var videoStartBitrate: Int?
+    /// Congestion turned the picture down for a while
+    public var qualityLowered = false
     public var qualityTest: QualityTest.Report?
     /// Chosen link did not answer; the fastest carries the stream
     public var missingLink: LinkKind?
@@ -50,11 +56,13 @@ public struct SenderSnapshot {
 
     /// The numbers the receiver's HUD shows
     public var wireStats: SenderStats {
-        SenderStats(interface: interface, mtu: mtu, capacityGbps: capacityGbps, throughputBitsPerSecond: throughputBitsPerSecond,
+        var s = SenderStats(interface: interface, mtu: mtu, capacityGbps: capacityGbps, throughputBitsPerSecond: throughputBitsPerSecond,
                     latencyMs: latencyMs, jitterMs: jitterMs, retransmitPercent: retransmitPercent, cableScore: cableScore,
                     captureFPS: captureFPS, sentFPS: sentFPS, droppedPerMinute: droppedPerMinute, dirtyPercent: dirtyPercent,
                     compressionRatio: compressionRatio, encodeMs: encodeMs, lossyTiles: lossyTiles, cpuPercent: cpuPercent,
                     memoryBytes: memoryBytes, gpuPercent: gpuPercent)
+        s.videoBitrate = videoBitrate
+        return s
     }
 }
 
@@ -128,6 +136,7 @@ public final class SenderSession {
     private var throughput = History(capacity: 120)
     private var latencyHistory = History(capacity: 120)
     private var lastTCP: TCPInfo?
+    private var qualityNotice = QualityNotice()
     private var lastSample = Date()
 
     /// Development: pace writes at this Mbps; treat route as Wi-Fi
@@ -488,6 +497,10 @@ public final class SenderSession {
     /// Key stays: a look-alike's bye cannot lift the proof
     /// The next hello asks the real receiver for a code
     static var disowned: Set<String> = []
+    /// Last congestion notice, any session; main queue
+    private static var lastQualityNotice: TimeInterval?
+    /// Automatic's last pick per receiver, this run; main queue
+    private static var autoPicks: [String: StreamResolution] = [:]
 
     /// IDs a bye marks for pairing anew; deletes nothing
     static func disownedBy(_ bye: Bye?, receiverID: String?) -> Set<String> {
@@ -551,11 +564,18 @@ public final class SenderSession {
         let choose = { (resolution: StreamResolution, source: PixelSize?, largest: PixelSize?) in
             PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome, resolution: resolution, source: source, largestVideo: largest)
         }
+        // Automatic resolved per receiver; near the line it holds
+        let key = welcome.receiverID ?? target.name, screen = PathPolicy.aligned(welcome.panelPixels)
+        let pick = { (source: PixelSize?) in
+            PathPolicy.resolve(self.resolution, panel: screen, source: source, capacityGbps: gbps, previous: SenderSession.autoPicks[key])
+        }
         // Test stages fill the panel
         // Typical use: the size a session would pick
-        let wanted = test ? .panel : resolution, source = mirrorSource?.pixels
+        let source = mirrorSource?.pixels, wanted = test ? .panel : pick(source)
+        if !test, resolution == .auto { SenderSession.autoPicks[key] = wanted }
         let usual = role == .mirror && fit == .mac ? MirrorSource.main?.pixels : nil
-        let typical = { [resolution] (largest: PixelSize?) in test ? choose(resolution, usual, largest) : nil }
+        let usualPick = pick(usual)
+        let typical = { (largest: PixelSize?) in test ? choose(usualPick, usual, largest) : nil }
         guard let first = choose(wanted, source, nil) else {
             return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
                               "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
@@ -760,6 +780,7 @@ public final class SenderSession {
             let describe = { (s: QualityTest.Stage) in
                 String(format: "%@ %d×%d %.0f fps %.2f Gb/s", QualityTest.label(s.size), s.size.width, s.size.height, s.fps, s.gbps)
                     + (s.motion.map { $0 == s.size ? "" : " (motion \($0.width)×\($0.height))" } ?? "")
+                    + (s.videoBitrate.map { " video \($0 / 1_000_000) Mbps" } ?? "")
             }
             let report = self.snapshot.qualityTest
             let stages = (report?.stages ?? []).map(describe) + (report?.typical.map { ["typical use " + describe($0)] } ?? [])
@@ -809,6 +830,9 @@ public final class SenderSession {
             lastTCP = tcp
         }
         let m = metrics.sample()
+        let rates = streamer?.videoBitrates
+        let notice = rates.map { qualityNotice.update(bitrate: $0.now, start: $0.start, now: ProcessInfo.processInfo.systemUptime,
+                                                     lastShown: &SenderSession.lastQualityNotice) } ?? false
         let required = snapshot.config.map { c in c.video.map { 1.5 * Double($0.bitrate) / 1e9 } ?? PathPolicy.tileCapacityGbps(c.streamPixels, fps: c.frameRate) } ?? 0
         update {
             $0.throughputBitsPerSecond = bitsPerSecond
@@ -829,8 +853,13 @@ public final class SenderSession {
             $0.cpuPercent = m.cpuPercent
             $0.memoryBytes = m.memoryBytes
             $0.gpuPercent = streamer?.gpuMeter.percentSinceLastRead() ?? 0
+            $0.videoBitrate = rates?.now
+            $0.videoStartBitrate = rates?.start
+            $0.qualityLowered = qualityNotice.lowered
         }
-        connection?.send(.senderStats, json: snapshot.wireStats)
+        var stats = snapshot.wireStats
+        stats.congestionNotice = notice ? true : nil
+        connection?.send(.senderStats, json: stats)
         if SenderSession.logStats { logLine() }
     }
 

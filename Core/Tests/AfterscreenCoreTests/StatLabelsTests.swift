@@ -16,6 +16,7 @@ final class StatLabelsTests: XCTestCase {
     func testVideoLayerNamesCodecDepthSizeAndRate() {
         let hevc = VideoLayer(codec: .hevc, pixels: PixelSize(width: 2560, height: 1440), bitrate: 160_000_000, tenBit: true)
         XCTAssertEqual(MotionLabel.video(hevc), "HEVC 10-bit 2560×1440 · 160 Mbps")
+        XCTAssertEqual(MotionLabel.video(hevc, bitrate: 48_000_000), "HEVC 10-bit 2560×1440 · 48 Mbps", "the encoder's rate now")
         let h264 = VideoLayer(codec: .h264, pixels: PixelSize(width: 1920, height: 1080), bitrate: 40_000_000, tenBit: false)
         XCTAssertEqual(MotionLabel.video(h264), "H264 1920×1080 · 40 Mbps")
     }

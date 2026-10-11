@@ -71,8 +71,10 @@ final class FakeDisplay: StreamDisplay {
     func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool { record { log.append("params") }; return true }
     func decodeVideo(avcc: Data) -> Bool { record { videoFrames += 1; log.append("video") }; return true }
     var brightnessSet: [PanelLight] = []
+    var notices: [Bool] = []
     var cursors: [Float] = []
     func setBrightness(_ light: PanelLight) { record { brightnessSet.append(light) } }
+    func showCongestionNotice(wifi: Bool) { record { notices.append(wifi) } }
     var audioPackets: [AudioWire.Packet] = []
     func playAudio(_ packet: AudioWire.Packet) { record { audioPackets.append(packet) } }
     var outputsFollowed: [OutputLevel?] = []
@@ -242,6 +244,22 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(t.sender, stats)
         XCTAssertEqual(t.throughput.values, [754e6])
         XCTAssertEqual(t.latency.values, [1])
+    }
+
+    func testTheCongestionNoticeReachesTheScreen() throws {
+        _ = try token()
+        let config = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128), video: nil, linkKind: .wifi)
+        client.send(try JSONWire.message(.config, config))
+        waitForDisplay { [display] in display.begun == [config] }
+        var stats = SenderStats(interface: "en0", mtu: 1500, capacityGbps: 0.2, throughputBitsPerSecond: 40e6,
+                                latencyMs: 30, jitterMs: 5, retransmitPercent: 0, cableScore: nil,
+                                captureFPS: 60, sentFPS: 55, droppedPerMinute: 0, dirtyPercent: 30, compressionRatio: 1,
+                                encodeMs: 20, lossyTiles: 0, cpuPercent: 13, memoryBytes: 1 << 20, gpuPercent: 16)
+        client.send(try JSONWire.message(.senderStats, stats))
+        stats.congestionNotice = true
+        client.send(try JSONWire.message(.senderStats, stats))
+        waitForDisplay { [display] in !display.notices.isEmpty }
+        XCTAssertEqual(display.read { display.notices }, [true], "once, with the Wi-Fi hint")
     }
 
     private func endBySender(_ bye: Bye) throws -> String? {

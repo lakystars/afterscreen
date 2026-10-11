@@ -65,6 +65,21 @@ final class FrameStreamer {
     /// A refinement waits for the link to drain
     private var refinePending = false
     private var counters = FrameCounters()
+    /// Hybrid path: video bitrate follows the link's queueing
+    private var rate: RateControl?
+    private var rateTimer: DispatchSourceTimer?
+    /// Settle budget at the starting bitrate
+    private var settleBase = 0
+    private var offeredFrames = 0
+    private var rateTicks = 0
+    /// Least send buffer and receiver window since the last decision
+    private var leastBuffered: Int?
+    private var leastWindow: Int?
+    /// A whole-screen frame was encoded since the last decision
+    private var sentFullFrame = false
+    private var lastSent: (bytes: UInt64, at: TimeInterval)?
+    /// Video bitrate now and from the probe; under `lock`
+    private var bitrates: (now: Int, start: Int)?
 
     init(config: StreamConfig, capacityGbps: Double?, connection: Connection) throws {
         self.connection = connection
@@ -81,8 +96,11 @@ final class FrameStreamer {
         if let layer = config.video, let video = VideoEncoder(layer: layer, fps: config.frameRate) {
             videoCodec = layer.codec
             encoder.motion = .video
-            encoder.settleLimit = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: config.frameRate)
+            settleBase = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: config.frameRate)
+            encoder.settleLimit = settleBase
             self.video = video
+            rate = RateControl(start: layer.bitrate, fps: config.frameRate)
+            bitrates = (layer.bitrate, layer.bitrate)
         }
         // Written frame frees the link: retry held frame, no polling
         connection.onFrameWritten = { [weak self] in
@@ -90,6 +108,9 @@ final class FrameStreamer {
         }
         pumpTimer = makeTimer { [weak self] in self?.pump() }
         refineTimer = makeTimer { [weak self] in self?.refine() }
+        if rate != nil {
+            rateTimer = DispatchSource.repeating(on: queue, every: 0.25, after: 0.25) { [weak self] in self?.sampleLink() }
+        }
     }
 
     private func makeTimer(_ handler: @escaping () -> Void) -> DispatchSourceTimer {
@@ -104,6 +125,7 @@ final class FrameStreamer {
     func offer(_ frame: CapturedFrame) {
         queue.async { [self] in
             var frame = frame
+            offeredFrames += 1
             if let unsent = gate.pending { frame.dirty = CapturedFrame.merge(unsent.dirty, into: frame.dirty) }
             if gate.offer(frame) {
                 drops.tick()
@@ -127,12 +149,22 @@ final class FrameStreamer {
             pumpTimer = nil
             refineTimer?.cancel()
             refineTimer = nil
+            rateTimer?.cancel()
+            rateTimer = nil
             gate = FrameGate(interval: gate.interval)
             outbox = []
             tile = nil
             video = nil
             completion?()
         }
+    }
+
+    /// Video bitrate now and from the probe
+    /// nil on the tile path
+    var videoBitrates: (now: Int, start: Int)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bitrates
     }
 
     func takeCounters() -> FrameCounters {
@@ -142,6 +174,50 @@ final class FrameStreamer {
             lock.unlock()
         }
         return counters
+    }
+
+    // MARK: - Bitrate
+
+    /// Four samples a second; the least buffer filters bursts
+    /// The first second only starts the send-rate clock
+    private func sampleLink() {
+        guard rate != nil, video != nil, let tcp = connection.tcpInfo() else { return }
+        if lastSent == nil { lastSent = (tcp.sentBytes, ProcessInfo.processInfo.systemUptime) }
+        leastBuffered = min(leastBuffered ?? tcp.sendBuffered, tcp.sendBuffered)
+        leastWindow = min(leastWindow ?? tcp.peerWindow, tcp.peerWindow)
+        rateTicks += 1
+        if rateTicks % 4 == 0 { adjustRate(tcp) }
+    }
+
+    /// Once a second: socket signals, then the encoder
+    /// Settle tiles share the link: scaled alike
+    private func adjustRate(_ tcp: TCPInfo) {
+        guard var control = rate, let video = video else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        var sentBps = 0.0
+        if let last = lastSent, now > last.at, tcp.sentBytes >= last.bytes {
+            sentBps = Double(tcp.sentBytes - last.bytes) * 8 / (now - last.at)
+        }
+        lastSent = (tcp.sentBytes, now)
+        let sample = RateControl.Sample(frames: offeredFrames, sentBps: sentBps, rttMs: tcp.rttMs, buffered: leastBuffered ?? 0,
+                                        receiverLimited: (leastWindow ?? .max) < RateControl.stalledWindow, fullFrame: sentFullFrame)
+        offeredFrames = 0
+        leastBuffered = nil
+        leastWindow = nil
+        sentFullFrame = false
+        let before = control.bitrate
+        let changed = control.update(sample)
+        rate = control
+        guard let next = changed else { return }
+        video.setBitrate(next)
+        tile?.encoder.settleLimit = max(16, settleBase * next / control.start)
+        lock.lock()
+        bitrates?.now = next
+        lock.unlock()
+        if SenderSession.logStats {
+            let why = String(format: "rtt %.0f ms, buffered %d KB, sent %.0f Mbps", tcp.rttMs, sample.buffered / 1024, sentBps / 1e6)
+            FileHandle.standardError.write(Data("[sender] video bitrate \(before / 1_000_000) → \(next / 1_000_000) Mbps (\(why))\n".utf8))
+        }
     }
 
     // MARK: - Frame queue
@@ -175,7 +251,10 @@ final class FrameStreamer {
         let forceKey = keyframeRequested
         keyframeRequested = false
         lock.unlock()
-        if forceKey { videoKeyframe = true }
+        if forceKey {
+            videoKeyframe = true
+            sentFullFrame = true
+        }
         let pixelBuffer = captured.pixelBuffer
         guard let tile = tile else { return }
         var cvTexture: CVMetalTexture?
@@ -212,7 +291,13 @@ final class FrameStreamer {
     /// Its callbacks may never arrive
     private func fallBackToBC1() {
         tile?.encoder.motion = .bc1
+        tile?.encoder.settleLimit = settleBase
         video = nil
+        rateTimer?.cancel()
+        rateTimer = nil
+        lock.lock()
+        bitrates = nil
+        lock.unlock()
         for i in outbox.indices { outbox[i].waitsForVideo = false }
         drain()
     }

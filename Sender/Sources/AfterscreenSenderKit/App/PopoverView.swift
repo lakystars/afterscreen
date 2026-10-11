@@ -202,8 +202,8 @@ private struct SettingsPage: View {
                 .disabled(fixedSize)
             }
             Row(label: L10n.t("Transfer resolution", "전송 해상도"), value: "",
-                help: L10n.t("Automatic: the panel's resolution over cables, four fifths over Wi-Fi (5K iMac: 5120 × 2880 or 4096 × 2304). At four fifths the desktop switches to half that size, the sharpest there (5K iMac: looks like 2048 × 1152); over cables it returns to the size above",
-                             "자동: 케이블 연결은 패널 해상도, Wi-Fi는 4/5 해상도로 보냅니다(5K iMac: 5120 × 2880 또는 4096 × 2304). 4/5 해상도일 때는 화면 크기를 그 절반으로 바꿔 가장 선명하게 보여 줍니다(5K iMac: 2048 × 1152처럼 보임). 케이블로 연결하면 위에서 고른 크기로 돌아옵니다")) {
+                help: L10n.t("Automatic: the panel's resolution when the measured link is fast enough, four fifths otherwise (5K iMac: 5120 × 2880 from about 0.5 Gbps, else 4096 × 2304). At four fifths the desktop switches to half that size, the sharpest there (5K iMac: looks like 2048 × 1152); at the panel's resolution it returns to the size above",
+                             "자동: 측정한 링크가 충분히 빠르면 패널 해상도, 아니면 4/5 해상도로 보냅니다(5K iMac: 약 0.5 Gbps 이상이면 5120 × 2880, 아니면 4096 × 2304). 4/5 해상도일 때는 화면 크기를 그 절반으로 바꿔 가장 선명하게 보여 줍니다(5K iMac: 2048 × 1152처럼 보임). 패널 해상도로 보낼 때는 위에서 고른 크기로 돌아옵니다")) {
                 Picker("", selection: $settings.streamResolution) {
                     ForEach(StreamResolution.allCases) { Text($0.title).tag($0) }
                 }
@@ -736,6 +736,11 @@ public struct PopoverView: View {
                 if let advice = LinkMetrics.usbFallbackAdvice(link: s.link) {
                     Text(advice).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                 }
+                if s.qualityLowered, let now = s.videoBitrate, let start = s.videoStartBitrate {
+                    Text(L10n.t("The network is busy: sending at lower quality (video \(now / 1_000_000) of \(start / 1_000_000) Mbps)",
+                                "네트워크가 혼잡해 화질을 낮춰 보내는 중입니다(영상 \(now / 1_000_000)/\(start / 1_000_000) Mbps)"))
+                        .font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
                 Row(label: StatName.throughput, value: Format.gbps(bytesPerSecond: s.throughputBitsPerSecond / 8),
                     help: L10n.t("Data sent to \(receiver) per second; it rises as more of the screen changes",
                                  "지금 \(receiver)에 보내는 초당 데이터 양입니다. 화면이 많이 바뀔수록 커집니다")) {
@@ -779,7 +784,7 @@ public struct PopoverView: View {
                                          "링크 실측 속도의 절반 안에서는 BC7로 선명하게, 넘으면 절반 크기인 BC1로 보냅니다. BC1은 그라데이션에 띠가 생깁니다"))
                     }
                     if let v = c.video {
-                        Row(StatName.motion, MotionLabel.video(v),
+                        Row(StatName.motion, MotionLabel.video(v, bitrate: s.videoBitrate),
                             help: L10n.t("On slower links, areas in motion go out as video", "느린 링크에서는 움직이는 영역을 비디오로 보냅니다"))
                     }
                     Row(StatName.changed, StatValue.changed(s.dirtyPercent),

@@ -5,7 +5,7 @@ import ServiceManagement
 
 /// Pixels sent: the panel's, or four fifths per axis
 /// Four fifths of 5K: 4096 × 2304
-/// Automatic reduces on Wi-Fi only
+/// Automatic reduces when the link is slow for the panel
 public enum StreamResolution: String, CaseIterable, Identifiable {
     case auto, panel, reduced
 

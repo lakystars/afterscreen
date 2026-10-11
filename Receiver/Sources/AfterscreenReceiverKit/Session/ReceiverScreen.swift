@@ -196,6 +196,11 @@ public final class ReceiverScreen: StreamDisplay {
         renderer.setDeband(level)
     }
 
+    public func showCongestionNotice(wifi: Bool) {
+        window.showNotice(L10n.t("The network is busy, so picture quality was lowered", "네트워크가 혼잡해 화질을 낮췄습니다"),
+                          detail: wifi ? L10n.t("A cable connection is steadier", "케이블로 연결하면 더 안정적입니다") : nil)
+    }
+
     public func setBrightness(_ light: PanelLight) {
         guard let nits = light.nits, let peak = panelPeakNits else { return PanelBrightness.set(light.level) }
         PanelBrightness.set(nits: nits, peak: peak)

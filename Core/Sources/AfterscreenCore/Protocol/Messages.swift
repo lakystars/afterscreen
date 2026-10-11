@@ -254,6 +254,10 @@ public struct SenderStats: Codable, Equatable {
     public var cpuPercent: Double
     public var memoryBytes: UInt64
     public var gpuPercent: Double
+    /// Video bitrate now; a shared link lowers it
+    public var videoBitrate: Int?
+    /// This second only: the receiver shows the congestion notice
+    public var congestionNotice: Bool?
 
     public init(interface: String?, mtu: Int?, capacityGbps: Double?, throughputBitsPerSecond: Double,
                 latencyMs: Double?, jitterMs: Double, retransmitPercent: Double, cableScore: Int?,

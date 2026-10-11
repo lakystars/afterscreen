@@ -63,7 +63,7 @@ struct HUDContent: Equatable {
             connection.append(Row(label: "MTU", value: m.text, tone: m.advised ? .warn : .plain))
         }
 
-        let motion = config.video.map(MotionLabel.video) ?? MotionLabel.text(path: config.path, lossyTiles: s?.lossyTiles ?? 0) ?? dash
+        let motion = config.video.map { MotionLabel.video($0, bitrate: s?.videoBitrate) } ?? MotionLabel.text(path: config.path, lossyTiles: s?.lossyTiles ?? 0) ?? dash
         let picture = [
             Row(label: StatName.frames, value: "\(fps(s?.captureFPS)) · \(fps(s?.sentFPS)) · \(fps(r?.displayedFPS))",
                 graph: t.shownFPS.values, graphColor: .purple),

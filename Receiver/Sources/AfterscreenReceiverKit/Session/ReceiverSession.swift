@@ -38,6 +38,8 @@ public protocol StreamDisplay: AnyObject {
     /// Main queue
     /// Matches the sender's nits on this panel when it can
     func setBrightness(_ light: PanelLight)
+    /// Main queue: the sender lowered quality for congestion
+    func showCongestionNotice(wifi: Bool)
     /// Any queue
     func playAudio(_ packet: AudioWire.Packet)
     /// Main queue: output volume and mute follow the sender's
@@ -389,6 +391,10 @@ public final class ReceiverSession {
                 $0.sender = stats
                 $0.throughput.push(stats.throughputBitsPerSecond)
                 if let ms = stats.latencyMs { $0.latency.push(ms) }
+            }
+            if stats.congestionNotice == true {
+                let wifi = config?.linkKind == .wifi
+                DispatchQueue.main.async { [weak self] in self?.display?.showCongestionNotice(wifi: wifi) }
             }
         case .brightness:
             guard currentPeer != nil, let light = try? BrightnessWire.decode(m.payload) else { return }

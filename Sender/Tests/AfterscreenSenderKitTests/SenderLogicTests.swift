@@ -162,18 +162,20 @@ final class PathPolicyTests: XCTestCase {
         XCTAssertEqual(PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK),
                                          source: PixelSize(width: 3456, height: 2234))?.streamPixels, PixelSize(width: 3456, height: 2232),
                        "block-aligned")
-        let wifi = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto, source: macBook)
-        XCTAssertEqual(wifi?.streamPixels, macBook, "within four fifths of the panel: still areas 1:1 over Wi-Fi")
+        let wifi = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .reduced, source: macBook)
+        XCTAssertEqual(wifi?.streamPixels, macBook, "within four fifths of the panel: still areas 1:1 when reduced")
         XCTAssertEqual(wifi?.video?.pixels, PixelSize(width: 2416, height: 1568), "moving areas at four fifths, as extend sends")
         XCTAssertEqual(PathPolicy.choose(link: .ethernet, capacityGbps: 0.9, welcome: welcome(panel: fiveK), resolution: .auto,
                                          source: macBook)?.video?.pixels, macBook, "unreduced link: video at the stream's size")
-        let extend = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto)
-        let large = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto, source: fiveK)
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.3, welcome: welcome(panel: fiveK), resolution: .auto,
+                                         source: macBook)?.video?.pixels, macBook, "measured against the MacBook's pixels, not 5K's")
+        let extend = PathPolicy.choose(link: .wifi, capacityGbps: 0.2, welcome: welcome(panel: fiveK), resolution: .auto)
+        let large = PathPolicy.choose(link: .wifi, capacityGbps: 0.2, welcome: welcome(panel: fiveK), resolution: .auto, source: fiveK)
         XCTAssertEqual(large?.streamPixels, extend?.streamPixels)
         XCTAssertEqual(large?.video?.pixels, extend?.video?.pixels, "a panel-sized source: video as in extend, not shrunk twice")
         XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.17, welcome: welcome(panel: fiveK), resolution: .auto,
                                          source: PixelSize(width: 2048, height: 1330))?.streamPixels, PixelSize(width: 2048, height: 1328))
-        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: welcome(panel: fiveK), resolution: .auto,
+        XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.2, welcome: welcome(panel: fiveK), resolution: .auto,
                                          source: PixelSize(width: 4096, height: 2660))?.streamPixels, PixelSize(width: 3544, height: 2304),
                        "larger than four fifths: fit within 4096 × 2304")
         XCTAssertEqual(PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK), resolution: .reduced,
@@ -287,16 +289,34 @@ final class PathPolicyTests: XCTestCase {
         XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: nil, tileBytes: 4096, fps: 60), 16)
     }
 
-    func testAutomaticResolutionSendsFourFifthsOverWiFiOnly() {
+    func testAutomaticResolutionFollowsTheMeasuredRate() {
         let retina4K = PixelSize(width: 4096, height: 2304)
-        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .wifi, resolution: .auto), retina4K)
-        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .ethernet, resolution: .auto), fiveK)
-        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .thunderbolt, resolution: .reduced), retina4K)
-        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, link: .wifi, resolution: .panel), fiveK)
-        XCTAssertEqual(PathPolicy.streamPixels(panel: retina4K, link: .wifi, resolution: .auto), PixelSize(width: 3276, height: 1840),
+        XCTAssertEqual(PathPolicy.fullScreenGbps(fiveK), 0.47, accuracy: 0.01)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: 0.2, resolution: .auto), retina4K, "home Wi-Fi")
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: 0.94, resolution: .auto), fiveK, "gigabit Ethernet")
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: 0.6, resolution: .auto), fiveK, "fast Wi-Fi")
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: 0.09, resolution: .auto), retina4K, "100 Mbps Ethernet")
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: nil, resolution: .auto), retina4K, "unmeasured")
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: 10, resolution: .reduced), retina4K)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: fiveK, capacityGbps: 0.07, resolution: .panel), fiveK)
+        XCTAssertEqual(PathPolicy.streamPixels(panel: retina4K, capacityGbps: 0.2, resolution: .auto), PixelSize(width: 3276, height: 1840),
                        "a 4K iMac: whole blocks of 4")
+        XCTAssertEqual(PathPolicy.streamPixels(panel: retina4K, capacityGbps: 0.35, resolution: .auto), retina4K, "fewer pixels need less")
         XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.07, welcome: welcome(panel: fiveK), resolution: .auto)?.streamPixels, retina4K)
         XCTAssertEqual(PathPolicy.choose(link: .wifi, capacityGbps: 0.07, welcome: welcome(panel: fiveK))?.streamPixels, fiveK, "panel unless asked")
+    }
+
+    func testAutomaticHoldsItsLastPickNearTheLine() {
+        func pick(_ gbps: Double, _ previous: StreamResolution?) -> StreamResolution {
+            PathPolicy.resolve(.auto, panel: fiveK, source: nil, capacityGbps: gbps, previous: previous)
+        }
+        XCTAssertEqual(pick(0.5, nil), .panel)
+        XCTAssertEqual(pick(0.5, .reduced), .reduced, "under 120% of the line: stays reduced")
+        XCTAssertEqual(pick(0.6, .reduced), .panel)
+        XCTAssertEqual(pick(0.42, .panel), .panel, "within 20% under the line: stays at the panel")
+        XCTAssertEqual(pick(0.38, .panel), .reduced)
+        XCTAssertEqual(PathPolicy.resolve(.panel, panel: fiveK, source: nil, capacityGbps: 0.01, previous: .reduced), .panel)
+        XCTAssertEqual(PathPolicy.resolve(.reduced, panel: fiveK, source: nil, capacityGbps: 10, previous: .panel), .reduced)
     }
 
     func testAReducedStreamDrawsTheDesktopAtExactlyItsPixels() {
@@ -308,7 +328,7 @@ final class PathPolicyTests: XCTestCase {
         ]
         for c in cases {
             let w = welcome(panel: c.panel)
-            let stream = PathPolicy.streamPixels(panel: c.panel, link: .wifi, resolution: .auto)
+            let stream = PathPolicy.streamPixels(panel: c.panel, capacityGbps: 0.1, resolution: .auto)
             XCTAssertEqual(stream, c.stream)
             let modes = PathPolicy.displayModes(welcome: w, stream: stream, size: .standard)
             XCTAssertEqual(modes.initial, c.looks, "\(c.panel)")

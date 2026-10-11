@@ -26,6 +26,10 @@ public enum PathPolicy {
     /// Apple's 75 Mbps for 4K screen sharing at 60 fps
     static let minBitsPerPixel = 0.15
 
+    /// Automatic keeps the panel's size while the link settles
+    /// a full screen of lossless tiles within this time
+    static let fullSettleSeconds = 0.25
+
     /// Valid receiver panel sizes; others mean a bad peer
     /// Up to 8K, whose raw frame fits one message
     static let widthRange = 640...7680
@@ -36,7 +40,9 @@ public enum PathPolicy {
     public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome, resolution: StreamResolution = .panel,
                               source: PixelSize? = nil, largestVideo: PixelSize? = nil) -> StreamConfig? {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
-        let panel = streamPixels(panel: aligned(welcome.panelPixels), link: link, resolution: resolution, source: source)
+        let screen = aligned(welcome.panelPixels)
+        let picked = resolve(resolution, panel: screen, source: source, capacityGbps: capacityGbps)
+        let panel = streamPixels(panel: screen, capacityGbps: capacityGbps, resolution: picked, source: source)
         let fps = welcome.frameRate
         let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link, frameRate: fps)
         if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps(panel, fps: fps) { return tiles }
@@ -46,8 +52,8 @@ public enum PathPolicy {
         // Mirror keeps still areas 1:1 where extend sends four fifths
         // Moving areas take the four fifths: video cost unchanged
         let motion = source.map { s -> PixelSize in
-            guard reduces(link: link, resolution: resolution) else { return panel }
-            let full = aligned(fit(s, within: aligned(welcome.panelPixels)))
+            guard picked == .reduced else { return panel }
+            let full = aligned(fit(s, within: screen))
             return fit(aligned(PixelSize(width: full.width * 4 / 5, height: full.height * 4 / 5)), within: panel)
         } ?? panel
         let video = VideoLayer(codec: codec, pixels: videoPixels(motion, bitrate: rate, codec: codec, fps: fps, largest: largestVideo),
@@ -57,20 +63,35 @@ public enum PathPolicy {
 
     /// Captured size
     /// Four fifths per axis sends 64% of the pixels
-    /// Holds 60 fps of full-screen motion over Wi-Fi
+    /// Holds 60 fps of full-screen motion on slow links
     /// Virtual display keeps panel size; desktop looks unchanged
     /// Receiver scales the stream up by 1.25
     /// Mirror: the source's own pixels within that size
     /// A smaller source goes 1:1; resampling only blurs it
     /// The receiver scales once and letterboxes the rest
-    static func streamPixels(panel: PixelSize, link: LinkKind, resolution: StreamResolution, source: PixelSize? = nil) -> PixelSize {
-        let reduce = reduces(link: link, resolution: resolution)
+    static func streamPixels(panel: PixelSize, capacityGbps: Double?, resolution: StreamResolution, source: PixelSize? = nil) -> PixelSize {
+        let reduce = resolve(resolution, panel: panel, source: source, capacityGbps: capacityGbps) == .reduced
         let limit = reduce ? aligned(PixelSize(width: panel.width * 4 / 5, height: panel.height * 4 / 5)) : panel
         return source.map { aligned(fit($0, within: limit)) } ?? limit
     }
 
-    static func reduces(link: LinkKind, resolution: StreamResolution) -> Bool {
-        resolution == .reduced || (resolution == .auto && link == .wifi)
+    /// Automatic made concrete by the measured rate, any link kind
+    /// Measured against the stream sent: a mirrored display's own size
+    /// `previous`, this receiver's last pick, holds within 20%
+    /// Rates near the line would flip the desktop each session
+    public static func resolve(_ resolution: StreamResolution, panel: PixelSize, source: PixelSize?, capacityGbps: Double?,
+                               previous: StreamResolution? = nil) -> StreamResolution {
+        guard resolution == .auto else { return resolution }
+        let need = fullScreenGbps(source.map { aligned(fit($0, within: panel)) } ?? panel)
+        let line = previous == .reduced ? need * 1.2 : (previous == .panel ? need / 1.2 : need)
+        return (capacityGbps ?? 0) < line ? .reduced : .panel
+    }
+
+    /// Rate that settles a full stream in `fullSettleSeconds`
+    /// `settleTiles`: raw BC7 at the link rate, half after LZ4
+    /// 5K: 0.47 Gbps, under gigabit Ethernet
+    public static func fullScreenGbps(_ stream: PixelSize) -> Double {
+        Double(stream.pixelCount) * 8 / fullSettleSeconds / 1e9
     }
 
     /// Virtual display modes and the initial one

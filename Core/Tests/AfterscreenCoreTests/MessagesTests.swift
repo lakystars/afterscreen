@@ -31,6 +31,12 @@ final class MessagesTests: XCTestCase {
                                   latencyMs: nil, jitterMs: 0, retransmitPercent: 0, cableScore: nil,
                                   captureFPS: 0, sentFPS: 0, droppedPerMinute: 0, dirtyPercent: 0, compressionRatio: 0,
                                   encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0))
+        var busy = SenderStats(interface: nil, mtu: nil, capacityGbps: 0.2, throughputBitsPerSecond: 0,
+                               latencyMs: nil, jitterMs: 0, retransmitPercent: 0, cableScore: nil,
+                               captureFPS: 0, sentFPS: 0, droppedPerMinute: 0, dirtyPercent: 0, compressionRatio: 0,
+                               encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0)
+        busy.congestionNotice = true
+        try roundTrip(busy)
         try roundTrip(Bye(reason: "user"))
         try roundTrip(Bye(reason: "Stopped on the receiver", pause: true))
         try roundTrip(Bye(reason: "Switching to Ethernet", relink: true))

@@ -10,6 +10,8 @@ public enum QualityTest {
         public var gbps: Double
         /// Video layer carrying motion; nil on the tile path
         public var motion: PixelSize? = nil
+        /// Video bitrate the stage ended at; shared links lower it
+        public var videoBitrate: Int? = nil
     }
 
     /// Progress and results, published through the session snapshot
@@ -157,7 +159,8 @@ final class QualityTestRun {
             let fps = samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count)
             let step = plan[index]
             let stage = QualityTest.Stage(size: step.config.streamPixels, fps: fps,
-                                          gbps: Double(bytes) * 8 / QualityTest.measureSeconds / 1e9, motion: step.config.video?.pixels)
+                                          gbps: Double(bytes) * 8 / QualityTest.measureSeconds / 1e9, motion: step.config.video?.pixels,
+                                          videoBitrate: streamer.videoBitrates?.now)
             if step.motion == .typical { report.typical = stage } else { report.stages.append(stage) }
         }
         index += 1

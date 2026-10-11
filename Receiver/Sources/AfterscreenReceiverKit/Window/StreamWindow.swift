@@ -180,6 +180,9 @@ final class StreamWindow {
     private let cursorLayer = CALayer()
     private let hud = HUDHostView(rootView: HUDView(content: .empty, collapsed: false))
     private let hintLayer = CATextLayer()
+    /// Congestion notice: a box of one or two centred lines
+    private let noticeBox = CALayer()
+    private let noticeText = CATextLayer()
     private let tube = CRTTube()
     private let wave: TileWave
     /// The effect of the window on screen
@@ -234,6 +237,14 @@ final class StreamWindow {
         hintLayer.alignmentMode = .center
         hintLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
         root.addSublayer(hintLayer)
+        noticeBox.opacity = 0
+        noticeBox.backgroundColor = CGColor(gray: 0.08, alpha: 0.85)
+        noticeBox.cornerRadius = 12
+        noticeText.alignmentMode = .center
+        noticeText.isWrapped = true
+        for layer in [noticeBox, noticeText] { layer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()] }
+        noticeBox.addSublayer(noticeText)
+        root.addSublayer(noticeBox)
 
         container.wantsLayer = true
         view.autoresizingMask = [.width, .height]
@@ -261,9 +272,11 @@ final class StreamWindow {
             self?.tube.layout(bounds: bounds)
             renderer?.layout(bounds: bounds, scale: scale)
             self?.hintLayer.contentsScale = scale
+            self?.noticeText.contentsScale = scale
             self?.placeCursor()
             self?.placeHUD()
             self?.placeHint()
+            self?.placeNotice()
         }
     }
 
@@ -361,6 +374,7 @@ final class StreamWindow {
         keyMonitor = nil
         cursorSuppressed = true
         cursorLayer.isHidden = true
+        noticeBox.removeAllAnimations()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             hud.animator().alphaValue = 0
@@ -394,6 +408,8 @@ final class StreamWindow {
         forcedHUD = false
         hintLayer.removeAllAnimations()
         hintLayer.opacity = 0
+        noticeBox.removeAllAnimations()
+        pendingNotice = nil
         if cursorHidden { NSCursor.unhide() }
         cursorHidden = false
         if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
@@ -449,6 +465,10 @@ final class StreamWindow {
                 self.hud.animator().alphaValue = 1
             }
             if self.window?.styleMask.contains(.fullScreen) == true { self.showHint() }
+            if let notice = self.pendingNotice {
+                self.pendingNotice = nil
+                self.showNotice(notice.title, detail: notice.detail)
+            }
         }
     }
 
@@ -549,6 +569,47 @@ final class StreamWindow {
         fade.keyTimes = [0, 0.08, 0.85, 1]
         fade.duration = 3.5
         hintLayer.add(fade, forKey: "hint")
+    }
+
+    /// Bottom centre for a few seconds, above the hint
+    /// Ignores clicks; the picture stays usable
+    func showNotice(_ title: String, detail: String?) {
+        // Shown once the picture is up: the sender sends it once
+        guard power.on else {
+            pendingNotice = (title, detail)
+            return
+        }
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
+        let text = NSMutableAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold), .paragraphStyle: centred,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0.97, alpha: 1),
+        ])
+        if let detail = detail {
+            text.append(NSAttributedString(string: "\n" + detail, attributes: [
+                .font: NSFont.systemFont(ofSize: 13), .paragraphStyle: centred,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0.72, alpha: 1),
+            ]))
+        }
+        noticeText.string = text
+        noticeSize = text.boundingRect(with: CGSize(width: 640, height: 200), options: [.usesLineFragmentOrigin]).size
+        placeNotice()
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [0, 1, 1, 0]
+        fade.keyTimes = [0, 0.06, 0.88, 1]
+        fade.duration = 4.5
+        noticeBox.add(fade, forKey: "notice")
+    }
+
+    private var noticeSize = CGSize.zero
+    private var pendingNotice: (title: String, detail: String?)?
+
+    private func placeNotice() {
+        let pad = CGSize(width: 24, height: 12)
+        let text = CGSize(width: ceil(noticeSize.width) + 2, height: ceil(noticeSize.height) + 2)
+        let box = CGSize(width: text.width + 2 * pad.width, height: text.height + 2 * pad.height)
+        noticeBox.frame = CGRect(x: view.bounds.midX - box.width / 2, y: 124, width: box.width, height: box.height)
+        noticeText.frame = CGRect(origin: CGPoint(x: pad.width, y: pad.height), size: text)
     }
 
     private func placeHint() {

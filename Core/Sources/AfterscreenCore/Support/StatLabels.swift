@@ -53,8 +53,9 @@ public enum MotionLabel {
         return lossyTiles == 0 ? L10n.t("BC7, sharp", "BC7 (선명)") : L10n.t("BC1 on \(lossyTiles) tiles", "BC1 · 타일 \(lossyTiles)개")
     }
 
-    public static func video(_ v: VideoLayer) -> String {
-        "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") \(v.pixels.width)×\(v.pixels.height) · \(v.bitrate / 1_000_000) Mbps"
+    /// `bitrate`: the encoder's now; the layer's from the probe
+    public static func video(_ v: VideoLayer, bitrate: Int? = nil) -> String {
+        "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") \(v.pixels.width)×\(v.pixels.height) · \((bitrate ?? v.bitrate) / 1_000_000) Mbps"
     }
 }
 

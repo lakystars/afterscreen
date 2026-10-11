@@ -7,12 +7,21 @@ public struct TCPInfo: Equatable {
     public var rttMs: Double
     /// Kernel RTT variance; transport jitter without app-level queueing
     public var rttVarMs: Double
+    public var sentBytes: UInt64
+    /// Send socket buffer, in-flight bytes included
+    public var sendBuffered: Int
+    /// Receive window the peer advertises
+    public var peerWindow: Int
 
-    public init(sentPackets: UInt64, retransmittedPackets: UInt64, rttMs: Double, rttVarMs: Double) {
+    public init(sentPackets: UInt64, retransmittedPackets: UInt64, rttMs: Double, rttVarMs: Double,
+                sentBytes: UInt64 = 0, sendBuffered: Int = 0, peerWindow: Int = .max) {
         self.sentPackets = sentPackets
         self.retransmittedPackets = retransmittedPackets
         self.rttMs = rttMs
         self.rttVarMs = rttVarMs
+        self.sentBytes = sentBytes
+        self.sendBuffered = sendBuffered
+        self.peerWindow = peerWindow
     }
 
     public var retransmitPercent: Double {
@@ -176,6 +185,7 @@ public final class Connection {
         lastRead = ProcessInfo.processInfo.systemUptime
         lock.unlock()
         if let timeout = idleTimeout { startWatchdog(timeout: timeout, queue: queue) }
+        markVideoOnWiFi()
         let t = Thread { [self] in readLoop() }
         t.name = "afterscreen.read"
         t.start()
@@ -385,7 +395,17 @@ public final class Connection {
         var len = socklen_t(MemoryLayout<tcp_connection_info>.size)
         guard getsockopt(fd, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &len) == 0 else { return nil }
         return TCPInfo(sentPackets: info.tcpi_txpackets, retransmittedPackets: info.tcpi_txretransmitpackets,
-                       rttMs: Double(info.tcpi_srtt), rttVarMs: Double(info.tcpi_rttvar))
+                       rttMs: Double(info.tcpi_srtt), rttVarMs: Double(info.tcpi_rttvar),
+                       sentBytes: info.tcpi_txbytes, sendBuffered: Int(info.tcpi_snd_sbbytes), peerWindow: Int(info.tcpi_snd_wnd))
+    }
+
+    /// Wi-Fi: video access category for this Mac's sends
+    /// Ahead of its own best-effort traffic
+    /// The access point sees it only with DSCP marking
+    private func markVideoOnWiFi() {
+        guard let name = localInterfaceName, LinkClassifier.wifiNames.contains(name) else { return }
+        var video = Int32(NET_SERVICE_TYPE_VI)
+        setsockopt(fd, SOL_SOCKET, SO_NET_SERVICE_TYPE, &video, socklen_t(MemoryLayout<Int32>.size))
     }
 
     /// Interface that carries this connection (from the local address)
