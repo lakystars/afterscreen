@@ -50,6 +50,8 @@ public protocol StreamDisplay: AnyObject {
     var audioUnderruns: Int { get }
     var gpuMeter: GPUTimeMeter { get }
     var displayedFPS: Double { get }
+    /// Stream picture powered on and on screen
+    var isShown: Bool { get }
     var lateFrames: Int { get }
     var uploadMs: Double { get }
     var decodeMs: Double { get }
@@ -503,7 +505,8 @@ public final class ReceiverSession {
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
                                   gpuPercent: display.gpuMeter.percentSinceLastRead(),
                                   audioBufferMs: display.audioBuffered.map { $0 * 1000 },
-                                  audioUnderruns: display.audioUnderruns, panelLevel: PanelBrightness.level)
+                                  audioUnderruns: display.audioUnderruns, panelLevel: PanelBrightness.level,
+                                  shown: display.isShown)
         record {
             $0.receiver = stats
             $0.shownFPS.push(stats.displayedFPS)

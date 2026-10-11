@@ -19,7 +19,8 @@ final class MessagesTests: XCTestCase {
         try roundTrip(StreamConfig(path: .tile, streamPixels: PixelSize(width: 5120, height: 2880),
                                    video: nil, linkKind: .ethernet))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
-                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, audioBufferMs: 30, audioUnderruns: 0))
+                                    cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18, audioBufferMs: 30, audioUnderruns: 0,
+                                    shown: false))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
                                     cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18))
         try roundTrip(SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,

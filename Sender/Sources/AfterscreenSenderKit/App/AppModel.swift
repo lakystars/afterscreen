@@ -316,7 +316,9 @@ public final class AppModel: ObservableObject {
     /// Needs no Screen Recording: the test streams generated frames
     public func runQualityTest(_ receiver: DiscoveredReceiver) {
         guard session == nil else { return }
+        // Resolution and mirroring size the typical-use stage
         let session = SenderSession(target: receiver, purpose: .qualityTest, link: settings.link, deband: settings.deband,
+                                    resolution: settings.streamResolution, role: settings.displayRole, fit: settings.mirrorFit,
                                     senderID: settings.deviceID, pairings: pairings)
         session.onUpdate = { [weak self] s in
             self?.follow(pairing: s.pairing, wrongCodes: s.wrongCodes)
@@ -331,7 +333,7 @@ public final class AppModel: ObservableObject {
             self?.quitDone = nil
         }
         self.session = session
-        testReport = QualityTest.Report(receiver: receiver.name, total: QualityTest.scales.count)
+        testReport = QualityTest.Report(receiver: receiver.name, total: QualityTest.scales.count + 1)
         isTesting = true
         lastMessage = nil
         session.start()

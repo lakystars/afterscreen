@@ -531,7 +531,7 @@ private struct LinkPicker: View {
     }
 }
 
-/// Quality test result: verdict, link and one bar per stage
+/// Quality test result: verdict, link, one bar per stage, typical use
 private struct QualityCard: View {
     var report: QualityTest.Report
     var testing: Bool
@@ -539,7 +539,14 @@ private struct QualityCard: View {
     var body: some View {
         Card(title: L10n.t("Quality test · \(report.receiver)", "품질 테스트 · \(report.receiver)")) {
             if let v = report.verdict {
-                Text("\(QualityTest.label(v.size)) · \(Int(v.fps.rounded())) fps").font(.system(size: 24, weight: .bold, design: .rounded))
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(QualityTest.label(v.size)) · \(Int(v.fps.rounded())) fps").font(.system(size: 24, weight: .bold, design: .rounded))
+                    // Motion goes as a smaller video layer
+                    if let m = v.motion, m != v.size {
+                        Text(L10n.t("motion \(QualityTest.label(m))", "움직임 \(QualityTest.label(m))"))
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                    }
+                }
             } else if !testing && !report.stages.isEmpty {
                 Text(L10n.t("Under \(Int(QualityTest.smoothFPS(report.frameRate))) fps at every size",
                             "모든 크기에서 \(Int(QualityTest.smoothFPS(report.frameRate)))fps 미만"))
@@ -549,11 +556,15 @@ private struct QualityCard: View {
                 LinkName(kind: report.link, suffix: " · \(report.path)")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            ForEach(report.stages.indices, id: \.self) { i in stageRow(report.stages[i]) }
+            ForEach(report.stages.indices, id: \.self) { i in stageRow(report.stages[i], label: QualityTest.label(report.stages[i].size)) }
+            if let t = report.typical {
+                stageRow(t, label: L10n.t("Typical", "실사용")).padding(.top, 4)
+            }
             if testing {
                 HStack {
-                    ProgressView(value: Double(report.stages.count), total: Double(max(1, report.total)))
-                    Text(report.running.map { L10n.t("Testing \(QualityTest.label($0))…", "\(QualityTest.label($0)) 측정 중…") }
+                    ProgressView(value: Double(report.done), total: Double(max(1, report.total)))
+                    Text(report.running.map { report.runningTypical ? L10n.t("Testing typical use…", "실사용 측정 중…")
+                                                                    : L10n.t("Testing \(QualityTest.label($0))…", "\(QualityTest.label($0)) 측정 중…") }
                          ?? L10n.t("Measuring the link…", "링크 측정 중…"))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
@@ -561,12 +572,12 @@ private struct QualityCard: View {
         }
     }
 
-    private func stageRow(_ stage: QualityTest.Stage) -> some View {
+    private func stageRow(_ stage: QualityTest.Stage, label: String) -> some View {
         let rate = report.frameRate
         let color: Color = stage.fps >= QualityTest.smoothFPS(rate) ? .green : (stage.fps >= rate / 2 ? .yellow : .red)
         return HStack(spacing: 8) {
-            Text(QualityTest.label(stage.size)).frame(width: 42, alignment: .leading)
-            Text("\(stage.size.width)×\(stage.size.height)").foregroundStyle(.secondary)
+            Text(label).frame(width: 52, alignment: .leading)
+            Text(verbatim: "\(stage.size.width)×\(stage.size.height)").foregroundStyle(.secondary)
             Spacer()
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.secondary.opacity(0.2)).frame(width: 60, height: 6)
@@ -651,8 +662,9 @@ public struct PopoverView: View {
     }
 
     /// Paired receivers carry a lock: they connect without a code
+    /// Controls on their own line: names stay whole
     private func receiverRow(_ r: DiscoveredReceiver) -> some View {
-        HStack {
+        VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading) {
                 HStack(spacing: 4) {
                     Text(r.name).font(.system(size: 13, weight: .medium))
@@ -664,12 +676,14 @@ public struct PopoverView: View {
                 Text([r.model, r.panel].filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            Spacer()
-            LinkPicker(model: model, receiver: r.name)
-            Button(L10n.t("Test", "테스트")) { model.runQualityTest(r) }
-                .help(L10n.t("Measure the highest resolution and frame rate this receiver and link sustain",
-                             "이 수신기와 링크로 낼 수 있는 최대 해상도와 프레임을 측정합니다"))
-            Button(L10n.t("Connect", "연결")) { model.connect(r) }
+            HStack {
+                LinkPicker(model: model, receiver: r.name)
+                Spacer()
+                Button(L10n.t("Test", "테스트")) { model.runQualityTest(r) }
+                    .help(L10n.t("Measure the highest resolution and frame rate, then typical use, on this receiver and link",
+                                 "이 수신기와 링크로 낼 수 있는 최대 해상도와 프레임, 실사용 프레임을 측정합니다"))
+                Button(L10n.t("Connect", "연결")) { model.connect(r) }
+            }
         }
     }
 

@@ -210,10 +210,12 @@ public struct ReceiverStats: Codable, Equatable {
     public var audioUnderruns: Int?
     /// Receiver panel's own slider level; a set brightness starts there
     public var panelLevel: Double?
+    /// Picture on screen; nil from older receivers
+    public var shown: Bool?
 
     public init(receivedFPS: Double, displayedFPS: Double, uploadMs: Double, decompressMs: Double, lateFrames: Int,
                 cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, audioBufferMs: Double? = nil,
-                audioUnderruns: Int? = nil, panelLevel: Double? = nil) {
+                audioUnderruns: Int? = nil, panelLevel: Double? = nil, shown: Bool? = nil) {
         self.receivedFPS = receivedFPS
         self.displayedFPS = displayedFPS
         self.uploadMs = uploadMs
@@ -225,6 +227,7 @@ public struct ReceiverStats: Codable, Equatable {
         self.audioBufferMs = audioBufferMs
         self.audioUnderruns = audioUnderruns
         self.panelLevel = panelLevel
+        self.shown = shown
     }
 }
 

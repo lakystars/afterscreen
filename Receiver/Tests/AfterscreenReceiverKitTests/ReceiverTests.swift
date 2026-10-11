@@ -40,6 +40,7 @@ final class FakeDisplay: StreamDisplay {
     let gpuMeter = GPUTimeMeter()
     let decodeQueue = DispatchQueue(label: "fake-decode")
     var displayedFPS: Double { 0 }
+    var isShown: Bool { true }
     var lateFrames: Int { 0 }
     var uploadMs: Double { 0 }
     var decodeMs: Double { 0 }
@@ -166,8 +167,9 @@ final class ReceiverSessionTests: XCTestCase {
         let replies = expectReply {
             client.send(try! JSONWire.message(.hello, Hello(protocolVersion: AfterscreenProtocol.version, name: "MBP", model: "Mac17,1", osVersion: "27")))
         }
-        XCTAssertEqual(replies.first?.type, .welcome)
-        var got = try JSONWire.decode(Welcome.self, from: replies[0].payload)
+        let reply = try XCTUnwrap(replies.first)
+        XCTAssertEqual(reply.type, .welcome)
+        var got = try JSONWire.decode(Welcome.self, from: reply.payload)
         XCTAssertNotEqual(got.channelToken, 0, "each session hands out a cursor channel token")
         got.channelToken = 0
         XCTAssertEqual(got, welcome)
@@ -438,8 +440,9 @@ final class ReceiverSessionTests: XCTestCase {
 
     func testPingEchoesAsPong() throws {
         let replies = expectReply { client.send(Message(type: .ping, payload: PingWire.encode(42))) }
-        XCTAssertEqual(replies.first?.type, .pong)
-        XCTAssertEqual(try PingWire.decode(replies[0].payload), 42)
+        let pong = try XCTUnwrap(replies.first)
+        XCTAssertEqual(pong.type, .pong)
+        XCTAssertEqual(try PingWire.decode(pong.payload), 42)
     }
 
     func testProbeReportsBytesAfterEndMarker() throws {

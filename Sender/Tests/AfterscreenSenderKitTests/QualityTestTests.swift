@@ -40,20 +40,71 @@ final class QualityTestTests: XCTestCase {
         XCTAssertEqual(QualityTest.warmup(stage: PixelSize(width: 1920, height: 1080), capacityGbps: nil), 5)
     }
 
-    func testPatternChangesEveryTileEveryFrame() throws {
-        let pattern = try XCTUnwrap(TestPattern())
-        let size = PixelSize(width: 256, height: 128)
-        let a = try XCTUnwrap(pattern.frame(size: size, time: 0)), b = try XCTUnwrap(pattern.frame(size: size, time: 1.0 / 60))
-        XCTAssertEqual(CVPixelBufferGetWidth(a), 256)
-        XCTAssertEqual(CVPixelBufferGetHeight(a), 128)
-        func tiles(_ pb: CVPixelBuffer) -> [[UInt8]] {
-            CVPixelBufferLockBaseAddress(pb, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-            let base = CVPixelBufferGetBaseAddress(pb)!.assumingMemoryBound(to: UInt8.self), stride = CVPixelBufferGetBytesPerRow(pb)
-            return (0..<8).map { t in
-                (0..<64).flatMap { y in Array(UnsafeBufferPointer(start: base + ((t / 4) * 64 + y) * stride + (t % 4) * 256, count: 256)) }
+    func testCaptionsNameTheStage() {
+        XCTAssertEqual(QualityTest.caption(PixelSize(width: 2560, height: 1440), link: .wifi, step: 2, of: 5, typical: false),
+                       "Wi-Fi · 1440p · 2/5 · Full motion")
+        XCTAssertEqual(QualityTest.caption(PixelSize(width: 4096, height: 2304), link: .ethernet, step: 5, of: 5, typical: true),
+                       "Ethernet · Typical use · 4096×2304 · 5/5")
+    }
+
+    func testTypicalUseStaysOutOfTheVerdict() {
+        var r = QualityTest.Report(receiver: "iMac")
+        r.stages = [QualityTest.Stage(size: PixelSize(width: 1920, height: 1080), fps: 30, gbps: 0.1)]
+        r.typical = QualityTest.Stage(size: PixelSize(width: 4096, height: 2304), fps: 60, gbps: 0.1)
+        XCTAssertNil(r.verdict)
+        XCTAssertEqual(r.done, 2)
+    }
+
+    /// 64-px tiles that differ between two frames, of all tiles
+    private func changedTiles(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> (changed: Int, total: Int, tiles: [CGRect]) {
+        CVPixelBufferLockBaseAddress(a, .readOnly)
+        CVPixelBufferLockBaseAddress(b, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(a, .readOnly)
+            CVPixelBufferUnlockBaseAddress(b, .readOnly)
+        }
+        let w = CVPixelBufferGetWidth(a), h = CVPixelBufferGetHeight(a), stride = CVPixelBufferGetBytesPerRow(a)
+        let pa = CVPixelBufferGetBaseAddress(a)!.assumingMemoryBound(to: UInt8.self)
+        let pb = CVPixelBufferGetBaseAddress(b)!.assumingMemoryBound(to: UInt8.self)
+        var tiles: [CGRect] = [], total = 0
+        for ty in Swift.stride(from: 0, to: h, by: 64) {
+            for tx in Swift.stride(from: 0, to: w, by: 64) {
+                total += 1
+                let rows = ty..<min(ty + 64, h)
+                if rows.contains(where: { memcmp(pa + $0 * stride + tx * 4, pb + $0 * stride + tx * 4, min(64, w - tx) * 4) != 0 }) {
+                    tiles.append(CGRect(x: tx, y: ty, width: min(64, w - tx), height: rows.count))
+                }
             }
         }
-        XCTAssertTrue(zip(tiles(a), tiles(b)).allSatisfy { $0 != $1 })
+        return (tiles.count, total, tiles)
+    }
+
+    func testFullMotionChangesEveryTileEveryFrame() throws {
+        let pattern = try XCTUnwrap(TestPattern())
+        let size = PixelSize(width: 256, height: 128)
+        let stage = TestPattern.Stage(caption: "1080p · 1/5 · Full motion", frameRate: 60, motion: .full)
+        let a = try XCTUnwrap(pattern.frame(size: size, index: 0, stage: stage))
+        let b = try XCTUnwrap(pattern.frame(size: size, index: 1, stage: stage))
+        XCTAssertEqual(CVPixelBufferGetWidth(a), 256)
+        XCTAssertEqual(CVPixelBufferGetHeight(a), 128)
+        let c = changedTiles(a, b)
+        XCTAssertEqual(c.changed, c.total)
+    }
+
+    func testTypicalUseMovesAboutAThird() throws {
+        let pattern = try XCTUnwrap(TestPattern())
+        let size = PixelSize(width: 1920, height: 1080)
+        let stage = TestPattern.Stage(caption: "Typical use · 1920×1080 · 5/5", frameRate: 60, motion: .typical)
+        let a = try XCTUnwrap(pattern.frame(size: size, index: 100, stage: stage))
+        let b = try XCTUnwrap(pattern.frame(size: size, index: 101, stage: stage))
+        let c = changedTiles(a, b)
+        let share = Double(c.changed) / Double(c.total)
+        XCTAssertGreaterThan(share, 0.2)
+        XCTAssertLessThan(share, 0.5)
+        // Changes outside the dirty rects would stay stale on the receiver
+        let rects = try XCTUnwrap(pattern.changing(size: size, stage: stage))
+        for tile in c.tiles where !rects.contains(where: { $0.intersects(tile) }) {
+            XCTFail("tile \(tile) changed outside the dirty rects")
+        }
     }
 }

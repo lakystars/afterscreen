@@ -547,15 +547,20 @@ public final class SenderSession {
             }
             mirrorSource = source
         }
-        let resolution = purpose == .qualityTest ? .panel : self.resolution
-        let choose = { [mirrorSource] (largest: PixelSize?) in
-            PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome, resolution: resolution, source: mirrorSource?.pixels, largestVideo: largest)
+        let test = purpose == .qualityTest
+        let choose = { (resolution: StreamResolution, source: PixelSize?, largest: PixelSize?) in
+            PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome, resolution: resolution, source: source, largestVideo: largest)
         }
-        guard let first = choose(nil) else {
+        // Test stages fill the panel
+        // Typical use: the size a session would pick
+        let wanted = test ? .panel : resolution, source = mirrorSource?.pixels
+        let usual = role == .mirror && fit == .mac ? MirrorSource.main?.pixels : nil
+        let typical = { [resolution] (largest: PixelSize?) in test ? choose(resolution, usual, largest) : nil }
+        guard let first = choose(wanted, source, nil) else {
             return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
                               "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
         }
-        guard let layer = first.video else { return start(first, welcome: welcome) }
+        guard let layer = first.video else { return start(first, typical: typical(nil), welcome: welcome) }
         // Encoder speed varies by Mac: measured off main, per size
         let boxes = PathPolicy.videoBoxes(bitrate: layer.bitrate, codec: layer.codec, fps: first.frameRate)
         update { $0.state = L10n.t("Checking the video encoder", "영상 인코더 확인 중") }
@@ -569,13 +574,13 @@ public final class SenderSession {
                     let ms = Int((ProcessInfo.processInfo.systemUptime - asked) * 1000)
                     FileHandle.standardError.write(Data("[sender] encoder keeps up at \(l.width)x\(l.height), \(Int(first.frameRate)) fps, checked in \(ms) ms\n".utf8))
                 }
-                self.start(choose(largest) ?? first, welcome: welcome)
+                self.start(choose(wanted, source, largest) ?? first, typical: typical(largest), welcome: welcome)
             }
         }
     }
 
-    private func start(_ config: StreamConfig, welcome: Welcome) {
-        if purpose == .qualityTest { return startQualityTest(config) }
+    private func start(_ config: StreamConfig, typical: StreamConfig?, welcome: Welcome) {
+        if purpose == .qualityTest { return startQualityTest(config, typical: typical) }
         connection?.send(.config, json: config)
         beginStreaming(config, welcome: welcome)
     }
@@ -728,8 +733,9 @@ public final class SenderSession {
         }
     }
 
-    private func startQualityTest(_ config: StreamConfig) {
+    private func startQualityTest(_ config: StreamConfig, typical: StreamConfig?) {
         let stages = QualityTest.stages(panel: config.streamPixels).map { PathPolicy.stage(config, size: $0, largestVideo: videoCap) }
+        let usual = typical.map { PathPolicy.stage($0, size: $0.streamPixels, largestVideo: videoCap) }
         let path = config.video.map { v in
             L10n.t("Tiles + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") for motion",
                    "타일 + 움직임은 \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10비트" : "")")
@@ -737,22 +743,26 @@ public final class SenderSession {
         let report = QualityTest.Report(receiver: snapshot.peer?.marketingName ?? target.name, link: snapshot.link, path: path,
                                         frameRate: config.frameRate)
         guard let connection = connection,
-              let run = QualityTestRun(connection: connection, configs: stages, capacityGbps: snapshot.capacityGbps, report: report) else {
+              let run = QualityTestRun(connection: connection, configs: stages, typical: usual, capacityGbps: snapshot.capacityGbps, report: report) else {
             return end(L10n.t("Quality test unavailable: Metal or the test pattern failed",
                               "품질 테스트를 할 수 없습니다: Metal 또는 테스트 화면 생성 실패"))
         }
         run.onReport = { [weak self] r in
             self?.update {
                 $0.qualityTest = r
-                $0.state = r.running.map { L10n.t("Testing \(QualityTest.label($0))", "\(QualityTest.label($0)) 측정 중") }
+                $0.state = r.running.map { r.runningTypical ? L10n.t("Testing typical use", "실사용 측정 중")
+                                                             : L10n.t("Testing \(QualityTest.label($0))", "\(QualityTest.label($0)) 측정 중") }
                     ?? L10n.t("Test finished", "테스트 완료")
             }
         }
         run.onFinish = { [weak self] in
             guard let self = self else { return }
-            let stages = (self.snapshot.qualityTest?.stages ?? []).map {
-                String(format: "%@ %d×%d %.0f fps %.2f Gb/s", QualityTest.label($0.size), $0.size.width, $0.size.height, $0.fps, $0.gbps)
+            let describe = { (s: QualityTest.Stage) in
+                String(format: "%@ %d×%d %.0f fps %.2f Gb/s", QualityTest.label(s.size), s.size.width, s.size.height, s.fps, s.gbps)
+                    + (s.motion.map { $0 == s.size ? "" : " (motion \($0.width)×\($0.height))" } ?? "")
             }
+            let report = self.snapshot.qualityTest
+            let stages = (report?.stages ?? []).map(describe) + (report?.typical.map { ["typical use " + describe($0)] } ?? [])
             let link = String(format: "%@ via %@, %.2f Gb/s, %@", self.snapshot.link?.rawValue ?? "?", self.snapshot.interface ?? "?",
                               self.snapshot.capacityGbps ?? 0, path)
             FileHandle.standardError.write(Data("[sender] quality test (\(link)): \(stages.joined(separator: ", "))\n".utf8))

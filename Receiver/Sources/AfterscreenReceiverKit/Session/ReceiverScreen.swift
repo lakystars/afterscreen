@@ -56,10 +56,22 @@ public final class ReceiverScreen: StreamDisplay {
             self?.renderer.setVisible(visible)
             if visible { self?.onRedrawNeeded?() }
         }
+        window.onShownChange = { [weak self] in self?.isShown = $0 }
     }
 
     public var gpuMeter: GPUTimeMeter { renderer.gpuMeter }
     public var displayedFPS: Double { renderer.displayed.ratePerSecond() }
+    /// Set on main by the window, read by stats
+    public private(set) var isShown: Bool {
+        get { shownLock.lock(); defer { shownLock.unlock() }; return shown }
+        set {
+            shownLock.lock()
+            shown = newValue
+            shownLock.unlock()
+        }
+    }
+    private let shownLock = NSLock()
+    private var shown = false
     public var lateFrames: Int { renderer.lateFrames }
     public var uploadMs: Double { renderer.uploadMs }
     public var decodeMs: Double { renderer.decodeMs }

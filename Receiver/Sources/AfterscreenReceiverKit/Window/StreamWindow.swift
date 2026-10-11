@@ -153,6 +153,8 @@ final class StreamWindow {
     var onHUDChange: ((ReceiverSettings.HUDCorner, Bool) -> Void)?
     /// Main queue: false while on another Space or covered
     var onVisibilityChange: ((Bool) -> Void)?
+    /// Main queue: picture powered on and on screen
+    var onShownChange: ((Bool) -> Void)?
     /// Applies at the next session's first show
     var presentation = ReceiverSettings.Presentation.space
     /// Applies at the next session's first show
@@ -363,7 +365,9 @@ final class StreamWindow {
             context.duration = 0.12
             hud.animator().alphaValue = 0
         }
-        guard power.powerOff(effect: shownEffect) else { return done() }
+        let animate = power.powerOff(effect: shownEffect)
+        reportShown()
+        guard animate else { return done() }
         view.layoutSubtreeIfNeeded()
         switch shownEffect {
         case .crt: tube.powerOff()
@@ -402,7 +406,9 @@ final class StreamWindow {
             context.duration = 0.12
             hud.animator().alphaValue = 0
         }
-        guard power.powerOff(effect: shownEffect) else { return close(window) }
+        let animate = power.powerOff(effect: shownEffect)
+        reportShown()
+        guard animate else { return close(window) }
         view.layoutSubtreeIfNeeded()
         switch shownEffect {
         case .crt: tube.powerOff()
@@ -426,6 +432,7 @@ final class StreamWindow {
     /// Then the HUD and, in a Space, the hint appear
     private func powerOn() {
         guard keyMonitor != nil, power.powerOn() else { return }
+        reportShown()
         view.layoutSubtreeIfNeeded()
         switch shownEffect {
         case .crt: tube.powerOn()
@@ -486,16 +493,23 @@ final class StreamWindow {
             center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) { [weak self, weak window] _ in
                 guard let window = window else { return }
                 self?.onVisibilityChange?(window.occlusionState.contains(.visible))
+                self?.reportShown()
             },
             center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self, weak window] _ in
                 guard let self = self, let window = window else { return }
                 // Ended mid-slide: the window was hidden before full screen
                 guard self.window === window, self.keyMonitor != nil else { return window.close() }
+                // The Space switch shows the pointer again
+                NSCursor.setHiddenUntilMouseMoves(true)
                 self.powerOn()
             },
         ]
         self.window = window
         return window
+    }
+
+    private func reportShown() {
+        onShownChange?(power.on && window?.occlusionState.contains(.visible) == true)
     }
 
     private func scheduleCursorHide() {

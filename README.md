@@ -6,7 +6,7 @@ Turn an iMac into an extended or mirrored display for an Apple Silicon Mac, at t
 - **Slower links keep text sharp.** Still content stays lossless at native resolution; only the parts that move go out as HEVC or H.264 video.
 - **The Mac's sound plays on the iMac's speakers** at the Mac's own volume, and the iMac's brightness follows the Mac's or is set on its own.
 - **Picture quality tools**: gradient smoothing for 8-bit banding, a 10-bit output, bicubic scaling for reduced streams.
-- **A quality test** that measures the highest resolution and frame rate your link sustains.
+- **A quality test** that measures the highest resolution and frame rate your link sustains, and the frame rate of typical use.
 - **English and Korean** interface.
 
 ## Supported Macs
@@ -103,7 +103,7 @@ Measured on a 2017 5K iMac (iMac18,3, Radeon Pro 570, macOS 13.7.8) receiving fr
 
 | Link (measured capacity) | Path | Full-screen motion | Notes |
 |---|---|---|---|
-| Thunderbolt Bridge (11–13 Gbps) | Tiles | 5K at 60 fps | Quality test: 4K stage at 60 fps with BC7 motion (3.98 Gbps); 5K stage at 60 fps with BC1 motion (3.54 Gbps) |
+| Thunderbolt Bridge (11–13 Gbps) | Tiles | 5K at 60 fps | Quality test: every stage at 60 fps, 5K full motion at 6.29 Gbps, typical use at 1.99 Gbps |
 | USB-C cable, USB networking (3.8 Gbps) | Tiles | 5K at 60 fps | 3.2 Gbps; MacBook CPU 17%, iMac CPU 32% |
 | Gigabit Ethernet, direct cable (0.94 Gbps) | Hybrid, 4K HEVC layer | 5K at 60 fps | 0.41 Gbps; MacBook CPU 27%, iMac CPU 11% |
 | Office Wi-Fi (about 70 Mbps sustained) | Hybrid, 1440p HEVC layer | 15–52 fps, varies with the Wi-Fi | A video window held 60 fps |
@@ -178,7 +178,12 @@ Receiver (**Settings…** in its menu):
 
 ### Quality test
 
-**Test** streams generated full-motion frames, where every pixel changes every frame, through the real pipeline at 0.375, 0.5, 0.75 and 1 of the panel (1080p, 1440p, 4K and 5K on a 5K iMac). The iMac shows the pattern with its heads-up display, and the menu then shows the largest size that held 55 fps or more, with the frame rate and throughput at each size. It needs no Screen Recording permission.
+**Test** streams a generated pattern through the real pipeline in five stages. It needs no Screen Recording permission.
+
+- **Full motion**, at 0.375, 0.5, 0.75 and 1 of the panel (1080p, 1440p, 4K and 5K on a 5K iMac). Every tile changes every frame. The menu shows the largest size that held 55 fps or more. On the hybrid path full motion travels as video, so the menu also names the size of the video layer that carried it.
+- **Typical use**, at the size a session would stream. Only a video window, a scrolling document and the frame ladder move, about a third of the screen. This is the frame rate to expect from everyday work over the link.
+
+The iMac shows the pattern with its heads-up display, and the menu lists the frame rate and throughput of each stage. The pattern can also be read by eye. Its caption names the link, the stage and the frame number. A ladder along the top lights one cell per frame, so a skipped cell is a frame that never reached the screen. A card crosses at a constant speed with text at four sizes, a gray ramp and red-on-blue labels, so stutter, banding and lost color detail show on it. Nothing flashes, and there are no high-contrast stripes.
 
 ### Menu fields
 
