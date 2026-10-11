@@ -32,7 +32,7 @@ final class HUDContentTests: XCTestCase {
     func testSectionsFollowThePopover() {
         let c = HUDContent.make(peer: "MacBook Pro", config: tiles, telemetry: telemetry())
         XCTAssertEqual(c.title, "MacBook Pro")
-        XCTAssertEqual(c.sections.map(\.title), ["Connection", "Picture", "Resources"])
+        XCTAssertEqual(c.sections.map(\.title), ["Connection", "Picture", "Resources · CPU · RAM · GPU"])
         XCTAssertEqual(row(c, "Link")?.value, "Thunderbolt · bridge0")
         XCTAssertEqual(row(c, "Link")?.link, .thunderbolt, "drawn as the link's symbol")
         XCTAssertEqual(row(c, "Throughput")?.value, "754 Mbps")
@@ -45,8 +45,9 @@ final class HUDContentTests: XCTestCase {
         XCTAssertEqual(row(c, "Frames: captured · sent · shown")?.value, "60 · 59 · 58")
         XCTAssertEqual(row(c, "Resolution")?.value, "5120×2880")
         XCTAssertEqual(row(c, "Moving areas")?.value, "BC7, sharp")
-        XCTAssertEqual(row(c, "Sending Mac: CPU · RAM · GPU")?.value, "13% · 196 MB · 16%")
-        XCTAssertEqual(row(c, "This Mac: CPU · RAM · GPU")?.value, "8% · 70 MB · 22%")
+        // Rows named for each Mac
+        XCTAssertEqual(row(c, "MacBook Pro")?.value, "13% · 196 MB · 16%")
+        XCTAssertEqual(row(c, ComputerName.current)?.value, "8% · 70 MB · 22%")
     }
 
     func testSmoothingShowsTheLevelOnly() {

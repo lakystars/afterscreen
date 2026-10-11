@@ -18,15 +18,20 @@ public enum QualityTest {
         /// Size being measured; nil once finished
         public var running: PixelSize?
         public var total = 0
+        /// Receiver's refresh: the rate stages aim for
+        public var frameRate = 60.0
 
-        public var verdict: Stage? { QualityTest.verdict(stages) }
+        public var verdict: Stage? { QualityTest.verdict(stages, frameRate: frameRate) }
     }
 
     /// Panel fractions measured: 5K gives 1080p, 1440p, 4K, 5K
     static let scales = [0.375, 0.5, 0.75, 1.0]
     /// Measured part of each stage
     static let measureSeconds = 2.0
-    public static let smoothFPS = 55.0
+    /// Smooth: 55 of 60 frames, at any refresh
+    static let smoothShare = 55.0 / 60
+
+    public static func smoothFPS(_ frameRate: Double) -> Double { frameRate * smoothShare }
 
     /// Skipped at stage start; at most 5 s
     /// Receiver fps counter spans one second
@@ -45,8 +50,8 @@ public enum QualityTest {
     }
 
     /// Largest stage at a smooth frame rate
-    public static func verdict(_ stages: [Stage]) -> Stage? {
-        stages.filter { $0.fps >= smoothFPS }.max { $0.size.pixelCount < $1.size.pixelCount }
+    public static func verdict(_ stages: [Stage], frameRate: Double) -> Stage? {
+        stages.filter { $0.fps >= smoothFPS(frameRate) }.max { $0.size.pixelCount < $1.size.pixelCount }
     }
 }
 
@@ -63,7 +68,7 @@ final class QualityTestRun {
     private var report: QualityTest.Report
     private var index = -1
     private var streamer: FrameStreamer?
-    /// 60 Hz pattern frames for the current stage
+    /// Pattern frames at the receiver's refresh
     private var ticker: DispatchSourceTimer?
     private var stageStart = 0.0
     private var warmup = 1.0
@@ -136,7 +141,7 @@ final class QualityTestRun {
         onReport?(report)
 
         let size = config.streamPixels, start = stageStart, pattern = self.pattern
-        ticker = DispatchSource.repeating(on: queue, every: 1.0 / 60, leeway: .milliseconds(1)) {
+        ticker = DispatchSource.repeating(on: queue, every: 1 / config.frameRate, leeway: .milliseconds(1)) {
             if let frame = pattern.frame(size: size, time: ProcessInfo.processInfo.systemUptime - start) {
                 streamer.offer(CapturedFrame(pixelBuffer: frame, dirty: nil))
             }

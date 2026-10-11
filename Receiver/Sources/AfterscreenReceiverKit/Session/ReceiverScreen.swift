@@ -189,14 +189,15 @@ public final class ReceiverScreen: StreamDisplay {
         PanelBrightness.set(nits: nits, peak: peak)
     }
 
-    private static let peakKey = "panelPeakNits"
-
-    /// This panel's peak in nits, measured once and kept
+    /// This panel's peak in nits, measured once, kept per panel
+    /// A Mac mini may change displays
     /// Too dim to measure yet: the sender's slider stands in
     public var panelPeakNits: Double? {
-        if let kept = UserDefaults.standard.object(forKey: ReceiverScreen.peakKey) as? Double { return kept }
-        guard let measured = PanelBrightness.measuredPeakNits(CGMainDisplayID()) else { return nil }
-        UserDefaults.standard.set(measured, forKey: ReceiverScreen.peakKey)
+        let id = CGMainDisplayID()
+        let key = "panelPeakNits.\(CGDisplayVendorNumber(id))-\(CGDisplayModelNumber(id))-\(CGDisplaySerialNumber(id))"
+        if let kept = UserDefaults.standard.object(forKey: key) as? Double { return kept }
+        guard let measured = PanelBrightness.measuredPeakNits(id) else { return nil }
+        UserDefaults.standard.set(measured, forKey: key)
         return measured
     }
 }

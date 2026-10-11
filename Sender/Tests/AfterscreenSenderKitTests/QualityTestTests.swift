@@ -25,9 +25,11 @@ final class QualityTestTests: XCTestCase {
                  QualityTest.Stage(size: PixelSize(width: 2560, height: 1440), fps: 59, gbps: 0.6),
                  QualityTest.Stage(size: PixelSize(width: 3840, height: 2160), fps: 41, gbps: 0.9),
                  QualityTest.Stage(size: PixelSize(width: 5120, height: 2880), fps: 56, gbps: 1.1)]
-        XCTAssertEqual(QualityTest.verdict(r)?.size, PixelSize(width: 5120, height: 2880))
-        XCTAssertEqual(QualityTest.verdict(Array(r.prefix(3)))?.size, PixelSize(width: 2560, height: 1440))
-        XCTAssertNil(QualityTest.verdict([QualityTest.Stage(size: PixelSize(width: 1920, height: 1080), fps: 30, gbps: 0.1)]))
+        XCTAssertEqual(QualityTest.verdict(r, frameRate: 60)?.size, PixelSize(width: 5120, height: 2880))
+        XCTAssertEqual(QualityTest.verdict(Array(r.prefix(3)), frameRate: 60)?.size, PixelSize(width: 2560, height: 1440))
+        XCTAssertNil(QualityTest.verdict([QualityTest.Stage(size: PixelSize(width: 1920, height: 1080), fps: 30, gbps: 0.1)], frameRate: 60))
+        XCTAssertNotNil(QualityTest.verdict([QualityTest.Stage(size: PixelSize(width: 1920, height: 1080), fps: 46, gbps: 0.1)], frameRate: 50),
+                        "46 of 50 Hz is smooth")
     }
 
     func testWarmUpCoversTwoLosslessFramesOnSlowLinks() {

@@ -14,14 +14,17 @@ private final class StreamView: NSView {
     /// This Mac's pointer over the stream; nil keeps the system's
     var pointer: NSCursor?
 
+    /// Before a window: the screen's, not an assumed Retina 2
+    private var scale: CGFloat { window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1 }
+
     override func layout() {
         super.layout()
-        onLayout?(bounds, window?.backingScaleFactor ?? 2)
+        onLayout?(bounds, scale)
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        onLayout?(bounds, window?.backingScaleFactor ?? 2)
+        onLayout?(bounds, scale)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -524,8 +527,8 @@ final class StreamWindow {
 
     /// How to leave the stream's Space, shown briefly after opening
     private func showHint() {
-        hintLayer.string = L10n.t("Control + ← → switches to this Mac's desktop · right-click for the menu",
-                                  "Control + ← →로 이 Mac 데스크톱과 전환 · 우클릭으로 메뉴")
+        hintLayer.string = L10n.t("Control + ← → switches to \(ComputerName.current)'s desktop · right-click for the menu",
+                                  "Control + ← →로 \(ComputerName.current) 데스크톱과 전환 · 우클릭으로 메뉴")
         placeHint()
         let fade = CAKeyframeAnimation(keyPath: "opacity")
         fade.values = [0, 1, 1, 0]

@@ -42,16 +42,26 @@ public enum LinkClassifier {
         let chain = ioClassChain(bsdName: name)
         let isThunderboltIP: (String) -> Bool = { ioClassChain(bsdName: $0).contains { $0.contains("ThunderboltIP") } }
         var thunderbolt = chain.contains { $0.contains("ThunderboltIP") }
-        if !thunderbolt, name.hasPrefix("bridge"), let output = run("/sbin/ifconfig", [name]) {
+        if !thunderbolt, Interfaces.isBridge(name), let output = run("/sbin/ifconfig", [name]) {
             thunderbolt = bridgeMembers(ifconfigOutput: output).contains(where: isThunderboltIP)
         }
         return InterfaceFacts(name: name,
                               isThunderbolt: thunderbolt,
                               isUSBNCM: chain.contains { $0.contains("NCM") },
-                              isWiFi: chain.contains { $0.contains("80211") || $0.contains("WLAN") },
+                              isWiFi: chain.contains { $0.contains("80211") || $0.contains("WLAN") } || wifiNames.contains(name),
                               isEthernet: ethernet.contains(name),
-                              isLoopback: name.hasPrefix("lo"))
+                              isLoopback: Interfaces.isLoopback(name))
     }
+
+    /// Wi-Fi per SystemConfiguration, listed once
+    /// Some Broadcom drivers name no 802.11 class in their chain
+    public static let wifiNames: Set<String> = {
+        let all = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface]) ?? []
+        return Set(all.compactMap { i -> String? in
+            guard (SCNetworkInterfaceGetInterfaceType(i) as String?) == (kSCNetworkInterfaceTypeIEEE80211 as String) else { return nil }
+            return SCNetworkInterfaceGetBSDName(i) as String?
+        })
+    }()
 
     /// Wired Ethernet per SystemConfiguration; excludes VM bridges, tunnels
     public static func ethernetNames() -> Set<String> {

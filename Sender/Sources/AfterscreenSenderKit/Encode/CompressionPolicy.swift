@@ -8,22 +8,24 @@ public struct CompressionPolicy {
     public static let probeInterval = 30
     /// Frames treated as congested after a full send queue
     public static let congestionFrames = 120
-    /// Link capacity wanted over the frame's rate at 60 fps
+    /// Link capacity wanted over the frame's rate
     static let headroom = 1.3
 
     private let capacityBits: Double
+    private let fps: Double
     private var congested = 0
     private var compressible = true
     private var untilProbe = 0
 
-    public init(capacityGbps: Double?) {
+    public init(capacityGbps: Double?, fps: Double) {
         capacityBits = (capacityGbps ?? 0) * 1e9
+        self.fps = fps
     }
 
     /// `queueWasFull`: link held a frame back since the previous call
     public mutating func next(rawBytes: Int, queueWasFull: Bool) -> TilePacker.Compression {
         if queueWasFull { congested = CompressionPolicy.congestionFrames }
-        let tooBig = Double(rawBytes) * 8 * 60 * CompressionPolicy.headroom > capacityBits
+        let tooBig = Double(rawBytes) * 8 * fps * CompressionPolicy.headroom > capacityBits
         guard tooBig || congested > 0 else { return .none }
         congested = max(0, congested - 1)
         if compressible { return .all }

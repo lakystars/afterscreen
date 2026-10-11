@@ -98,6 +98,30 @@ final class CursorNormalizeTests: XCTestCase {
         XCTAssertTrue(r.visible)
     }
 
+    func testAutoConnectNeverPutsACodeOnAnotherIMac() {
+        XCTAssertTrue(AppModel.connectsWithoutCode(paired: true, route: .wifi))
+        XCTAssertTrue(AppModel.connectsWithoutCode(paired: false, route: .thunderbolt), "a cable needs no code")
+        XCTAssertTrue(AppModel.connectsWithoutCode(paired: false, route: .usb))
+        XCTAssertFalse(AppModel.connectsWithoutCode(paired: false, route: .wifi))
+        XCTAssertFalse(AppModel.connectsWithoutCode(paired: false, route: .ethernet))
+        XCTAssertFalse(AppModel.connectsWithoutCode(paired: false, route: nil), "links not known yet: wait")
+    }
+
+    func testAKnownReceiverMustProveItself() {
+        XCTAssertTrue(SenderSession.expectsProof(pairedTarget: true, pairedReceiver: false, pairedName: false))
+        XCTAssertTrue(SenderSession.expectsProof(pairedTarget: false, pairedReceiver: true, pairedName: false))
+        XCTAssertTrue(SenderSession.expectsProof(pairedTarget: false, pairedReceiver: false, pairedName: true),
+                      "a look-alike under a paired name with a new ID")
+        XCTAssertFalse(SenderSession.expectsProof(pairedTarget: false, pairedReceiver: false, pairedName: false), "an open receiver")
+    }
+
+    func testAutoConnectJudgesTheLinkThatAnswers() {
+        XCTAssertEqual(AppModel.route(pinned: .thunderbolt, answering: [.thunderbolt, .wifi]), .thunderbolt)
+        XCTAssertEqual(AppModel.route(pinned: .thunderbolt, answering: [.wifi]), .wifi, "pinned cable unplugged: Wi-Fi carries it")
+        XCTAssertEqual(AppModel.route(pinned: nil, answering: [.usb, .wifi]), .usb)
+        XCTAssertNil(AppModel.route(pinned: .wifi, answering: nil))
+    }
+
     func testBrightnessFollowsRealChangesNotSensorNoise() {
         XCTAssertTrue(SenderSession.brightnessChanged(0.5, from: nil), "first reading goes out")
         XCTAssertFalse(SenderSession.brightnessChanged(0.502, from: 0.5))
@@ -259,8 +283,8 @@ final class PathPolicyTests: XCTestCase {
     }
 
     func testSettledTilesPerFrameFillHalfAFrameIntervalAtTwoToOne() {
-        XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: 0.3, tileBytes: 4096), 152)
-        XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: nil, tileBytes: 4096), 16)
+        XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: 0.3, tileBytes: 4096, fps: 60), 152)
+        XCTAssertEqual(PathPolicy.settleTiles(capacityGbps: nil, tileBytes: 4096, fps: 60), 16)
     }
 
     func testAutomaticResolutionSendsFourFifthsOverWiFiOnly() {
@@ -300,10 +324,27 @@ final class PathPolicyTests: XCTestCase {
         XCTAssertEqual(PathPolicy.displayModes(welcome: w, stream: fiveK, size: .more).initial, DisplaySize.more.points(for: w.panelPoints))
     }
 
+    func testTileThresholdScalesWithPixelsAndRate() {
+        XCTAssertEqual(PathPolicy.tileCapacityGbps(fiveK, fps: 60), 2.48, accuracy: 0.01, "5K at 60: the measured 2.5 Gbps")
+        XCTAssertEqual(PathPolicy.tileCapacityGbps(PixelSize(width: 1920, height: 1080), fps: 60), 0.35, accuracy: 0.01)
+        XCTAssertEqual(PathPolicy.tileCapacityGbps(fiveK, fps: 120), 4.95, accuracy: 0.01)
+        let fullHD = PixelSize(width: 1920, height: 1080)
+        XCTAssertEqual(PathPolicy.choose(link: .ethernet, capacityGbps: 0.9, welcome: welcome(panel: fullHD))?.path, .tile,
+                       "gigabit carries 1080p as lossless tiles")
+    }
+
+    func testEncoderSpeedCapsTheVideoLayer() {
+        let w = welcome(panel: fiveK)
+        let free = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: w)
+        let capped = PathPolicy.choose(link: .wifi, capacityGbps: 0.6, welcome: w, largestVideo: PixelSize(width: 2560, height: 1440))
+        XCTAssertEqual(free?.video?.pixels, PixelSize(width: 3840, height: 2160))
+        XCTAssertEqual(capped?.video?.pixels, PixelSize(width: 2560, height: 1440), "a slower encoder takes the next size")
+    }
+
     func testBC7MotionFillsHalfTheLinkAtSixtyFramesPerSecond() {
-        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 10, tileBytes: 4096), 2543)
-        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 3.8, tileBytes: 4096), 966)
-        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: nil, tileBytes: 4096), 0)
+        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 10, tileBytes: 4096, fps: 60), 2543)
+        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: 3.8, tileBytes: 4096, fps: 60), 966)
+        XCTAssertEqual(PathPolicy.bc7MotionTiles(capacityGbps: nil, tileBytes: 4096, fps: 60), 0)
     }
 
     func testVideoBitrateIsFortyPercentOfCapacityWithinLimits() {
@@ -505,6 +546,24 @@ final class RoutePlannerTests: XCTestCase {
         XCTAssertEqual(routes.first?.address, "127.0.0.1")
     }
 
+    func testARepairByeDeletesNoKeyAndOnlyMarksTheReceiver() {
+        XCTAssertEqual(SenderSession.disownedBy(Bye(reason: "keys differ", repair: true), receiverID: "imac"), ["imac"])
+        XCTAssertEqual(SenderSession.disownedBy(Bye(reason: "stopped"), receiverID: "imac"), [])
+        XCTAssertTrue(SenderSession.expectsProof(pairedTarget: true, pairedReceiver: false, pairedName: false),
+                      "the key stays: a look-alike's bye cannot lift the proof")
+    }
+
+    func testIPv6OnlyCableRoutesWhereMDNSAnswered() {
+        let locals = [LocalInterface(name: "bridge0", ip: "", netmask: "", kind: .thunderbolt, v6: ["fe80::1c2"]),
+                      LocalInterface(name: "en0", ip: "192.168.0.179", netmask: "255.255.255.0", kind: .wifi)]
+        let remote = [RemoteAddress("fe80::8a%bridge0", via: "bridge0"), RemoteAddress("192.168.0.152", via: "en0")]
+        let routes = RoutePlanner.plan(local: locals, remote: remote)
+        XCTAssertEqual(routes.map(\.interface), ["bridge0", "en0"])
+        XCTAssertEqual(routes.first?.address, "fe80::8a%bridge0", "scoped: the socket binds that interface")
+        XCTAssertEqual(RoutePlanner.plan(local: locals, remote: [RemoteAddress("fe80::1c2%bridge0", via: "bridge0")]).first?.kind, .loopback,
+                       "its own IPv6 address: same Mac")
+    }
+
     func testLinkLocalAddressesUseTheInterfaceThatAnswered() {
         let locals = [
             LocalInterface(name: "bridge0", ip: "169.254.18.130", netmask: "255.255.0.0", kind: .thunderbolt),
@@ -557,21 +616,21 @@ final class CompressionPolicyTests: XCTestCase {
     private let fullFrame = 14_745_600 // 5K raw BC7 bytes: 7.1 Gbps at 60 fps
 
     func testFramesTheLinkCarriesGoStored() {
-        var p = CompressionPolicy(capacityGbps: 8)
+        var p = CompressionPolicy(capacityGbps: 8, fps: 60)
         XCTAssertEqual(p.next(rawBytes: fullFrame / 3, queueWasFull: false), .none)
-        var fast = CompressionPolicy(capacityGbps: 40)
+        var fast = CompressionPolicy(capacityGbps: 40, fps: 60)
         XCTAssertEqual(fast.next(rawBytes: fullFrame, queueWasFull: false), .none)
     }
 
     func testFramesTooBigForTheLinkAreCompressed() {
-        var p = CompressionPolicy(capacityGbps: 8)
+        var p = CompressionPolicy(capacityGbps: 8, fps: 60)
         XCTAssertEqual(p.next(rawBytes: fullFrame, queueWasFull: false), .all)
         p.record(rawBytes: fullFrame, wireBytes: fullFrame / 4)
         XCTAssertEqual(p.next(rawBytes: fullFrame, queueWasFull: false), .all)
     }
 
     func testIncompressibleContentIsSentStoredAndProbedWithOneChunk() {
-        var p = CompressionPolicy(capacityGbps: 8)
+        var p = CompressionPolicy(capacityGbps: 8, fps: 60)
         _ = p.next(rawBytes: fullFrame, queueWasFull: false)
         p.record(rawBytes: fullFrame, wireBytes: fullFrame - 1000)
         let decisions = (0..<CompressionPolicy.probeInterval).map { _ in p.next(rawBytes: fullFrame, queueWasFull: false) }
@@ -582,7 +641,7 @@ final class CompressionPolicyTests: XCTestCase {
     }
 
     func testCongestionCompressesForAWhile() {
-        var p = CompressionPolicy(capacityGbps: 40)
+        var p = CompressionPolicy(capacityGbps: 40, fps: 60)
         XCTAssertEqual(p.next(rawBytes: 1000, queueWasFull: true), .all)
         for _ in 1..<CompressionPolicy.congestionFrames { XCTAssertEqual(p.next(rawBytes: 1000, queueWasFull: false), .all) }
         XCTAssertEqual(p.next(rawBytes: 1000, queueWasFull: false), .none)

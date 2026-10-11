@@ -11,6 +11,8 @@ public struct DiscoveredReceiver: Identifiable, Equatable {
     public var host: String
     /// From the Bonjour resolve, which answers on one interface only
     public var addresses: [String]
+    /// The receiver's lasting identity; pairing keys follow it
+    public var deviceID = ""
 }
 
 /// Bonjour browse + resolve for receivers; publishes on main queue
@@ -54,7 +56,7 @@ final class Discovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
         func text(_ key: String) -> String { txt[key].flatMap { String(data: $0, encoding: .utf8) } ?? "" }
         let addresses = (sender.addresses ?? []).compactMap(Discovery.ip(from:))
         resolved[sender.name] = DiscoveredReceiver(name: sender.name, model: text("model"), panel: text("panel"), port: port,
-                                                   host: sender.hostName ?? "", addresses: addresses)
+                                                   host: sender.hostName ?? "", addresses: addresses, deviceID: text("id"))
         publish()
     }
 

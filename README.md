@@ -4,7 +4,7 @@ Turn an iMac into an extended or mirrored display for an Apple Silicon Mac, at t
 
 - **5K at 60 fps** over Thunderbolt Bridge or USB networking, with no video codec on the path: the picture goes out as GPU texture blocks that the iMac's GPU draws directly.
 - **Slower links keep text sharp.** Still content stays lossless at native resolution; only the parts that move go out as HEVC or H.264 video.
-- **The Mac's sound plays on the iMac's speakers** at the Mac's own volume, and the iMac's brightness follows the Mac's.
+- **The Mac's sound plays on the iMac's speakers** at the Mac's own volume, and the iMac's brightness follows the Mac's or is set on its own.
 - **Picture quality tools**: gradient smoothing for 8-bit banding, a 10-bit output, bicubic scaling for reduced streams.
 - **A quality test** that measures the highest resolution and frame rate your link sustains.
 - **English and Korean** interface.
@@ -41,7 +41,7 @@ The sender creates a virtual display the size of the iMac's panel, captures it w
 
 | Link | Picture path |
 |---|---|
-| Wired, 2.5 Gbps or more: Thunderbolt Bridge, USB networking, fast Ethernet | **Tiles.** Changed regions are encoded on the GPU into BC7 texture blocks and sent as 64 × 64 tiles. The iMac copies the blocks straight into a BC7 texture and draws it. There is no decoder, so there is no codec latency, and the picture is lossy only within each 4 × 4 block. |
+| Wired, fast enough for the panel (2.5 Gbps for 5K at 60 Hz, scaled by pixels and refresh): Thunderbolt Bridge, USB networking, fast Ethernet | **Tiles.** Changed regions are encoded on the GPU into BC7 texture blocks and sent as 64 × 64 tiles. The iMac copies the blocks straight into a BC7 texture and draws it. There is no decoder, so there is no codec latency, and the picture is lossy only within each 4 × 4 block. |
 | Slower: Gigabit Ethernet, Wi-Fi | **Hybrid.** Still tiles go out as BC7, as above. Tiles that keep moving switch to a video layer (VideoToolbox HEVC, 10-bit where the iMac decodes it, otherwise H.264) and return to lossless BC7 once they settle. The iMac draws video in the moving tiles and the BC7 picture everywhere else. |
 
 The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, the sender looks for the receiver on each of its network interfaces and prefers Thunderbolt, then USB, Ethernet and Wi-Fi.
@@ -65,13 +65,14 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 
 **Sound and controls**
 - The Mac's sound plays on the iMac's speakers (the Mac stays silent meanwhile), with a switch at the top of the menu. The iMac's volume and mute follow the Mac's volume keys and menu bar, and go back to the iMac's own level when the sound stops.
-- The iMac's brightness follows the Mac's built-in display: brightness keys, Control Center and auto-brightness. The two panels are matched in nits, not by slider position, from peaks each Mac reports: the MacBook's brightness controller, and the iMac's own luminance measured once at launch. It stays where it is after a disconnect; a Mac without a built-in display leaves the iMac's own.
+- The iMac's brightness follows the Mac's built-in display: brightness keys, Control Center and auto-brightness. The two panels are matched in nits, not by slider position, from peaks each Mac reports: the MacBook's brightness controller, and the iMac's own luminance measured once at launch. It stays where it is after a disconnect; a Mac without a built-in display, or with its lid closed, leaves the iMac's own. The menu has a slider for the MacBook's brightness, which the iMac follows. With the iMac as the main screen, turn off following: a second slider sets the iMac on its own, so the MacBook can be dimmed. It starts at the iMac's current level, and the setting holds across connections.
 - The pointer travels on a connection of its own and never waits behind frames.
 - Disconnecting, from either Mac or by quitting, plays the power-off over the live picture and sound; the sound comes back to the Mac as the iMac's screen turns black.
 
 **Everyday use**
 - Connect automatically to the last receiver when it appears, after sleep and after the link drops.
 - Open at login, on both Macs.
+- Pairing on shared networks: over Ethernet and Wi-Fi a receiver takes only Macs paired with it, so an office full of receivers stays each person's own. The first connection shows a 6-digit code on the iMac's screen to type on the Mac; after that both sides prove a key kept in the keychain, the Mac checking the iMac as well. Thunderbolt and USB cables connect without pairing. A wrong code shakes the boxes and can be typed again; five lock pairing for ten minutes, each later lock doubling up to a day.
 - The receiver can refuse Wi-Fi connections, and can turn its display off when the sender disconnects.
 - A live telemetry menu: link, throughput, measured link speed, latency, jitter, retransmits, link quality, frame rates, resolution, how moving areas are sent, CPU, memory and GPU on both Macs.
 - An optional frame rate and throughput readout in the menu bar, at a fixed width so the menu does not shift.
@@ -82,9 +83,9 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 
 **Send only what changed.** ScreenCaptureKit reports the changed regions of each frame. Only tiles under them are encoded, then compared block by block on the GPU against the last picture sent; tiles that differ go out as runs. A rolling refresh re-checks 1/64 of the screen per frame.
 
-**Motion follows the link.** A tile that changes again within 50 ms counts as moving. On the tile path, moving tiles stay BC7 while they fit half the measured link at 60 fps (on Thunderbolt, 85% of a 5K screen can move at full quality); past that they go out as BC1 at half the size. Once a tile has been still for 100 ms, its lossless BC7 version follows. LZ4 runs only when a frame would not fit the link otherwise.
+**Motion follows the link.** A tile that changes again within 50 ms counts as moving. On the tile path, moving tiles stay BC7 while they fit half the measured link at the iMac's refresh rate (on Thunderbolt, 85% of a 5K screen can move at full quality); past that they go out as BC1 at half the size. Once a tile has been still for 100 ms, its lossless BC7 version follows. LZ4 runs only when a frame would not fit the link otherwise.
 
-**Video only where it moves.** On the hybrid path a per-tile mask tells the iMac which tiles show video. The video layer is 4K, 1440p or 1080p, the largest the link's bitrate fills at 0.15 bit per pixel at 60 fps, and the iMac maps it straight onto the panel. The VideoToolbox encoder is pipelined, frames leave in order, and there are no periodic keyframes: TCP loses nothing, and the iMac asks for a keyframe only if decoding fails. Every encoder input is tagged BT.709, so video tiles match the BC7 tiles around them within one level.
+**Video only where it moves.** On the hybrid path a per-tile mask tells the iMac which tiles show video. The video layer is 4K, 1440p or 1080p, the largest the link's bitrate fills at 0.15 bit per pixel per frame that this Mac's encoder also keeps up with: on the first hybrid connection it encodes half a second of moving test frames at that size (about 0.35 s, once per launch) and steps down if it falls short. The iMac maps the layer straight onto the panel. The VideoToolbox encoder is pipelined, frames leave in order, and there are no periodic keyframes: TCP loses nothing, and the iMac asks for a keyframe only if decoding fails. Every encoder input is tagged BT.709, so video tiles match the BC7 tiles around them within one level.
 
 **Never queue stale frames.** At most two frames are on the wire or in the encoder. A newer capture replaces one that has not been sent yet, so after a stall the iMac jumps to the newest picture instead of replaying old ones. The receiver uploads frames that have newer ones queued behind them without drawing them, so its display refresh never limits how fast frames are taken in.
 
@@ -94,7 +95,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 
 **Cheap work on the iMac.** Gradient smoothing is kept in a 10-bit texture and recomputed only for tiles that changed and their neighbours within reach: a still screen costs one texture sample per pixel (iMac Radeon Pro 570, 5K, medium: 10–14% GPU instead of 63% when every pixel was recomputed each frame). Bicubic scaling runs only when the picture is scaled up.
 
-**Sound without crackle.** A Core Audio process tap captures the Mac's output and mutes it locally. 16-bit PCM in packets of about 10 ms travels on the pointer's connection, about 1.5 Mbps at 48 kHz stereo. The iMac plays it through a 30 ms jitter buffer that corrects clock drift by resampling 0.2% faster or slower instead of dropping samples.
+**Sound without crackle.** A Core Audio process tap captures the Mac's output and mutes it locally. 16-bit PCM in packets of about 10 ms travels on the pointer's connection, about 1.5 Mbps at 48 kHz stereo. The iMac plays it through a jitter buffer that starts at 30 ms, grows by half after each gap up to 150 ms for jittery Wi-Fi, shrinks again after 30 s without one, and corrects clock drift by resampling 0.2% faster or slower instead of dropping samples.
 
 ## Performance
 
@@ -150,19 +151,21 @@ sudo networksetup -setMTU "Thunderbolt Bridge" 9000
 
 ### Settings
 
-Sender (**Settings…** in the menu):
+Sender (**Settings** in the menu opens them in place; **Back** returns):
 
 | Setting | Choices |
 |---|---|
+| Use as | Extend or Mirror; mirroring fits this Mac or the receiver, both named. |
 | Size | Larger text, Default, More space, Most space. On a 5K iMac these look like 2048, 2560, 2880 and 3200 points wide. |
 | Transfer resolution | Automatic (default), panel resolution, or four fifths, as described under [Features](#features). Takes effect by reconnecting. |
 | Connect automatically | Connects to the receiver you last connected to. **Disconnect** pauses it until that receiver goes away. |
 | Open at login | Starts Afterscreen at login. |
 | Arrange Displays… | Opens System Settings for arrangement and the main display. |
 | Menu bar | The icon only (default), or also the frame rate and throughput. |
+| Paired receivers | Each with Remove. |
 | Language | System, English or Korean. |
 
-In the menu while streaming: sound on the iMac, the iMac brightness it follows, the link, Use as (Extend or Mirror), and Smooth gradients (medium by default).
+In the menu while streaming: sound on the receiver with this Mac's volume slider, brightness sliders for this Mac and, when not following, the receiver, the link, Use as (Extend or Mirror), and Smooth gradients (medium by default).
 
 Receiver (**Settings…** in its menu):
 

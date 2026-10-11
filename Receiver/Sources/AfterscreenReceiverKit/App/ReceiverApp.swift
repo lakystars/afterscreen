@@ -11,8 +11,16 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private var screen: ReceiverScreen?
     private var hardware: Welcome!
     private var terminateSignal: DispatchSourceSignal?
+    private var screenSignal: DispatchSourceSignal?
     /// Keep first: sets UI language used by later properties
     private let settings = ReceiverSettings()
+    /// Paired Macs' keys, in the login keychain
+    private let pairings = KeychainPairingStore(service: "io.github.lakystars.afterscreen.receiver.pairing")
+    /// Network guesses; cables count apart
+    /// LAN guesses cannot lock out a cabled Mac
+    private let pairingLimiter = PairingLimiter()
+    private let cablePairingLimiter = PairingLimiter()
+    private let codeWindow = PairingCodeWindow()
     private var lastSummary = L10n.t("No session yet", "아직 연결한 적 없음")
     private var stateLine = L10n.t("Starting…", "시작하는 중…")
 
@@ -35,15 +43,25 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         terminate.setEventHandler { NSApp.terminate(nil) }
         terminate.resume()
         terminateSignal = terminate
-        let name = Host.current().localizedName ?? "iMac"
+        // `kill -USR2 <pid>`: this app's windows to /tmp/afterscreen-screen.png
+        // SSH captures miss app windows; an app may capture its own
+        signal(SIGUSR2, SIG_IGN)
+        let screenshot = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        screenshot.setEventHandler { ReceiverAppDelegate.saveScreen() }
+        screenshot.resume()
+        screenSignal = screenshot
+        let name = ComputerName.current
         hardware = HardwareInfo.welcome(name: name)
-        // Development: report another panel, e.g. --panel 5120x2880
+        // Development: report another panel, e.g. --panel 2880x1800@2
+        // Scale after "@"; this Mac's when left out
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--panel"), i + 1 < args.count {
-            let wh = args[i + 1].split(separator: "x").compactMap { Int($0) }
+            let spec = args[i + 1].split(separator: "@")
+            let wh = spec[0].split(separator: "x").compactMap { Int($0) }
             if wh.count == 2 {
                 hardware.panelPixels = PixelSize(width: wh[0], height: wh[1])
-                hardware.panelPoints = HardwareInfo.points(forPanel: hardware.panelPixels)
+                let scale = spec.count > 1 ? Int(spec[1]) ?? HardwareInfo.backingScale : HardwareInfo.backingScale
+                hardware.panelPoints = HardwareInfo.points(forPanel: hardware.panelPixels, scale: scale)
             }
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -65,7 +83,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self?.settings.hudCollapsed = collapsed
         }
         guard screen != nil else {
-            state("Metal is unavailable on this Mac", "이 Mac에서는 Metal을 쓸 수 없습니다")
+            state("Metal is unavailable on \(ComputerName.current)", "\(ComputerName.current)에서는 Metal을 쓸 수 없습니다")
             return
         }
         do {
@@ -91,6 +109,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         let txt: [String: Data] = [
             "model": Data(hardware.marketingName.utf8),
             "panel": Data("\(hardware.panelPixels.width)x\(hardware.panelPixels.height)".utf8),
+            "id": Data(settings.deviceID.utf8),
         ]
         service.setTXTRecord(NetService.data(fromTXTRecord: txt))
         service.delegate = self
@@ -106,12 +125,29 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private func accept(_ connection: Connection) {
         if let session = session { return session.offerChannel(connection) }
         guard let screen = screen else { return refuse(connection, L10n.t("Receiver display is unavailable", "수신기 화면을 쓸 수 없습니다")) }
-        let link = connection.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
+        let local = connection.localInterfaceName
+        let link = local.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
         guard settings.accepts(link) else { return refuse(connection, L10n.t("This receiver accepts Thunderbolt, USB and Ethernet only",
                                                                               "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다")) }
         screen.presentation = settings.presentation
         screen.effect = settings.effect
-        let session = ReceiverSession(connection: connection, hardware: hardware, display: screen)
+        // A point-to-point cable is proof enough; anything else pairs
+        // Unclassified links pair too: fail closed
+        // Packets must arrive on the cable, not via Wi-Fi
+        let onCable = (link == .thunderbolt || link == .usb) && local != nil && connection.peerInterfaceName == local
+        let cable = onCable || link == .loopback
+        let auth = ReceiverAuth(receiverID: settings.deviceID, required: settings.pairedOnly && !cable,
+                                store: pairings, limiter: cable ? cablePairingLimiter : pairingLimiter) { [weak self] code, sender in
+            guard let self = self else { return }
+            guard let code = code else { return self.codeWindow.hide() }
+            // Development: tests read the code from the log
+            if ProcessInfo.processInfo.environment["AFTERSCREEN_LOG_PAIRING_CODE"] != nil {
+                FileHandle.standardError.write(Data("[receiver] Pairing code \(code)\n".utf8))
+            }
+            self.state("Pairing with \(sender)", "\(sender)와(과) 페어링 중")
+            self.codeWindow.show(code: code, sender: sender)
+        }
+        let session = ReceiverSession(connection: connection, hardware: hardware, display: screen, auth: auth)
         session.onPeer = { [weak self] hello in
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
             self?.showStatus(link: link)
@@ -195,7 +231,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         }
         stoppedHere = true
         // Power-off over the live stream; bye at black
-        let stop = { session.stop(reason: L10n.t("Stopped on the iMac", "iMac에서 연결을 끊었습니다"), pause: true) }
+        let stop = { session.stop(reason: L10n.t("Stopped on \(ComputerName.current)", "\(ComputerName.current)에서 연결을 끊었습니다"), pause: true) }
         guard let screen = screen else { return stop() }
         screen.powerOff(done: stop)
     }
@@ -208,7 +244,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     /// Raises the window above a screen-covering stream
     private func openSettings(overStream: Bool) {
         if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: ReceiverSettingsView(settings: settings)))
+            let window = NSWindow(contentViewController: NSHostingController(rootView: ReceiverSettingsView(settings: settings, pairings: pairings)))
             window.title = L10n.t("Afterscreen Receiver Settings", "Afterscreen Receiver 설정")
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
@@ -237,5 +273,16 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         pmset.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
         pmset.arguments = ["displaysleepnow"]
         try? pmset.run()
+    }
+
+    /// This app's visible windows over transparency, shadows included
+    /// Own windows only: no Screen Recording prompt
+    private static func saveScreen() {
+        // Window IDs as raw values, as the call takes them
+        var ids = NSApp.windows.filter(\.isVisible).map { UnsafeRawPointer(bitPattern: UInt($0.windowNumber)) }
+        guard !ids.isEmpty, let list = CFArrayCreate(nil, &ids, ids.count, nil),
+              let image = CGImage(windowListFromArrayScreenBounds: CGDisplayBounds(CGMainDisplayID()), windowArray: list, imageOption: .bestResolution),
+              let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: URL(fileURLWithPath: "/tmp/afterscreen-screen.png"))
     }
 }

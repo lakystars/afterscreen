@@ -609,10 +609,11 @@ final class HardwareInfoTests: XCTestCase {
     }
 
     func testPanelPointsHalfOnRetina() {
-        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 5120, height: 2880)), PixelSize(width: 2560, height: 1440))
-        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 4096, height: 2304)), PixelSize(width: 2048, height: 1152))
-        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 2560, height: 1440)), PixelSize(width: 2560, height: 1440))
-        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 3600, height: 2338)), PixelSize(width: 1800, height: 1169))
+        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 5120, height: 2880), scale: 2), PixelSize(width: 2560, height: 1440))
+        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 4096, height: 2304), scale: 2), PixelSize(width: 2048, height: 1152))
+        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 2560, height: 1440), scale: 1), PixelSize(width: 2560, height: 1440))
+        // Retina below 3000 px: the scale decides, not the width
+        XCTAssertEqual(HardwareInfo.points(forPanel: PixelSize(width: 2880, height: 1800), scale: 2), PixelSize(width: 1440, height: 900))
     }
 
     func testMain10ProbeFindsTheHardwareDecoder() {

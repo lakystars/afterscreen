@@ -33,14 +33,15 @@ public final class VirtualDisplay {
     private let hiDPI: Bool
 
     /// `modes` in points; HiDPI backing is 2× the points
-    public init(name: String, streamPixels: PixelSize, hiDPI: Bool, modes: [PixelSize], initial: PixelSize, refresh: Double = 60) throws {
+    /// `millimeters`: the receiver panel's physical size
+    public init(name: String, streamPixels: PixelSize, hiDPI: Bool, modes: [PixelSize], initial: PixelSize, millimeters: PixelSize,
+                refresh: Double = 60) throws {
         let scale = hiDPI ? 2 : 1
         let desc = CGVirtualDisplayDescriptor()
         desc.name = name
         desc.maxPixelsWide = UInt32(max(streamPixels.width, (modes.map(\.width).max() ?? 0) * scale))
         desc.maxPixelsHigh = UInt32(max(streamPixels.height, (modes.map(\.height).max() ?? 0) * scale))
-        // 27" panel; macOS uses it only for physical size hints
-        desc.sizeInMillimeters = CGSize(width: 597, height: 336)
+        desc.sizeInMillimeters = CGSize(width: millimeters.width, height: millimeters.height)
         desc.vendorID = 0x5056
         desc.productID = 0x4C4B
         desc.serialNum = UInt32(truncatingIfNeeded: streamPixels.width &* 31 &+ streamPixels.height)

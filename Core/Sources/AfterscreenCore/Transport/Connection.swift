@@ -393,6 +393,11 @@ public final class Connection {
         address(getsockname).flatMap(Interfaces.name(forLocalAddress:))
     }
 
+    /// Interface the peer's packets arrive on; nil when unknown
+    public var peerInterfaceName: String? {
+        address(getpeername).flatMap(Interfaces.arrivalName(forPeer:))
+    }
+
     /// Remote IP literal
     public var peerAddress: String? {
         address(getpeername).flatMap(Interfaces.string)

@@ -5,17 +5,28 @@ import AfterscreenCore
 /// Interleaved 16-bit frames between the network and the audio queue
 /// Silence until `target` frames are buffered, again after an underrun
 /// Playback then starts from the newest `target` frames
-/// Above 2× `target` reads 0.2% fast; below half, 0.2% slow
+/// Above `target` + `catchUpMargin`: 0.2% fast; below half: 0.2% slow
 /// Interpolates between frames, so clock drift either way
 /// causes neither skipped samples (crackle) nor underruns
-/// Past `limit`, drops the oldest down to `target`
+/// Past `limit` (`target` + `trimMargin`): oldest dropped to `target`
+/// Fixed margins: a grown target adds no extra lag
+/// Each underrun grows `target` by half, up to `maxTarget`
+/// `calmFrames` played without one shrink it a tenth
+/// Cables stay at the floor; Wi-Fi jitter buys itself room
 struct AudioJitterBuffer {
     static let catchUp = 1.002
     static let holdBack = 0.998
 
     let channels: Int
-    let target: Int
-    let limit: Int
+    let minTarget: Int
+    let maxTarget: Int
+    let calmFrames: Int
+    private(set) var target: Int
+    let catchUpMargin: Int
+    let trimMargin: Int
+    var limit: Int { target + trimMargin }
+    /// Frames played since the last underrun or shrink
+    private var calm = 0
     private(set) var underruns = 0
     private var samples: [Int16] = []
     private var head = 0
@@ -23,10 +34,15 @@ struct AudioJitterBuffer {
     private var phase = 0.0
     private var primed = false
 
-    init(channels: Int, target: Int, limit: Int) {
+    init(channels: Int, target: Int, limit: Int, maxTarget: Int? = nil, calmFrames: Int = .max) {
         self.channels = channels
+        minTarget = target
+        self.maxTarget = max(target, maxTarget ?? target)
         self.target = target
-        self.limit = limit
+        // As first built: catch up past twice the target
+        catchUpMargin = target
+        trimMargin = max(1, limit - target)
+        self.calmFrames = calmFrames
     }
 
     var bufferedFrames: Int { (samples.count - head) / channels }
@@ -48,7 +64,7 @@ struct AudioJitterBuffer {
             restart()
         }
         let level = bufferedFrames
-        let step = level > target * 2 ? AudioJitterBuffer.catchUp : (level < target / 2 ? AudioJitterBuffer.holdBack : 1)
+        let step = level > target + catchUpMargin ? AudioJitterBuffer.catchUp : (level < target / 2 ? AudioJitterBuffer.holdBack : 1)
         var written = 0
         while written < frames {
             let available = bufferedFrames
@@ -65,10 +81,19 @@ struct AudioJitterBuffer {
             head += whole * channels
             phase -= Double(whole)
         }
-        guard written < frames else { return }
+        guard written < frames else { return settle(frames) }
         for i in (written * channels)..<(frames * channels) { out[i] = 0 }
         primed = false
         underruns += 1
+        target = min(maxTarget, target + max(1, target / 2))
+        calm = 0
+    }
+
+    private mutating func settle(_ played: Int) {
+        calm += played
+        guard calm >= calmFrames, target > minTarget else { return }
+        target = max(minTarget, target - max(1, target / 10))
+        calm = 0
     }
 
     private mutating func restart() {
@@ -81,8 +106,12 @@ struct AudioJitterBuffer {
 final class AudioPlayer {
     /// Buffered before playback: room for network and busy receiver
     static let targetSeconds = 0.03
-    /// Maximum buffered audio
-    static let limitSeconds = 0.15
+    /// Ceiling the target grows to after underruns
+    static let maxTargetSeconds = 0.15
+    /// Buffered this far past the target, the oldest drop
+    static let trimSeconds = 0.12
+    /// Played this long without an underrun, the target shrinks
+    static let calmSeconds = 30.0
     /// Three queue buffers of 10 ms
     static let bufferSeconds = 0.01
 
@@ -145,8 +174,9 @@ final class AudioPlayer {
     /// Under the lock, with no queue running
     private func start(rate: Int, channels: Int) {
         format = (rate, channels)
-        buffer = AudioJitterBuffer(channels: channels, target: Int(Double(rate) * AudioPlayer.targetSeconds),
-                                   limit: Int(Double(rate) * AudioPlayer.limitSeconds))
+        let target = Int(Double(rate) * AudioPlayer.targetSeconds)
+        buffer = AudioJitterBuffer(channels: channels, target: target, limit: target + Int(Double(rate) * AudioPlayer.trimSeconds),
+                                   maxTarget: Int(Double(rate) * AudioPlayer.maxTargetSeconds), calmFrames: Int(Double(rate) * AudioPlayer.calmSeconds))
         var asbd = AudioStreamBasicDescription(mSampleRate: Double(rate), mFormatID: kAudioFormatLinearPCM,
                                                mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
                                                mBytesPerPacket: UInt32(2 * channels), mFramesPerPacket: 1,

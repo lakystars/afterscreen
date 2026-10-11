@@ -20,7 +20,7 @@ final class VideoEncoder {
     /// Scales captured frames to layer size into the encoder pool
     private var transfer: VTPixelTransferSession?
 
-    init?(layer: VideoLayer) {
+    init?(layer: VideoLayer, fps: Double) {
         self.layer = layer
         let attributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: layer.tenBit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -43,7 +43,7 @@ final class VideoEncoder {
             kVTCompressionPropertyKey_ProfileLevel: layer.codec == .h264 ? kVTProfileLevel_H264_High_AutoLevel
                 : (layer.tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel),
             kVTCompressionPropertyKey_AverageBitRate: layer.bitrate,
-            kVTCompressionPropertyKey_ExpectedFrameRate: 60,
+            kVTCompressionPropertyKey_ExpectedFrameRate: fps,
             // TCP is lossless; receiver requests a keyframe on decode failure
             // Both limits at 0 ("none"): HEVC keys every 30 frames
             kVTCompressionPropertyKey_MaxKeyFrameInterval: Int32.max,

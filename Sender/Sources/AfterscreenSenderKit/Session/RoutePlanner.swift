@@ -5,9 +5,12 @@ import dnssd
 
 public struct LocalInterface: Equatable {
     public var name: String
+    /// IPv4; empty on an IPv6-only interface
     public var ip: String
     public var netmask: String
     public var kind: LinkKind
+    /// IPv6 addresses, unscoped
+    public var v6: [String] = []
 }
 
 /// Receiver address; `via`: answering local interface if mDNS reported it
@@ -33,23 +36,32 @@ public enum RoutePlanner {
 
     /// Address that answered on a known interface routes only there
     /// Link-local subnets repeat on every cable
+    /// IPv4 first; IPv6 where mDNS answered on that interface
+    /// A Thunderbolt Bridge with IPv4 off still routes
     public static func plan(local: [LocalInterface], remote: [RemoteAddress]) -> [Route] {
         let remoteV4 = remote.filter { ipv4($0.ip) != nil }
-        if remoteV4.contains(where: { r in local.contains { $0.ip == r.ip } }) {
-            return [Route(interface: "lo0", address: "127.0.0.1", kind: .loopback)]
+        let remoteV6 = remote.filter { ipv4($0.ip) == nil }
+        let own = { (r: RemoteAddress) in local.contains { !$0.ip.isEmpty && $0.ip == r.ip || $0.v6.contains(unscoped(r.ip)) } }
+        if remote.contains(where: own) {
+            return [Route(interface: Interfaces.loopbackName ?? "", address: "127.0.0.1", kind: .loopback)]
         }
         var routes: [Route] = []
         for kind in priority {
             for iface in local where iface.kind == kind {
-                guard let ip = ipv4(iface.ip), let mask = ipv4(iface.netmask) else { continue }
-                let match = remoteV4.first { r in
+                if let ip = ipv4(iface.ip), let mask = ipv4(iface.netmask), let match = remoteV4.first(where: { r in
                     r.via.map { $0 == iface.name } ?? (ipv4(r.ip).map { $0 & mask == ip & mask } ?? false)
+                }) {
+                    routes.append(Route(interface: iface.name, address: match.ip, kind: kind))
+                } else if let match = remoteV6.first(where: { $0.via == iface.name }) {
+                    routes.append(Route(interface: iface.name, address: match.ip, kind: kind))
                 }
-                if let match = match { routes.append(Route(interface: iface.name, address: match.ip, kind: kind)) }
             }
         }
         return routes
     }
+
+    /// "fe80::1%bridge0" → "fe80::1"
+    static func unscoped(_ ip: String) -> String { ip.split(separator: "%").first.map(String.init) ?? ip }
 
     /// Links in route order, each once
     public static func kinds(_ routes: [Route]) -> [LinkKind] {
@@ -101,7 +113,8 @@ public enum RoutePlanner {
         return kind
     }
 
-    /// mDNS host's IPv4 addresses on each of `interfaces`
+    /// mDNS host's addresses on each of `interfaces`, IPv4 and IPv6
+    /// Link-local IPv6 comes scoped: "fe80::1%bridge0"
     /// Gathered for `wait` seconds
     /// Bonjour resolve reports one interface
     /// All-interface lookup stops at the first answer, often Wi-Fi
@@ -114,12 +127,13 @@ public enum RoutePlanner {
         let queue = DispatchQueue(label: "afterscreen.lookup")
         let services: [DNSServiceRef] = host.isEmpty ? [] : interfaces.compactMap { name in
             var ref: DNSServiceRef?
-            let error = DNSServiceGetAddrInfo(&ref, 0, if_nametoindex(name), DNSServiceProtocol(kDNSServiceProtocol_IPv4), host, { _, flags, index, error, _, address, _, context in
+            let both = DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6)
+            let error = DNSServiceGetAddrInfo(&ref, 0, if_nametoindex(name), both, host, { _, flags, index, error, _, address, _, context in
             guard error == kDNSServiceErr_NoError, flags & DNSServiceFlags(kDNSServiceFlagsAdd) != 0,
                   let address = address, let context = context else { return }
-            var ip = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var ip = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
-            guard getnameinfo(address, socklen_t(MemoryLayout<sockaddr_in>.size), &ip, socklen_t(ip.count), nil, 0, NI_NUMERICHOST) == 0,
+            guard getnameinfo(address, socklen_t(address.pointee.sa_len), &ip, socklen_t(ip.count), nil, 0, NI_NUMERICHOST) == 0,
                   if_indextoname(index, &name) != nil else { return }
             Unmanaged<Found>.fromOpaque(context).takeUnretainedValue().addresses.append(RemoteAddress(String(cString: ip), via: String(cString: name)))
             }, context)
@@ -134,34 +148,55 @@ public enum RoutePlanner {
         }
     }
 
-    /// Up IPv4 interfaces with their link kind
+    /// Up interfaces with IPv4 or IPv6, and their link kind
     public static func currentInterfaces() -> [LocalInterface] {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0 else { return [] }
         defer { freeifaddrs(list) }
-        var result: [LocalInterface] = []
+        var byName: [String: LocalInterface] = [:]
+        var order: [String] = []
         var ethernet: Set<String>?
         var cursor = list
         while let ifa = cursor {
             cursor = ifa.pointee.ifa_next
-            guard let addr = ifa.pointee.ifa_addr, addr.pointee.sa_family == sa_family_t(AF_INET),
-                  let mask = ifa.pointee.ifa_netmask,
-                  (ifa.pointee.ifa_flags & UInt32(IFF_UP)) != 0,
+            guard let addr = ifa.pointee.ifa_addr, (ifa.pointee.ifa_flags & UInt32(IFF_UP)) != 0,
                   (ifa.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
+            let family = Int32(addr.pointee.sa_family)
+            guard family == AF_INET || family == AF_INET6 else { continue }
             let name = String(cString: ifa.pointee.ifa_name)
-            let kind = kind(of: name) {
-                if ethernet == nil { ethernet = LinkClassifier.ethernetNames() }
-                return ethernet!
+            if byName[name] == nil {
+                let kind = kind(of: name) {
+                    if ethernet == nil { ethernet = LinkClassifier.ethernetNames() }
+                    return ethernet!
+                }
+                byName[name] = LocalInterface(name: name, ip: "", netmask: "", kind: kind)
+                order.append(name)
             }
-            result.append(LocalInterface(name: name, ip: string(addr), netmask: string(mask), kind: kind))
+            if family == AF_INET, let mask = ifa.pointee.ifa_netmask {
+                byName[name]?.ip = string(addr)
+                byName[name]?.netmask = string(mask)
+            } else if family == AF_INET6 {
+                byName[name]?.v6.append(unscoped(string(addr)))
+            }
         }
-        return result
+        // IPv6 alone: configured links only; awdl0, utun stay out
+        let configured = { (name: String) in
+            if ethernet == nil { ethernet = LinkClassifier.ethernetNames() }
+            return ethernet!.contains(name) || LinkClassifier.wifiNames.contains(name) || Interfaces.isBridge(name)
+        }
+        return order.compactMap { byName[$0] }.filter { !$0.ip.isEmpty || configured($0.name) }
     }
 
+    /// Numeric host of an IPv4 or IPv6 socket address
+    /// IPv4 by copy: netmasks arrive with a trimmed sa_len
     private static func string(_ sa: UnsafeMutablePointer<sockaddr>) -> String {
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        if Int32(sa.pointee.sa_family) == AF_INET6 {
+            guard getnameinfo(sa, socklen_t(MemoryLayout<sockaddr_in6>.size), &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 else { return "" }
+            return String(cString: buffer)
+        }
         var sin = sockaddr_in()
         memcpy(&sin, sa, MemoryLayout<sockaddr_in>.size)
-        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
         inet_ntop(AF_INET, &sin.sin_addr, &buffer, socklen_t(buffer.count))
         return String(cString: buffer)
     }

@@ -64,7 +64,6 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     /// Clicks in other apps while the popover is open
     private var outsideClicks: Any?
     private let model = AppModel()
-    private var settingsWindow: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
     private let focusKeeper = PopoverFocusKeeper()
     private var wasStreaming = false
@@ -96,7 +95,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
             NSApp.activate(ignoringOtherApps: true)
             self?.popover.contentViewController?.view.window?.makeKey()
         }
-        popover.contentViewController = NSHostingController(rootView: PopoverView(model: model) { [weak self] in self?.showSettings() })
+        popover.contentViewController = NSHostingController(rootView: PopoverView(model: model))
         // Published fires before the value is stored
         // Read the title on the next run loop turn
         model.$snapshot.map { _ in () }.merge(with: model.settings.$menuBarStats.map { _ in () })
@@ -109,6 +108,10 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
                 let length = self.model.settings.menuBarStats && self.model.snapshot.isStreaming ? self.statsWidth : NSStatusItem.variableLength
                 if self.statusItem.length != length { self.statusItem.length = length }
             }.store(in: &cancellables)
+        // Code field in front while the iMac shows the code
+        model.$pairingWith.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] name in
+            if name != nil { self?.showPopover() }
+        }.store(in: &cancellables)
     }
 
     /// Icon plus widest stats title
@@ -120,45 +123,38 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     }()
 
     @objc private func toggle() {
-        guard let button = statusItem.button else { return }
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            model.screenRecordingGranted = CGPreflightScreenCaptureAccess()
-            model.refreshLinks()
-            // Menu bar app does not activate on its own
-            // Otherwise the first click activates it, dismissing its open menu
-            // Transient popover needs activation to see deactivation and close
-            NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-            outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-                self?.popover.performClose(nil)
-            }
+            showPopover()
+        }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button, !popover.isShown else { return }
+        model.screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        model.refreshLinks()
+        // Menu bar app does not activate on its own
+        // Otherwise the first click activates it, dismissing its open menu
+        // Transient popover needs activation to see deactivation and close
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.popover.performClose(nil)
         }
     }
 
     public func popoverDidClose(_ notification: Notification) {
         if let monitor = outsideClicks { NSEvent.removeMonitor(monitor) }
         outsideClicks = nil
+        // Reopens on the first level
+        model.showsSettings = false
     }
 
-    private func showSettings() {
-        popover.performClose(nil)
-        // Rebuilt per open: size labels follow the last-seen receiver
-        let content = NSHostingController(rootView: SettingsView(settings: model.settings, panelPoints: model.panelPoints))
-        if let window = settingsWindow {
-            window.contentViewController = content
-        } else {
-            let window = NSWindow(contentViewController: content)
-            window.title = L10n.t("Afterscreen Settings", "Afterscreen 설정")
-            window.styleMask = [.titled, .closable]
-            window.isReleasedWhenClosed = false
-            window.center()
-            settingsWindow = window
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+    /// Development: codes from a file, as if typed
+    public func typePairingCodes(from path: String) {
+        model.typePairingCodes(from: path)
     }
 
     /// Automation hook: connect or test first receiver containing `match`

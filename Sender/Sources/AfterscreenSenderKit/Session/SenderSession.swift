@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 import AfterscreenCore
 
@@ -38,8 +39,12 @@ public struct SenderSnapshot {
     public var soundOnReceiver = false
     /// Receiver output's level; nil while it keeps its own
     public var outputLevel: OutputLevel?
-    /// Receiver panel's brightness; nil while it keeps its own
-    public var brightness: Double?
+    /// Built-in panel level; nil without one or lid closed
+    public var macBrightness: Double?
+    /// Receiver showing a pairing code, by name
+    public var pairing: String?
+    /// Wrong codes typed for this pairing
+    public var wrongCodes = 0
 
     public init() {}
 
@@ -68,6 +73,13 @@ public final class SenderSession {
     public private(set) var pausedByReceiver = false
 
     let target: DiscoveredReceiver
+    /// This Mac's identity and kept keys, for pairing
+    private let senderID: String
+    private let pairings: PairingStoring
+    private let helloNonce = Pairing.nonce()
+    /// Welcome held until the receiver is proven or paired
+    private var pendingWelcome: Welcome?
+    private var pendingPair: (session: SymmetricKey, key: Data, transcript: Pairing.Transcript)?
     private let purpose: Purpose
     private let link: LinkKind?
     private var route: Route?
@@ -81,6 +93,10 @@ public final class SenderSession {
     private var deband: Deband
     /// Last brightness sent; the receiver's panel follows this Mac's
     private var brightnessSent: Double?
+    /// Receiver's own slider level; nil follows this Mac
+    private var ownBrightness: Double?
+    /// Largest video layer this Mac encodes at the receiver's rate
+    private var videoCap: PixelSize?
     /// Ignored by the quality test, which measures the panel
     private let resolution: StreamResolution
     private let role: DisplayRole
@@ -122,8 +138,11 @@ public final class SenderSession {
     /// `link`: link to use; nil or unreachable uses the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
                 sound: Bool = false, deband: Deband = .normal, resolution: StreamResolution = .panel,
-                role: DisplayRole = .extend, fit: MirrorFit = .mac) {
+                role: DisplayRole = .extend, fit: MirrorFit = .mac, ownBrightness: Double? = nil,
+                senderID: String = "", pairings: PairingStoring = MemoryPairingStore()) {
         self.target = target
+        self.senderID = senderID
+        self.pairings = pairings
         self.purpose = purpose
         self.displaySize = displaySize
         self.link = link
@@ -132,6 +151,15 @@ public final class SenderSession {
         self.resolution = resolution
         self.role = role
         self.fit = fit
+        self.ownBrightness = ownBrightness
+    }
+
+    /// Main queue: nil follows this Mac; a level sets the receiver's
+    public func setReceiverBrightness(_ level: Double?) {
+        ownBrightness = level
+        // Levels of the two modes are different scales
+        brightnessSent = nil
+        if snapshot.isStreaming { followBrightness() }
     }
 
     /// Receiver 8-bit step smoothing; sent at handshake and on change
@@ -199,11 +227,24 @@ public final class SenderSession {
     /// Not the slider: panels map the slider differently
     /// Change judged on the slider; dim nits steps are tiny
     /// Polled: macOS posts no public brightness change
-    /// No built-in panel: the receiver keeps its own
+    /// No built-in panel or lid closed: receiver keeps its own
+    /// A set level goes as the receiver's slider, no nits
     private func followBrightness() {
-        guard let panel = PanelBrightness.builtIn, SenderSession.brightnessChanged(panel.level, from: brightnessSent) else { return }
+        let panel = PanelBrightness.builtIn
+        if snapshot.macBrightness != panel?.level { update { $0.macBrightness = panel?.level } }
+        if let own = ownBrightness {
+            guard SenderSession.brightnessChanged(own, from: brightnessSent) else { return }
+            brightnessSent = own
+            connection?.send(Message(type: .brightness, payload: BrightnessWire.encode(PanelLight(nits: nil, level: own))))
+            return
+        }
+        guard let panel = panel else {
+            // Resent once the panel reads again
+            brightnessSent = nil
+            return
+        }
+        guard SenderSession.brightnessChanged(panel.level, from: brightnessSent) else { return }
         brightnessSent = panel.level
-        update { $0.brightness = panel.level }
         let light = PanelLight(nits: PanelBrightness.builtInPeakNits.map { panel.linear * $0 }, level: panel.level)
         connection?.send(Message(type: .brightness, payload: BrightnessWire.encode(light)))
     }
@@ -279,14 +320,18 @@ public final class SenderSession {
             $0.mtu = Interfaces.mtu(route.interface)
             $0.state = L10n.t("Handshake", "연결 확인 중")
         }
-        let host = Host.current().localizedName ?? "Mac"
+        let host = ComputerName.current
         let os = ProcessInfo.processInfo.operatingSystemVersion
+        // Claimed as `expectsProof` judges: by ID or by name
+        // A receiver without the key shows a code, cables too
+        let paired = (!target.deviceID.isEmpty && pairings.key(for: target.deviceID) != nil) || pairings.pairs.contains { $0.name == target.name }
         connection?.send(.hello, json: Hello(protocolVersion: AfterscreenProtocol.version, name: host, model: HardwareModel.identifier,
-                           osVersion: "\(os.majorVersion).\(os.minorVersion)"))
+                                             osVersion: "\(os.majorVersion).\(os.minorVersion)", senderID: senderID, nonce: helloNonce,
+                                             paired: paired, repair: SenderSession.disowned.contains(target.deviceID) ? true : nil))
     }
 
     /// `relink`: new session follows at once; receiver keeps its picture
-    public func stop(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다"), relink: Bool = false) {
+    public func stop(reason: String = SenderSession.stoppedHere, relink: Bool = false) {
         guard let c = connection, !ended else { return end(reason) }
         // A closing session already powered the iMac off
         c.send(.bye, json: Bye(reason: reason, relink: relink && closing == nil))
@@ -298,7 +343,7 @@ public final class SenderSession {
     /// Main queue: a disconnect the iMac plays out
     /// Picture and sound stay live through its power-off
     /// Ends at its bye, as the screen turns black
-    public func close(reason: String = L10n.t("Stopped on this Mac", "이 Mac에서 연결을 끊었습니다")) {
+    public func close(reason: String = SenderSession.stoppedHere) {
         guard closing == nil else { return }
         guard snapshot.isStreaming, purpose == .display, let c = connection else { return stop(reason: reason) }
         closing = reason
@@ -315,6 +360,7 @@ public final class SenderSession {
         ended = true
         // A closing session ends with its own reason
         let reason = closing ?? reason
+        if snapshot.pairing != nil { update { $0.pairing = nil } }
         if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] session ended: \(reason)\n".utf8)) }
         timers.forEach { $0.cancel() }
         timers.removeAll()
@@ -352,10 +398,60 @@ public final class SenderSession {
             guard PathPolicy.isPlausible(welcome) else { return end(L10n.t("The receiver reported an invalid display size", "수신기가 잘못된 화면 크기를 보냈습니다")) }
             update { $0.peer = welcome }
             guard welcome.protocolVersion == AfterscreenProtocol.version else { return }
-            setDeband(deband)
-            if purpose == .display { openCursorChannel(token: welcome.channelToken) }
-            update { $0.state = L10n.t("Measuring the link", "링크 속도 측정 중") }
-            probe()
+            // A paired receiver must prove itself, never skip it
+            // A look-alike may take its name, ID while it sleeps
+            guard let challenge = welcome.auth else {
+                guard !SenderSession.expectsProof(pairedTarget: !target.deviceID.isEmpty && pairings.key(for: target.deviceID) != nil,
+                                                  pairedReceiver: welcome.receiverID.map { pairings.key(for: $0) != nil } ?? false,
+                                                  pairedName: pairings.pairs.contains { $0.name == target.name }) else {
+                    return stop(reason: L10n.t("No pairing proof came from \(welcome.name)", "\(welcome.name)에서 페어링 증명이 오지 않았습니다"))
+                }
+                return admitted(welcome)
+            }
+            guard let receiverID = welcome.receiverID else { return stop(reason: L10n.t("The receiver sent no identity", "수신기가 식별 정보를 보내지 않았습니다")) }
+            pendingWelcome = welcome
+            switch challenge.mode {
+            case .paired:
+                guard let key = pairings.key(for: receiverID) else {
+                    return stop(reason: L10n.t("\(ComputerName.current) lost its pairing with \(welcome.name); connect again to pair", "\(ComputerName.current)에 \(welcome.name) 페어링 정보가 없습니다. 다시 연결해 페어링하세요"))
+                }
+                connection?.send(.auth, json: AuthProof(mac: Pairing.proof(key: key, role: .sender, transcript: transcript(welcome))))
+                update { $0.state = L10n.t("Checking the pairing", "페어링 확인 중") }
+            case .pair:
+                update {
+                    $0.pairing = welcome.name
+                    $0.state = SenderSession.waitingForCode
+                }
+            }
+        case .authOK:
+            guard let welcome = pendingWelcome, let receiverID = welcome.receiverID, let key = pairings.key(for: receiverID),
+                  let proof = try? JSONWire.decode(AuthProof.self, from: m.payload),
+                  Pairing.matches(proof.mac, Pairing.proof(key: key, role: .receiver, transcript: transcript(welcome))) else {
+                return stop(reason: L10n.t("\(target.name)'s pairing proof did not match", "\(target.name)의 페어링 증명이 맞지 않습니다"))
+            }
+            pendingWelcome = nil
+            admitted(welcome)
+        case .paired:
+            guard let welcome = pendingWelcome, let receiverID = welcome.receiverID, let pair = pendingPair,
+                  let proof = try? JSONWire.decode(AuthProof.self, from: m.payload),
+                  Pairing.matches(proof.mac, Pairing.pairedProof(pair.session, transcript: pair.transcript)) else {
+                return stop(reason: L10n.t("The receiver did not confirm the pairing", "수신기가 페어링을 확인하지 않았습니다"))
+            }
+            guard pairings.save(pair.key, for: receiverID, name: welcome.name) else {
+                return stop(reason: L10n.t("\(ComputerName.current) could not keep the pairing", "\(ComputerName.current)에 페어링을 저장하지 못했습니다"))
+            }
+            SenderSession.disowned.remove(receiverID)
+            pendingWelcome = nil
+            pendingPair = nil
+            update { $0.pairing = nil }
+            admitted(welcome)
+        case .pairWrong:
+            guard pendingPair != nil else { return }
+            pendingPair = nil
+            update {
+                $0.wrongCodes += 1
+                $0.state = SenderSession.waitingForCode
+            }
         case .probeResult:
             guard let result = try? JSONWire.decode(ProbeResult.self, from: m.payload),
                   let welcome = snapshot.peer, let link = snapshot.link else { return }
@@ -376,10 +472,65 @@ public final class SenderSession {
         case .bye:
             let bye = try? JSONWire.decode(Bye.self, from: m.payload)
             pausedByReceiver = bye?.pause ?? false
+            SenderSession.disowned.formUnion(SenderSession.disownedBy(bye, receiverID: pendingWelcome?.receiverID))
             end(bye?.reason ?? "Receiver stopped")
         default:
             break
         }
+    }
+
+    public static var stoppedHere: String { L10n.t("Stopped on \(ComputerName.current)", "\(ComputerName.current)에서 연결을 끊었습니다") }
+
+    /// The pairing card names the receiver and the error
+    static var waitingForCode: String { L10n.t("Waiting for the code", "코드 입력 대기 중") }
+
+    /// Receivers whose kept key failed its proof; main queue
+    /// Key stays: a look-alike's bye cannot lift the proof
+    /// The next hello asks the real receiver for a code
+    static var disowned: Set<String> = []
+
+    /// IDs a bye marks for pairing anew; deletes nothing
+    static func disownedBy(_ bye: Bye?, receiverID: String?) -> Set<String> {
+        guard bye?.repair == true, let id = receiverID else { return [] }
+        return [id]
+    }
+
+    /// Known by key or name: it must answer a challenge
+    static func expectsProof(pairedTarget: Bool, pairedReceiver: Bool, pairedName: Bool) -> Bool {
+        pairedTarget || pairedReceiver || pairedName
+    }
+
+    /// Main queue: the receiver's code, as the user typed it
+    /// A wrong code keeps the same code up for retry
+    public func submitPairingCode(_ code: String) {
+        guard let welcome = pendingWelcome, let challenge = welcome.auth, challenge.mode == .pair, let receiverKey = challenge.publicKey,
+              pendingPair == nil else { return }
+        let own = Pairing.newKey()
+        var t = transcript(welcome)
+        t.senderKey = own.publicKey.rawRepresentation
+        t.receiverKey = receiverKey
+        guard let session = try? Pairing.sessionKey(own, peer: receiverKey, transcript: t) else {
+            return stop(reason: L10n.t("The receiver's pairing key is invalid", "수신기의 페어링 키가 올바르지 않습니다"))
+        }
+        pendingPair = (session, Pairing.pairingKey(session, code: code, transcript: t), t)
+        connection?.send(.pair, json: PairConfirm(publicKey: own.publicKey.rawRepresentation, mac: Pairing.confirm(session, code: code, transcript: t)))
+        update { $0.state = L10n.t("Pairing", "페어링 중") }
+    }
+
+    private func transcript(_ welcome: Welcome) -> Pairing.Transcript {
+        Pairing.Transcript(senderID: senderID, receiverID: welcome.receiverID ?? "", senderNonce: helloNonce, receiverNonce: welcome.auth?.nonce ?? Data())
+    }
+
+    /// Receiver accepted this Mac: measure the link, then stream
+    private func admitted(_ welcome: Welcome) {
+        if SenderSession.logStats {
+            let how = welcome.auth.map { $0.mode == .paired ? "proved both ways" : "paired with a code" } ?? "open, no pairing"
+            FileHandle.standardError.write(Data("[sender] admitted by \(welcome.name): \(how)\n".utf8))
+        }
+        setDeband(deband)
+        if purpose == .display { openCursorChannel(token: welcome.channelToken) }
+        update { $0.state = L10n.t("Measuring the link", "링크 속도 측정 중") }
+        probe()
     }
 
     /// Picks the path and size, then starts the picture
@@ -396,11 +547,34 @@ public final class SenderSession {
             }
             mirrorSource = source
         }
-        guard let config = PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome,
-                                             resolution: purpose == .qualityTest ? .panel : resolution, source: mirrorSource?.pixels) else {
+        let resolution = purpose == .qualityTest ? .panel : self.resolution
+        let choose = { [mirrorSource] (largest: PixelSize?) in
+            PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome, resolution: resolution, source: mirrorSource?.pixels, largestVideo: largest)
+        }
+        guard let first = choose(nil) else {
             return end(L10n.t("Afterscreen supports Thunderbolt, USB, Ethernet and Wi-Fi links",
                               "Afterscreen는 Thunderbolt, USB, 이더넷, Wi-Fi 링크만 지원합니다"))
         }
+        guard let layer = first.video else { return start(first, welcome: welcome) }
+        // Encoder speed varies by Mac: measured off main, per size
+        let boxes = PathPolicy.videoBoxes(bitrate: layer.bitrate, codec: layer.codec, fps: first.frameRate)
+        update { $0.state = L10n.t("Checking the video encoder", "영상 인코더 확인 중") }
+        let asked = ProcessInfo.processInfo.systemUptime
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let largest = EncoderCapacity.largest(of: boxes, codec: layer.codec, tenBit: layer.tenBit, bitrate: layer.bitrate, fps: first.frameRate)
+            DispatchQueue.main.async {
+                guard let self = self, !self.ended else { return }
+                self.videoCap = largest
+                if SenderSession.logStats, let l = largest {
+                    let ms = Int((ProcessInfo.processInfo.systemUptime - asked) * 1000)
+                    FileHandle.standardError.write(Data("[sender] encoder keeps up at \(l.width)x\(l.height), \(Int(first.frameRate)) fps, checked in \(ms) ms\n".utf8))
+                }
+                self.start(choose(largest) ?? first, welcome: welcome)
+            }
+        }
+    }
+
+    private func start(_ config: StreamConfig, welcome: Welcome) {
         if purpose == .qualityTest { return startQualityTest(config) }
         connection?.send(.config, json: config)
         beginStreaming(config, welcome: welcome)
@@ -419,7 +593,7 @@ public final class SenderSession {
             if SenderSession.logStats {
                 FileHandle.standardError.write(Data("[sender] mirroring refused: \(DisplayMirror.lastError ?? "no source display")\n".utf8))
             }
-            return end(L10n.t("macOS did not mirror this Mac's display", "macOS가 이 Mac의 디스플레이를 미러링하지 않았습니다"))
+            return end(L10n.t("macOS did not mirror \(ComputerName.current)'s display", "macOS가 \(ComputerName.current) 디스플레이를 미러링하지 않았습니다"))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak display] in
             guard let display = display else { return }
@@ -486,7 +660,8 @@ public final class SenderSession {
             do {
                 let modes = PathPolicy.displayModes(welcome: welcome, stream: config.streamPixels, size: displaySize)
                 display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: config.streamPixels, hiDPI: welcome.isRetina,
-                                             modes: modes.all, initial: modes.initial)
+                                             modes: modes.all, initial: modes.initial, millimeters: PathPolicy.millimeters(welcome),
+                                             refresh: config.frameRate)
             } catch {
                 return end("\(error)")
             }
@@ -506,7 +681,7 @@ public final class SenderSession {
             let g = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
             FileHandle.standardError.write(Data(String(format: "[sender] %@ path over %@, %.2f Gbps measured, BC7 motion up to %d of %d tiles, %@ %dx%d\n",
                                                        config.path.rawValue, config.linkKind.rawValue, snapshot.capacityGbps ?? 0,
-                                                       PathPolicy.bc7MotionTiles(capacityGbps: snapshot.capacityGbps, tileBytes: g.tileBytes),
+                                                       PathPolicy.bc7MotionTiles(capacityGbps: snapshot.capacityGbps, tileBytes: g.tileBytes, fps: config.frameRate),
                                                        g.tileCount, role == .mirror ? "mirror-\(fit.rawValue)" : role.rawValue,
                                                        config.streamPixels.width, config.streamPixels.height).utf8))
         }
@@ -554,12 +729,13 @@ public final class SenderSession {
     }
 
     private func startQualityTest(_ config: StreamConfig) {
-        let stages = QualityTest.stages(panel: config.streamPixels).map { PathPolicy.stage(config, size: $0) }
+        let stages = QualityTest.stages(panel: config.streamPixels).map { PathPolicy.stage(config, size: $0, largestVideo: videoCap) }
         let path = config.video.map { v in
             L10n.t("Tiles + \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10-bit" : "") for motion",
                    "타일 + 움직임은 \(v.codec.rawValue.uppercased())\(v.tenBit ? " 10비트" : "")")
         } ?? L10n.t("Tiles", "타일")
-        let report = QualityTest.Report(receiver: snapshot.peer?.marketingName ?? target.name, link: snapshot.link, path: path)
+        let report = QualityTest.Report(receiver: snapshot.peer?.marketingName ?? target.name, link: snapshot.link, path: path,
+                                        frameRate: config.frameRate)
         guard let connection = connection,
               let run = QualityTestRun(connection: connection, configs: stages, capacityGbps: snapshot.capacityGbps, report: report) else {
             return end(L10n.t("Quality test unavailable: Metal or the test pattern failed",
@@ -623,7 +799,7 @@ public final class SenderSession {
             lastTCP = tcp
         }
         let m = metrics.sample()
-        let required = snapshot.config?.video.map { 1.5 * Double($0.bitrate) / 1e9 } ?? PathPolicy.tileCapacityGbps
+        let required = snapshot.config.map { c in c.video.map { 1.5 * Double($0.bitrate) / 1e9 } ?? PathPolicy.tileCapacityGbps(c.streamPixels, fps: c.frameRate) } ?? 0
         update {
             $0.throughputBitsPerSecond = bitsPerSecond
             $0.throughputHistory = throughput.values

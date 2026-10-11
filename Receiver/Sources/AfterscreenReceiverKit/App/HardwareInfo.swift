@@ -37,20 +37,50 @@ public enum HardwareInfo {
         names[modelID] ?? modelID
     }
 
-    /// Retina panels (≥ 3000 px wide): HiDPI at half size
-    public static func points(forPanel p: PixelSize) -> PixelSize {
-        p.width >= 3000 ? PixelSize(width: p.width / 2, height: p.height / 2) : p
+    /// Points at the panel's backing scale: 2 on Retina
+    public static func points(forPanel p: PixelSize, scale: Int) -> PixelSize {
+        let s = max(1, scale)
+        return PixelSize(width: p.width / s, height: p.height / s)
+    }
+
+    private static var mainScreen: NSScreen? {
+        NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == CGMainDisplayID() }
+    }
+
+    /// Main display's backing scale, as macOS drives it
+    /// No screen yet: 2 if a HiDPI mode spans native pixels
+    public static var backingScale: Int {
+        if let scale = mainScreen?.backingScaleFactor { return Int(scale.rounded()) }
+        let panel = panelPixels()
+        return displayModes().contains { $0.pixelWidth == panel.width && $0.width * 2 == panel.width } ? 2 : 1
+    }
+
+    /// Main display's highest refresh; nil when it reports none
+    /// Built-in panels report 0 through the display mode
+    static func refreshHz() -> Double? {
+        if #available(macOS 12, *), let fps = mainScreen?.maximumFramesPerSecond, fps > 0 { return Double(fps) }
+        let rate = CGDisplayCopyDisplayMode(CGMainDisplayID())?.refreshRate ?? 0
+        return rate > 0 ? rate : nil
+    }
+
+    /// Main display's size in mm; nil when it reports none
+    static func panelMillimeters() -> PixelSize? {
+        let mm = CGDisplayScreenSize(CGMainDisplayID())
+        return mm.width > 0 && mm.height > 0 ? PixelSize(width: Int(mm.width.rounded()), height: Int(mm.height.rounded())) : nil
     }
 
     /// Native pixel size of the main display
     public static func panelPixels() -> PixelSize {
         let id = CGMainDisplayID()
+        return nativePanel(displayModes()) ?? PixelSize(width: CGDisplayPixelsWide(id), height: CGDisplayPixelsHigh(id))
+    }
+
+    private static func displayModes() -> [DisplayModeInfo] {
         let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
-        let modes = ((CGDisplayCopyAllDisplayModes(id, options) as? [CGDisplayMode]) ?? []).map {
+        return ((CGDisplayCopyAllDisplayModes(CGMainDisplayID(), options) as? [CGDisplayMode]) ?? []).map {
             DisplayModeInfo(width: $0.width, height: $0.height, pixelWidth: $0.pixelWidth, pixelHeight: $0.pixelHeight,
                             isNative: $0.ioFlags & UInt32(kDisplayModeNativeFlag) != 0)
         }
-        return nativePanel(modes) ?? PixelSize(width: CGDisplayPixelsWide(id), height: CGDisplayPixelsHigh(id))
     }
 
     /// Native or 1:1 modes only
@@ -103,10 +133,11 @@ public enum HardwareInfo {
         return Welcome(protocolVersion: AfterscreenProtocol.version, name: name, modelID: model,
                        marketingName: marketingName(modelID: model),
                        osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
-                       gpuNames: gpuNames(), panelPixels: panel, panelPoints: points(forPanel: panel),
+                       gpuNames: gpuNames(), panelPixels: panel, panelPoints: points(forPanel: panel, scale: backingScale),
                        hevcDecode: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
                        h264Decode: VTIsHardwareDecodeSupported(kCMVideoCodecType_H264),
-                       bc7: true, hevcMain10Decode: hevcMain10Decode, audioPlayback: true)
+                       bc7: true, hevcMain10Decode: hevcMain10Decode, audioPlayback: true, panelMillimeters: panelMillimeters(),
+                       refreshHz: refreshHz())
     }
 }
 

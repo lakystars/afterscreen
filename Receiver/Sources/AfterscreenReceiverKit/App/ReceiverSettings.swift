@@ -46,7 +46,16 @@ public final class ReceiverSettings: ObservableObject {
         static let effect = "effect"
         static let hudCorner = "hudCorner"
         static let hudCollapsed = "hudCollapsed"
+        static let pairedOnly = "pairedOnly"
+        static let deviceID = "deviceID"
     }
+
+    /// Networks need a paired Mac; point-to-point cables never do
+    @Published public var pairedOnly: Bool {
+        didSet { defaults.set(pairedOnly, forKey: Key.pairedOnly) }
+    }
+    /// This receiver's lasting identity, made once
+    public let deviceID: String
 
     public static let agentLabel = "io.github.lakystars.afterscreen.receiver"
 
@@ -94,6 +103,13 @@ public final class ReceiverSettings: ObservableObject {
         effect = defaults.enumValue(forKey: Key.effect, default: .tiles)
         hudCorner = defaults.enumValue(forKey: Key.hudCorner, default: .topRight)
         hudCollapsed = defaults.bool(forKey: Key.hudCollapsed)
+        pairedOnly = defaults.object(forKey: Key.pairedOnly) as? Bool ?? true
+        if let id = defaults.string(forKey: Key.deviceID) {
+            deviceID = id
+        } else {
+            deviceID = UUID().uuidString
+            defaults.set(deviceID, forKey: Key.deviceID)
+        }
         L10n.language = language
     }
 

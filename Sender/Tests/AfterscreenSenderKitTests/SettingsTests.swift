@@ -10,10 +10,18 @@ final class DisplaySizeTests: XCTestCase {
                         PixelSize(width: 2880, height: 1620), PixelSize(width: 3200, height: 1800)])
     }
 
+    func testSixteenByTenAndSmallPanelsScaleToo() {
+        XCTAssertEqual(DisplaySize.allCases.map { $0.points(for: PixelSize(width: 1440, height: 900)) },
+                       [PixelSize(width: 1152, height: 720), PixelSize(width: 1440, height: 900),
+                        PixelSize(width: 1616, height: 1010), PixelSize(width: 1808, height: 1130)])
+        XCTAssertEqual(DisplaySize.larger.points(for: PixelSize(width: 1280, height: 800)), PixelSize(width: 1024, height: 640),
+                       "larger text on a 1280-point panel")
+    }
+
     func testFourKSizes() {
         let points = PixelSize(width: 2048, height: 1152)
         XCTAssertEqual(DisplaySize.allCases.map { $0.points(for: points) },
-                       [PixelSize(width: 1600, height: 900), PixelSize(width: 2048, height: 1152),
+                       [PixelSize(width: 1632, height: 918), PixelSize(width: 2048, height: 1152),
                         PixelSize(width: 2304, height: 1296), PixelSize(width: 2560, height: 1440)])
     }
 }

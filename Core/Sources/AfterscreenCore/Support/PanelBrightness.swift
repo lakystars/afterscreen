@@ -38,19 +38,22 @@ public enum PanelBrightness {
     }
 
     /// Built-in panel's peak in nits: its linear 1.0
-    /// XDR laptops: the brightness controller's aurora-maximum-nits
+    /// XDR laptops: aurora-maximum-nits above the built-in backlight
     /// Others: measured like the receiver's
     /// Read once; nil when the Mac reports neither
-    public static let builtInPeakNits: Double? = {
-        let root = IORegistryGetRootEntry(0)
-        defer { IOObjectRelease(root) }
-        if let data = IORegistryEntrySearchCFProperty(root, kIOServicePlane, "aurora-maximum-nits" as CFString, kCFAllocatorDefault,
-                                                      IOOptionBits(kIORegistryIterateRecursively)) as? Data, data.count == 4 {
-            let nits = Double(Float(bitPattern: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian))
-            if nits.isFinite, nits > 0 { return nits }
-        }
-        return builtInID.flatMap(measuredPeakNits)
-    }()
+    public static let builtInPeakNits: Double? = backlightMaximumNits ?? builtInID.flatMap(measuredPeakNits)
+
+    /// From the built-in backlight up; external XDRs carry their own
+    private static var backlightMaximumNits: Double? {
+        let backlight = IOServiceGetMatchingService(0, IOServiceMatching("AppleARMBacklight"))
+        guard backlight != 0 else { return nil }
+        defer { IOObjectRelease(backlight) }
+        guard let data = IORegistryEntrySearchCFProperty(backlight, kIOServicePlane, "aurora-maximum-nits" as CFString, kCFAllocatorDefault,
+                                                         IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents)) as? Data,
+              data.count == 4 else { return nil }
+        let nits = Double(Float(bitPattern: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian))
+        return nits.isFinite && nits > 0 ? nits : nil
+    }
 
     /// Peak from CoreDisplay's current nits over the linear level
     /// Non-EDR panels report their light; XDR reports a fixed 100
@@ -81,6 +84,12 @@ public enum PanelBrightness {
         var ids = [CGDirectDisplayID](repeating: 0, count: 16)
         guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return nil }
         return ids.prefix(Int(count)).first { CGDisplayIsBuiltin($0) != 0 }
+    }
+
+    /// Built-in panel's slider level, whichever display is main
+    public static func setBuiltIn(_ level: Double) {
+        guard let set = setter, let id = builtInID else { return }
+        _ = set(id, Float(min(1, max(0, level))))
     }
 
     public static func set(_ level: Double) {

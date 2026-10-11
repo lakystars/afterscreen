@@ -35,30 +35,27 @@ public enum DisplayRole: String, CaseIterable, Identifiable {
         }
     }
 
-    public static var help: String {
-        L10n.t("Extend: the iMac is a display of its own. Mirror: it shows this Mac's main display; black bars fill the rest when the shapes differ",
-               "확장: iMac이 별도의 디스플레이가 됩니다. 복제: 이 Mac의 주 디스플레이를 그대로 보여 주고, 화면 비율이 다르면 남는 곳은 검게 둡니다")
+    public static func help(mac: String, receiver: String) -> String {
+        L10n.t("Extend: \(receiver) is a display of its own. Mirror: it shows \(mac)'s main display; black bars fill the rest when the shapes differ",
+               "확장: \(receiver) 화면이 별도의 디스플레이가 됩니다. 복제: \(mac)의 주 디스플레이를 그대로 보여 주고, 화면 비율이 다르면 남는 곳은 검게 둡니다")
     }
 }
 
 /// Mirror's shape, as macOS's "Optimize for"
-/// This Mac: its own resolution, letterboxed on the iMac
-/// iMac: the desktop takes the iMac's shape; this Mac letterboxes
+/// mac: its own resolution, letterboxed on the receiver
+/// iMac: the desktop takes the receiver's shape; the Mac letterboxes
 public enum MirrorFit: String, CaseIterable, Identifiable {
     case mac, iMac
 
     public var id: String { rawValue }
 
-    public var title: String {
-        switch self {
-        case .mac: return L10n.t("This Mac", "이 Mac")
-        case .iMac: return "iMac"
-        }
+    public func title(mac: String, receiver: String) -> String {
+        self == .mac ? mac : receiver
     }
 
-    public static var help: String {
-        L10n.t("This Mac: it keeps its resolution and the iMac shows black bars where the shapes differ. iMac: the desktop takes the iMac's shape and resolution, sharp and edge to edge there; this Mac shows it with bars",
-               "이 Mac: 해상도를 그대로 두고, 비율이 다르면 iMac에 검은 여백이 생깁니다. iMac: 데스크톱을 iMac의 비율과 해상도로 바꿔 iMac에 꽉 차고 선명하게 보이고, 이 Mac 화면에 여백이 생깁니다")
+    public static func help(mac: String, receiver: String) -> String {
+        L10n.t("\(mac): it keeps its resolution and \(receiver) shows black bars where the shapes differ. \(receiver): the desktop takes its shape and resolution, sharp and edge to edge there; \(mac) shows it with bars",
+               "\(mac): 해상도를 그대로 두고, 비율이 다르면 \(receiver)에 검은 여백이 생깁니다. \(receiver): 데스크톱을 그 비율과 해상도로 바꿔 꽉 차고 선명하게 보이고, \(mac) 화면에 여백이 생깁니다")
     }
 }
 
@@ -86,13 +83,11 @@ public enum DisplaySize: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 16:9 widths macOS offers as scaled modes
-    private static let widths = [1280, 1600, 1920, 2048, 2304, 2560, 2880, 3200, 3840]
-
+    /// Scaled from the receiver's own points, any panel shape
+    /// Widths in steps of 16; heights keep the panel's ratio
     public func points(for base: PixelSize) -> PixelSize {
         guard self != .standard, base.width > 0 else { return base }
-        let want = Double(base.width) * scale
-        let width = DisplaySize.widths.min { abs(Double($0) - want) < abs(Double($1) - want) } ?? base.width
+        let width = Int((Double(base.width) * scale / 16).rounded()) * 16
         return PixelSize(width: width, height: (width * base.height / base.width + 1) / 2 * 2)
     }
 }
@@ -103,6 +98,7 @@ public final class SenderSettings: ObservableObject {
         static let displaySize = "displaySize"
         static let autoConnect = "autoConnect"
         static let lastReceiver = "lastReceiver"
+        static let lastPanelPoints = "lastPanelPoints"
         static let link = "link"
         static let menuBarStats = "menuBarStats"
         static let language = "language"
@@ -110,8 +106,14 @@ public final class SenderSettings: ObservableObject {
         static let deband = "deband"
         static let streamResolution = "streamResolution"
         static let displayRole = "displayRole"
+        static let deviceID = "deviceID"
         static let mirrorFit = "mirrorFit"
+        static let brightnessFollows = "brightnessFollows"
+        static let receiverBrightness = "receiverBrightness"
     }
+
+    /// This Mac's lasting identity, made once; receivers pair with it
+    public let deviceID: String
 
     @Published public var displayRole: DisplayRole {
         didSet { defaults.set(displayRole.rawValue, forKey: Key.displayRole) }
@@ -141,6 +143,15 @@ public final class SenderSettings: ObservableObject {
         didSet { defaults.set(Int(deband.rawValue), forKey: Key.deband) }
     }
 
+    /// Receiver panel follows this Mac's; off, it keeps `receiverBrightness`
+    @Published public var brightnessFollows: Bool {
+        didSet { defaults.set(brightnessFollows, forKey: Key.brightnessFollows) }
+    }
+    /// Receiver panel's own slider level, while not following
+    @Published public var receiverBrightness: Double {
+        didSet { defaults.set(receiverBrightness, forKey: Key.receiverBrightness) }
+    }
+
     @Published public var streamResolution: StreamResolution {
         didSet { defaults.set(streamResolution.rawValue, forKey: Key.streamResolution) }
     }
@@ -151,9 +162,10 @@ public final class SenderSettings: ObservableObject {
     }
     /// Link to use; nil picks the fastest that answers
     public var link: LinkKind? {
-        get { defaults.string(forKey: Key.link).flatMap(LinkKind.init(rawValue:)) }
+        get { SenderSettings.launchLink ?? defaults.string(forKey: Key.link).flatMap(LinkKind.init(rawValue:)) }
         set {
             objectWillChange.send()
+            SenderSettings.launchLink = nil
             defaults.set(newValue?.rawValue, forKey: Key.link)
         }
     }
@@ -164,11 +176,30 @@ public final class SenderSettings: ObservableObject {
         set { defaults.set(newValue, forKey: Key.lastReceiver) }
     }
 
+    /// Last receiver's default points, for size labels before connecting
+    public var lastPanelPoints: PixelSize? {
+        get {
+            let wh = (defaults.array(forKey: Key.lastPanelPoints) as? [Int]) ?? []
+            return wh.count == 2 ? PixelSize(width: wh[0], height: wh[1]) : nil
+        }
+        set { defaults.set(newValue.map { [$0.width, $0.height] }, forKey: Key.lastPanelPoints) }
+    }
+
+    /// Development: --link for this launch only, never saved
+    /// Outer nil: no override; inner nil: automatic
+    public static var launchLink: LinkKind??
+
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         displayRole = defaults.enumValue(forKey: Key.displayRole, default: .extend)
+        if let id = defaults.string(forKey: Key.deviceID) {
+            deviceID = id
+        } else {
+            deviceID = UUID().uuidString
+            defaults.set(deviceID, forKey: Key.deviceID)
+        }
         mirrorFit = defaults.enumValue(forKey: Key.mirrorFit, default: .mac)
         displaySize = defaults.enumValue(forKey: Key.displaySize, default: .standard)
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
@@ -176,6 +207,8 @@ public final class SenderSettings: ObservableObject {
         sound = defaults.object(forKey: Key.sound) as? Bool ?? true
         streamResolution = defaults.enumValue(forKey: Key.streamResolution, default: .auto)
         deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
+        brightnessFollows = defaults.object(forKey: Key.brightnessFollows) as? Bool ?? true
+        receiverBrightness = defaults.object(forKey: Key.receiverBrightness) as? Double ?? 0.5
         language = defaults.enumValue(forKey: Key.language, default: .system)
         L10n.language = language
     }

@@ -69,7 +69,7 @@ final class VideoEncoderTests: XCTestCase {
 
     func testPipelinedFramesComeBackInOrderScaledToTheLayerInBT709VideoRange() throws {
         let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 100_000_000)
-        let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+        let encoder = try XCTUnwrap(VideoEncoder(layer: layer, fps: 60))
         let source = try frame(width: 5120, height: 2880, bgra: (40, 120, 200))
         let lock = NSLock()
         var outputs: [(index: Int, keyframe: Bool, avcc: Data, sets: [Data])] = []
@@ -102,7 +102,7 @@ final class VideoEncoderTests: XCTestCase {
         // Pool buffers come back without the BT.709 transfer tag; the sRGB colour space must not make the encoder convert
         for tenBit in [false, true] {
             let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: tenBit)
-            let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+            let encoder = try XCTUnwrap(VideoEncoder(layer: layer, fps: 60))
             var outputs: [VideoEncoder.Output] = []
             for i in 0..<6 {
                 let source = try frame(width: 2560, height: 1440, bgra: (40, 120, 200))
@@ -122,7 +122,7 @@ final class VideoEncoderTests: XCTestCase {
         for tenBit in [false, true] {
             for tagged in [false, true] {
                 let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: tenBit)
-                let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+                let encoder = try XCTUnwrap(VideoEncoder(layer: layer, fps: 60))
                 let source = try frame(width: 2560, height: 1440, bgra: (40, 120, 200))
                 if tagged {
                     // As ScreenCaptureKit delivers 8-bit sRGB: a CGColorSpace attachment and a colour space on the surface
@@ -144,7 +144,7 @@ final class VideoEncoderTests: XCTestCase {
 
     func testMain10LayerKeepsTenBitsThroughTheEncoder() throws {
         let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 1920, height: 1080), bitrate: 50_000_000, tenBit: true)
-        let encoder = try XCTUnwrap(VideoEncoder(layer: layer))
+        let encoder = try XCTUnwrap(VideoEncoder(layer: layer, fps: 60))
         let source = try frame(width: 2560, height: 1440, bgra: (40, 120, 200))
         var output: VideoEncoder.Output?
         let done = expectation(description: "frame")

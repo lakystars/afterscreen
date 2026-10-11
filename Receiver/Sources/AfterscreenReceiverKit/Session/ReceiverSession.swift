@@ -55,6 +55,70 @@ public protocol StreamDisplay: AnyObject {
     var decodeMs: Double { get }
 }
 
+/// Pairing demand of one connection
+public struct ReceiverAuth {
+    public var receiverID: String
+    /// Networks with paired-only on; point-to-point cables skip it
+    /// A paired Mac proves its key whatever the link
+    public var required: Bool
+    public var store: PairingStoring
+    public var limiter: PairingLimiter
+    /// Main queue: the code for a sender; nil hides it
+    public var onCode: (String?, String) -> Void
+    /// Unaccepted connections close then: no slot held for long
+    public var proofTimeout: TimeInterval = 10
+    /// The user types the code meanwhile
+    public var codeTimeout: TimeInterval = 90
+
+    public init(receiverID: String, required: Bool, store: PairingStoring, limiter: PairingLimiter,
+                onCode: @escaping (String?, String) -> Void) {
+        self.receiverID = receiverID
+        self.required = required
+        self.store = store
+        self.limiter = limiter
+        self.onCode = onCode
+    }
+}
+
+/// Five wrong codes lock pairing; locks double up to a day
+/// Guesses at a 1-in-a-million code: a few a day
+public final class PairingLimiter {
+    static let attempts = 5
+    static let firstLock: TimeInterval = 600
+    static let longestLock: TimeInterval = 86_400
+    private var failures = 0
+    private var locks = 0
+    private var lockedUntil = Date.distantPast
+    private let lock = NSLock()
+
+    public init() {}
+
+    public var locked: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return Date() < lockedUntil
+    }
+
+    func failed() {
+        lock.lock()
+        failures += 1
+        if failures >= PairingLimiter.attempts {
+            failures = 0
+            lockedUntil = Date().addingTimeInterval(min(PairingLimiter.longestLock, PairingLimiter.firstLock * pow(2, Double(locks))))
+            locks += 1
+        }
+        lock.unlock()
+    }
+
+    func succeeded() {
+        lock.lock()
+        failures = 0
+        locks = 0
+        lockedUntil = .distantPast
+        lock.unlock()
+    }
+}
+
 /// One sender connection: protocol handling, probe, ping, stats
 public final class ReceiverSession {
     public var onEnd: ((String) -> Void)?
@@ -92,6 +156,15 @@ public final class ReceiverSession {
     private var cursorChannel: Connection?
     private let channelToken = UInt32.random(in: 1...UInt32.max)
     private let hardware: Welcome
+    private let auth: ReceiverAuth?
+    /// Session queue: a hello waiting on its proof or pairing
+    private var pendingHello: Hello?
+    private var receiverNonce = Data()
+    private var pairing: (key: Pairing.PrivateKey, code: String)?
+    /// The challenge sent; only its answer is taken
+    private var issued: AuthChallenge.Mode?
+    /// Unaccepted after a challenge, or on a pairing link
+    private var gated: Bool { currentPeer == nil && (issued != nil || auth?.required == true) }
     private weak var display: StreamDisplay?
     private let queue = DispatchQueue(label: "afterscreen.session")
     private let decodeQueue: DispatchQueue
@@ -118,9 +191,11 @@ public final class ReceiverSession {
         return inFlight
     }
 
-    public init(connection: Connection, hardware: Welcome, display: StreamDisplay, idleTimeout: TimeInterval = 4) {
+    /// `auth`: nil or not required streams without pairing
+    public init(connection: Connection, hardware: Welcome, display: StreamDisplay, idleTimeout: TimeInterval = 4, auth: ReceiverAuth? = nil) {
         self.connection = connection
         self.hardware = hardware
+        self.auth = auth
         self.display = display
         decodeQueue = display.decodeQueue
         self.idleTimeout = idleTimeout
@@ -155,7 +230,7 @@ public final class ReceiverSession {
         // Up to 8K, whose raw frame fits one message
         let width = 16...7680, height = 16...4320
         return width.contains(c.streamPixels.width) && height.contains(c.streamPixels.height)
-            && c.streamPixels.width % 4 == 0 && c.streamPixels.height % 4 == 0
+            && c.streamPixels.width % 4 == 0 && c.streamPixels.height % 4 == 0 && (1...480).contains(c.frameRate)
     }
 
     public func start() {
@@ -175,20 +250,82 @@ public final class ReceiverSession {
     }
 
     private func handle(_ m: Message) {
+        // Challenged or pairing link: only the handshake until accepted
+        guard !gated || [.hello, .auth, .pair, .ping, .bye].contains(m.type) else {
+            if m.type == .tileFrame || m.type == .videoFrame { frameSlots.signal() }
+            return
+        }
         switch m.type {
         case .hello:
-            guard let hello = try? JSONWire.decode(Hello.self, from: m.payload) else { return fail("bad hello") }
-            configLock.lock()
-            currentPeer = hello
-            configLock.unlock()
-            DispatchQueue.main.async { [weak self] in self?.onPeer?(hello) }
+            guard currentPeer == nil, pendingHello == nil, let hello = try? JSONWire.decode(Hello.self, from: m.payload) else { return fail("bad hello") }
             var welcome = hardware
             welcome.channelToken = channelToken
-            connection.send(.welcome, json: welcome)
+            welcome.receiverID = auth?.receiverID
             if hello.protocolVersion != AfterscreenProtocol.version {
+                connection.send(.welcome, json: welcome)
                 connection.send(.bye, json: Bye(reason: "Protocol mismatch (sender \(hello.protocolVersion), receiver \(AfterscreenProtocol.version)): update both apps"))
-                connection.closeAfterFlush(reason: "protocol mismatch")
+                return connection.closeAfterFlush(reason: "protocol mismatch")
             }
+            // A Mac claiming a key proves it on cables too
+            // Key gone here, or its proof failed: a code instead
+            let wantsCode = hello.repair == true
+            let known = hello.paired == true && !wantsCode && hello.senderID.map { auth?.store.key(for: $0) != nil } == true
+            guard let auth = auth, auth.required || hello.paired == true || wantsCode else {
+                connection.send(.welcome, json: welcome)
+                return accept(hello)
+            }
+            guard hello.senderID != nil, hello.nonce != nil else { return fail("pairing needs the sender's identity") }
+            pendingHello = hello
+            receiverNonce = Pairing.nonce()
+            if known {
+                issued = .paired
+                welcome.auth = AuthChallenge(mode: .paired, nonce: receiverNonce)
+            } else {
+                guard !auth.limiter.locked else { return fail(lockedReason) }
+                let key = Pairing.newKey(), code = Pairing.code()
+                pairing = (key, code)
+                issued = .pair
+                welcome.auth = AuthChallenge(mode: .pair, nonce: receiverNonce, publicKey: key.publicKey.rawRepresentation)
+                DispatchQueue.main.async { auth.onCode(code, hello.name) }
+            }
+            connection.send(.welcome, json: welcome)
+            queue.asyncAfter(deadline: .now() + (issued == .pair ? auth.codeTimeout : auth.proofTimeout)) { [weak self] in
+                guard let self = self, !self.ended, self.currentPeer == nil else { return }
+                self.fail(L10n.t("Pairing timed out", "페어링 시간이 지났습니다"))
+            }
+        case .auth:
+            guard issued == .paired, let hello = pendingHello, let auth = auth, let senderID = hello.senderID, let senderNonce = hello.nonce,
+                  let key = auth.store.key(for: senderID), let proof = try? JSONWire.decode(AuthProof.self, from: m.payload) else { return }
+            let t = Pairing.Transcript(senderID: senderID, receiverID: auth.receiverID, senderNonce: senderNonce, receiverNonce: receiverNonce)
+            guard Pairing.matches(proof.mac, Pairing.proof(key: key, role: .sender, transcript: t)) else {
+                // Key kept: anyone can claim this sender's ID
+                // The real sender drops its key and pairs afresh
+                return fail(L10n.t("The pairing no longer matches; connect again to pair", "페어링 정보가 맞지 않습니다. 다시 연결해 페어링하세요"), repair: true)
+            }
+            connection.send(.authOK, json: AuthProof(mac: Pairing.proof(key: key, role: .receiver, transcript: t)))
+            pendingHello = nil
+            accept(hello)
+        case .pair:
+            guard issued == .pair, let hello = pendingHello, let auth = auth, let senderID = hello.senderID, let senderNonce = hello.nonce,
+                  let (key, code) = pairing, let confirm = try? JSONWire.decode(PairConfirm.self, from: m.payload) else { return }
+            let t = Pairing.Transcript(senderID: senderID, receiverID: auth.receiverID, senderNonce: senderNonce, receiverNonce: receiverNonce,
+                                       senderKey: confirm.publicKey, receiverKey: key.publicKey.rawRepresentation)
+            guard let session = try? Pairing.sessionKey(key, peer: confirm.publicKey, transcript: t),
+                  Pairing.matches(confirm.mac, Pairing.confirm(session, code: code, transcript: t)) else {
+                auth.limiter.failed()
+                guard !auth.limiter.locked else { return fail(lockedReason) }
+                // Same code stays up for another try
+                return connection.send(Message(type: .pairWrong))
+            }
+            pairing = nil
+            DispatchQueue.main.async { auth.onCode(nil, hello.name) }
+            auth.limiter.succeeded()
+            guard auth.store.save(Pairing.pairingKey(session, code: code, transcript: t), for: senderID, name: hello.name) else {
+                return fail(L10n.t("\(hardware.name) could not keep the pairing", "\(hardware.name)에 페어링을 저장하지 못했습니다"))
+            }
+            connection.send(.paired, json: AuthProof(mac: Pairing.pairedProof(session, transcript: t)))
+            pendingHello = nil
+            accept(hello)
         case .config:
             guard let config = try? JSONWire.decode(StreamConfig.self, from: m.payload),
                   ReceiverSession.isPlausible(config) else { return fail("bad config") }
@@ -278,7 +415,7 @@ public final class ReceiverSession {
             DispatchQueue.main.async { [weak self] in
                 self?.display?.powerOff { self?.stop(reason: bye.reason) }
             }
-        case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel:
+        case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel, .authOK, .paired, .pairWrong:
             break
         }
     }
@@ -296,6 +433,7 @@ public final class ReceiverSession {
     }
 
     private func cursor(_ m: Message) {
+        guard !gated else { return }
         if m.type == .cursorPos, let pos = try? CursorWire.parsePos(m.payload) {
             DispatchQueue.main.async { [weak self] in self?.display?.cursor(x: pos.x, y: pos.y, visible: pos.visible) }
         } else if m.type == .cursorImage, let image = try? CursorWire.parseImage(m.payload) {
@@ -309,7 +447,8 @@ public final class ReceiverSession {
     public func offerChannel(_ c: Connection) {
         c.onMessage = { [weak self, weak c] m in
             guard let self = self, let c = c else { return }
-            guard self.cursorChannel === c else { return self.adopt(c, first: m) }
+            // No cursor channel before the peer is accepted
+            guard self.cursorChannel === c else { return self.gated ? c.close(reason: "not accepted") : self.adopt(c, first: m) }
             if m.type == .cursorPos || m.type == .cursorImage { self.cursor(m) }
             if m.type == .audio { self.audio(m) }
             if m.type == .volume { self.volume(m) }
@@ -356,14 +495,15 @@ public final class ReceiverSession {
     }
 
     private func sendStats() {
-        guard !ended, let display = display else { return }
+        // An unaccepted peer learns nothing of this Mac
+        guard !ended, !gated, let display = display else { return }
         let m = metrics.sample()
         let stats = ReceiverStats(receivedFPS: received.ratePerSecond(), displayedFPS: display.displayedFPS,
                                   uploadMs: display.uploadMs, decompressMs: display.decodeMs, lateFrames: display.lateFrames,
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
                                   gpuPercent: display.gpuMeter.percentSinceLastRead(),
                                   audioBufferMs: display.audioBuffered.map { $0 * 1000 },
-                                  audioUnderruns: display.audioUnderruns)
+                                  audioUnderruns: display.audioUnderruns, panelLevel: PanelBrightness.level)
         record {
             $0.receiver = stats
             $0.shownFPS.push(stats.displayedFPS)
@@ -377,8 +517,21 @@ public final class ReceiverSession {
         telemetryLock.unlock()
     }
 
-    private func fail(_ reason: String) {
-        connection.send(.bye, json: Bye(reason: reason))
+    /// Session queue: the sender may stream from here on
+    private func accept(_ hello: Hello) {
+        configLock.lock()
+        currentPeer = hello
+        configLock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.onPeer?(hello) }
+    }
+
+    private var lockedReason: String {
+        L10n.t("Too many wrong codes on \(hardware.name); try again in a few minutes",
+               "\(hardware.name)에서 코드를 여러 번 틀렸습니다. 몇 분 뒤에 다시 시도하세요")
+    }
+
+    private func fail(_ reason: String, repair: Bool? = nil) {
+        connection.send(.bye, json: Bye(reason: reason, repair: repair))
         connection.closeAfterFlush(reason: reason)
     }
 
@@ -389,6 +542,8 @@ public final class ReceiverSession {
         let relink = relinking
         statsTimer?.cancel()
         statsTimer = nil
+        // A code still showing closes with the connection
+        if pairing != nil, let auth = auth { DispatchQueue.main.async { auth.onCode(nil, "") } }
         cursorChannel?.close(reason: reason)
         cursorChannel = nil
         // Captures the display, not the session

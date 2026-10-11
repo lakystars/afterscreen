@@ -4,6 +4,17 @@ public enum MessageType: UInt8, CaseIterable {
     case hello = 0x01
     case welcome = 0x02
     case config = 0x03
+    // Pairing on networks; point-to-point cables skip it
+    /// Sender's proof of the kept key
+    case auth = 0x04
+    /// Receiver's proof back
+    case authOK = 0x05
+    /// Sender's half of a pairing, bound to the shown code
+    case pair = 0x06
+    /// Receiver kept the pairing; its proof back
+    case paired = 0x07
+    /// Wrong code; the same code stays up for another try
+    case pairWrong = 0x08
     case tileFrame = 0x10
     case videoParams = 0x11
     case videoFrame = 0x12

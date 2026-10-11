@@ -2,14 +2,28 @@ import AfterscreenCore
 
 /// Picks tile or hybrid path from link, probe, receiver capabilities
 public enum PathPolicy {
-    public static let tileCapacityGbps = 2.5
+    /// Receiver panel's physical size; receivers without it get one
+    /// from points at 110 per inch, macOS's desktop density
+    public static func millimeters(_ w: Welcome) -> PixelSize {
+        w.panelMillimeters ?? PixelSize(width: w.panelPoints.width * 254 / 1100, height: w.panelPoints.height * 254 / 1100)
+    }
+
+    /// Lossless tiles carry full-screen motion at this many bits
+    /// per pixel per frame: 2.5 Gbps at 5K, 60 fps
+    static let tileBitsPerPixel = 2.8
+
+    /// Link rate the tile path needs at this size, rate
+    public static func tileCapacityGbps(_ stream: PixelSize, fps: Double) -> Double {
+        Double(stream.pixelCount) * fps * tileBitsPerPixel / 1e9
+    }
+
     /// Video layer sizes, largest first
-    /// 4K: the sender's encoder pipelines it at 60 fps
+    /// Whether this Mac encodes one in time: `EncoderCapacity`
     /// H.264 stops at 1440p (level 5.1)
     /// 4K60 needs level 5.2, beyond 2014–2015 iMac decoders without HEVC
     static let videoSizes = [PixelSize(width: 3840, height: 2160), PixelSize(width: 2560, height: 1440), PixelSize(width: 1920, height: 1080)]
-    /// Minimum bits per pixel per frame at 60 fps
-    /// Matches Apple's 75 Mbps for 4K screen sharing
+    /// Minimum bits per pixel per frame
+    /// Apple's 75 Mbps for 4K screen sharing at 60 fps
     static let minBitsPerPixel = 0.15
 
     /// Valid receiver panel sizes; others mean a bad peer
@@ -18,12 +32,14 @@ public enum PathPolicy {
     static let heightRange = 480...4320
 
     /// `source`: mirrored display's pixels; nil streams a panel-sized display
+    /// `largestVideo`: biggest layer this Mac encodes at the receiver's rate
     public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome, resolution: StreamResolution = .panel,
-                              source: PixelSize? = nil) -> StreamConfig? {
+                              source: PixelSize? = nil, largestVideo: PixelSize? = nil) -> StreamConfig? {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
         let panel = streamPixels(panel: aligned(welcome.panelPixels), link: link, resolution: resolution, source: source)
-        let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link)
-        if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps { return tiles }
+        let fps = welcome.frameRate
+        let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link, frameRate: fps)
+        if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps(panel, fps: fps) { return tiles }
         guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
         let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
         let rate = bitrate(capacityGbps: capacityGbps)
@@ -34,9 +50,9 @@ public enum PathPolicy {
             let full = aligned(fit(s, within: aligned(welcome.panelPixels)))
             return fit(aligned(PixelSize(width: full.width * 4 / 5, height: full.height * 4 / 5)), within: panel)
         } ?? panel
-        let video = VideoLayer(codec: codec, pixels: videoPixels(motion, bitrate: rate, codec: codec), bitrate: rate,
-                               tenBit: codec == .hevc && welcome.hevcMain10Decode)
-        return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link)
+        let video = VideoLayer(codec: codec, pixels: videoPixels(motion, bitrate: rate, codec: codec, fps: fps, largest: largestVideo),
+                               bitrate: rate, tenBit: codec == .hevc && welcome.hevcMain10Decode)
+        return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link, frameRate: fps)
     }
 
     /// Captured size
@@ -72,21 +88,28 @@ public enum PathPolicy {
     }
 
     /// A quality test stage of `config` at `size`
-    static func stage(_ config: StreamConfig, size: PixelSize) -> StreamConfig {
+    static func stage(_ config: StreamConfig, size: PixelSize, largestVideo: PixelSize? = nil) -> StreamConfig {
         var c = config
         c.streamPixels = size
-        c.video.map { c.video?.pixels = videoPixels(size, bitrate: $0.bitrate, codec: $0.codec) }
+        c.video.map { c.video?.pixels = videoPixels(size, bitrate: $0.bitrate, codec: $0.codec, fps: config.frameRate, largest: largestVideo) }
         c.test = true
         return c
     }
 
-    /// Largest layer the bitrate fills at `minBitsPerPixel`
+    /// Largest layer the bitrate fills, within what the encoder sustains
     /// Larger layers push hard content to the quality floor
     /// Encoder then overshoots the link
-    static func videoPixels(_ stream: PixelSize, bitrate: Int, codec: VideoCodec) -> PixelSize {
+    static func videoPixels(_ stream: PixelSize, bitrate: Int, codec: VideoCodec, fps: Double, largest: PixelSize? = nil) -> PixelSize {
+        let boxes = videoBoxes(bitrate: bitrate, codec: codec, fps: fps)
+        let box = boxes.first { b in largest.map { b.pixelCount <= $0.pixelCount } ?? true } ?? boxes[boxes.count - 1]
+        return fit(stream, within: box)
+    }
+
+    /// Layer sizes the bitrate fills at `minBitsPerPixel`, largest first
+    public static func videoBoxes(bitrate: Int, codec: VideoCodec, fps: Double) -> [PixelSize] {
         let sizes = codec == .hevc ? videoSizes : Array(videoSizes.dropFirst())
-        let size = sizes.first { Double(bitrate) / 60 / Double($0.pixelCount) >= minBitsPerPixel } ?? sizes[sizes.count - 1]
-        return fit(stream, within: size)
+        let first = sizes.firstIndex { Double(bitrate) / fps / Double($0.pixelCount) >= minBitsPerPixel } ?? sizes.count - 1
+        return Array(sizes[first...])
     }
 
     static func isPlausible(_ w: Welcome) -> Bool {
@@ -96,18 +119,18 @@ public enum PathPolicy {
     }
 
     /// Settled tiles per hybrid frame
-    /// Half the link's 60 Hz frame budget
+    /// Half the link's per-frame budget
     /// Assumes the typical 2:1 LZ4 ratio
-    public static func settleTiles(capacityGbps: Double?, tileBytes: Int) -> Int {
-        max(16, Int((capacityGbps ?? 0) * 1e9 / 8 / 60 / Double(tileBytes)))
+    public static func settleTiles(capacityGbps: Double?, tileBytes: Int, fps: Double) -> Int {
+        max(16, Int((capacityGbps ?? 0) * 1e9 / 8 / fps / Double(tileBytes)))
     }
 
     /// Moving tiles per frame sent as BC7, not BC1
-    /// Half the link at 60 fps, no LZ4 credit
+    /// Half the link per frame, no LZ4 credit
     /// BC1's 5:6:5 endpoints band gradients and tint greys
     /// The BC7 encoding already exists
-    public static func bc7MotionTiles(capacityGbps: Double?, tileBytes: Int) -> Int {
-        Int((capacityGbps ?? 0) * 0.5e9 / 8 / 60 / Double(tileBytes))
+    public static func bc7MotionTiles(capacityGbps: Double?, tileBytes: Int, fps: Double) -> Int {
+        Int((capacityGbps ?? 0) * 0.5e9 / 8 / fps / Double(tileBytes))
     }
 
     /// Video bitrate: 40% of the link, clamped to 20…200 Mbps

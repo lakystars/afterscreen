@@ -20,6 +20,31 @@ final class AudioJitterBufferTests: XCTestCase {
         XCTAssertEqual(b.bufferedFrames, 2)
     }
 
+    func testUnderrunsGrowTheTargetAndCalmShrinksIt() {
+        var b = AudioJitterBuffer(channels: 2, target: 4, limit: 20, maxTarget: 8, calmFrames: 10)
+        b.push(frames(1...4))
+        _ = pull(&b, 6)
+        XCTAssertEqual(b.target, 6, "an underrun grows it by half")
+        b.push(frames(1...6))
+        _ = pull(&b, 8)
+        XCTAssertEqual(b.target, 8, "up to the ceiling")
+        XCTAssertEqual(b.limit, 24, "a fixed margin past the target, not a multiple")
+        b.push(frames(1...30))
+        _ = pull(&b, 5)
+        b.push(frames(1...10))
+        _ = pull(&b, 5)
+        XCTAssertEqual(b.target, 7, "ten calm frames shrink it")
+    }
+
+    func testABurstAfterTheTargetGrewIsTrimmedWithinTheMargin() {
+        var b = AudioJitterBuffer(channels: 2, target: 4, limit: 10, maxTarget: 40)
+        b.push(frames(1...4))
+        _ = pull(&b, 8)
+        XCTAssertEqual(b.target, 6)
+        b.push(frames(1...100))
+        XCTAssertLessThanOrEqual(b.bufferedFrames, b.target + 6, "lag bounded by the margin, however large the target")
+    }
+
     func testUnderrunPlaysSilenceCountsItAndBuffersAgain() {
         var b = AudioJitterBuffer(channels: 2, target: 2, limit: 64)
         b.push(frames(1...3))

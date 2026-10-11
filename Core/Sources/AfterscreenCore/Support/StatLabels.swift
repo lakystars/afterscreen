@@ -73,7 +73,8 @@ public enum DebandLabel {
 public enum StatName {
     public static var connection: String { L10n.t("Connection", "연결") }
     public static var picture: String { L10n.t("Picture", "화면") }
-    public static var resources: String { L10n.t("Resources", "자원 사용") }
+    /// Its rows: each Mac by name, then the receiver's upload
+    public static var resources: String { L10n.t("Resources · CPU · RAM · GPU", "자원 사용 · CPU · 메모리 · GPU") }
 
     public static var link: String { L10n.t("Link", "링크") }
     public static var throughput: String { L10n.t("Throughput", "전송량") }
@@ -90,7 +91,8 @@ public enum StatName {
     public static var compression: String { L10n.t("Compression", "압축률") }
     public static var deband: String { L10n.t("Smooth gradients", "계단 완화") }
     public static var encode: String { L10n.t("Encode time", "인코딩 시간") }
-    public static var thisMac: String { L10n.t("This Mac: CPU · RAM · GPU", "이 Mac: CPU · 메모리 · GPU") }
+    /// Receiver's texture upload and decompression
+    public static func upload(_ receiver: String) -> String { L10n.t("\(receiver): upload · decompress", "\(receiver): 업로드 · 압축 해제") }
 }
 
 /// Value text the popover and the HUD share

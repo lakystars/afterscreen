@@ -40,7 +40,8 @@ final class FrameStreamer {
     private let connection: Connection
     // Per-item autorelease: a busy queue would retain Metal objects
     private let queue = DispatchQueue(label: "afterscreen.frames", qos: .userInteractive, autoreleaseFrequency: .workItem)
-    private var gate = FrameGate<CapturedFrame>(interval: 1.0 / 60 - 0.002)
+    /// Paced to the receiver's refresh, 2 ms early for jitter
+    private var gate: FrameGate<CapturedFrame>
     private var pumpTimer: DispatchSourceTimer?
     /// Sends BC7 reference of settled BC1 tiles
     /// Fires even without new frames
@@ -67,7 +68,8 @@ final class FrameStreamer {
 
     init(config: StreamConfig, capacityGbps: Double?, connection: Connection) throws {
         self.connection = connection
-        compression = CompressionPolicy(capacityGbps: capacityGbps)
+        compression = CompressionPolicy(capacityGbps: capacityGbps, fps: config.frameRate)
+        gate = FrameGate(interval: 1 / config.frameRate - 0.002)
         var cache: CVMetalTextureCache?
         let geometry = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
         guard let device = MTLCreateSystemDefaultDevice(), let encoder = try? TileEncoder(device: device, geometry: geometry),
@@ -75,11 +77,11 @@ final class FrameStreamer {
             throw FrameStreamerError.tileEncoder
         }
         tile = (encoder, textureCache, TilePacker())
-        encoder.bc7MotionLimit = PathPolicy.bc7MotionTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes)
-        if let layer = config.video, let video = VideoEncoder(layer: layer) {
+        encoder.bc7MotionLimit = PathPolicy.bc7MotionTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: config.frameRate)
+        if let layer = config.video, let video = VideoEncoder(layer: layer, fps: config.frameRate) {
             videoCodec = layer.codec
             encoder.motion = .video
-            encoder.settleLimit = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes)
+            encoder.settleLimit = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: config.frameRate)
             self.video = video
         }
         // Written frame frees the link: retry held frame, no polling

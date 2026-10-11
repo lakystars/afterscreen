@@ -77,10 +77,10 @@ struct HUDContent: Equatable {
         ]
 
         let resources = [
-            Row(label: L10n.t("Sending Mac: CPU · RAM · GPU", "보내는 Mac: CPU · 메모리 · GPU"),
+            Row(label: peer ?? L10n.t("Sender", "송신기"),
                 value: s.map { StatValue.usage(cpu: $0.cpuPercent, memory: $0.memoryBytes, gpu: $0.gpuPercent) } ?? dash),
-            Row(label: StatName.thisMac, value: r.map { StatValue.usage(cpu: $0.cpuPercent, memory: $0.memoryBytes, gpu: $0.gpuPercent) } ?? dash),
-            Row(label: L10n.t("Upload · decompress", "업로드 · 압축 해제"), value: r.map { StatValue.upload($0.uploadMs, decompress: $0.decompressMs) } ?? dash),
+            Row(label: ComputerName.current, value: r.map { StatValue.usage(cpu: $0.cpuPercent, memory: $0.memoryBytes, gpu: $0.gpuPercent) } ?? dash),
+            Row(label: StatName.upload(ComputerName.current), value: r.map { StatValue.upload($0.uploadMs, decompress: $0.decompressMs) } ?? dash),
         ]
 
         var summary = ["\(fps(r?.displayedFPS)) fps"]

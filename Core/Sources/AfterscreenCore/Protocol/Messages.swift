@@ -1,7 +1,7 @@
 import Foundation
 
 public enum AfterscreenProtocol {
-    public static let version = 10
+    public static let version = 11
     public static let bonjourType = "_afterscreen._tcp"
 }
 
@@ -34,12 +34,67 @@ public struct Hello: Codable, Equatable {
     public var name: String
     public var model: String
     public var osVersion: String
+    /// This Mac's lasting identity, for pairing
+    public var senderID: String?
+    /// Fresh per connection; proofs cover it
+    public var nonce: Data?
+    /// The sender keeps a key for this receiver
+    /// Else the receiver pairs anew, whatever it kept
+    public var paired: Bool?
+    /// Kept key failed its proof: pair anew with a code
+    public var repair: Bool?
 
-    public init(protocolVersion: Int, name: String, model: String, osVersion: String) {
+    public init(protocolVersion: Int, name: String, model: String, osVersion: String, senderID: String? = nil, nonce: Data? = nil,
+                paired: Bool? = nil, repair: Bool? = nil) {
         self.protocolVersion = protocolVersion
         self.name = name
         self.model = model
         self.osVersion = osVersion
+        self.senderID = senderID
+        self.nonce = nonce
+        self.paired = paired
+        self.repair = repair
+    }
+}
+
+/// Receiver's demand before the stream, off a cable
+public struct AuthChallenge: Codable, Equatable {
+    public enum Mode: String, Codable {
+        /// Known sender: prove the kept key
+        case paired
+        /// Unknown sender: the receiver shows a code
+        case pair
+    }
+
+    public var mode: Mode
+    public var nonce: Data
+    /// Pairing only: the receiver's one-time X25519 key
+    public var publicKey: Data?
+
+    public init(mode: Mode, nonce: Data, publicKey: Data? = nil) {
+        self.mode = mode
+        self.nonce = nonce
+        self.publicKey = publicKey
+    }
+}
+
+/// An HMAC proof, either way
+public struct AuthProof: Codable, Equatable {
+    public var mac: Data
+
+    public init(mac: Data) {
+        self.mac = mac
+    }
+}
+
+/// Sender's one-time key and its proof of the code
+public struct PairConfirm: Codable, Equatable {
+    public var publicKey: Data
+    public var mac: Data
+
+    public init(publicKey: Data, mac: Data) {
+        self.publicKey = publicKey
+        self.mac = mac
     }
 }
 
@@ -62,11 +117,19 @@ public struct Welcome: Codable, Equatable {
     /// Per session; the second connection presents it
     /// That connection carries the cursor, clear of queued frames
     public var channelToken: UInt32
+    /// This receiver's lasting identity, for pairing
+    public var receiverID: String?
+    /// Set when the link needs pairing
+    public var auth: AuthChallenge?
+    /// Panel's physical size in mm; the virtual display reports it
+    public var panelMillimeters: PixelSize?
+    /// Panel's highest refresh rate; the stream paces to it
+    public var refreshHz: Double?
 
     public init(protocolVersion: Int, name: String, modelID: String, marketingName: String, osVersion: String,
                 gpuNames: [String], panelPixels: PixelSize, panelPoints: PixelSize,
                 hevcDecode: Bool, h264Decode: Bool, bc7: Bool, hevcMain10Decode: Bool = false, audioPlayback: Bool = false,
-                channelToken: UInt32 = 0) {
+                channelToken: UInt32 = 0, panelMillimeters: PixelSize? = nil, refreshHz: Double? = nil) {
         self.protocolVersion = protocolVersion
         self.name = name
         self.modelID = modelID
@@ -81,7 +144,13 @@ public struct Welcome: Codable, Equatable {
         self.hevcMain10Decode = hevcMain10Decode
         self.audioPlayback = audioPlayback
         self.channelToken = channelToken
+        self.panelMillimeters = panelMillimeters
+        self.refreshHz = refreshHz
     }
+
+    /// Stream rate; receivers that report none run at 60
+    /// Clamped: a bad peer's 0 or 1000 stalls nothing
+    public var frameRate: Double { min(240, max(24, refreshHz ?? 60)) }
 
     /// Retina panels are driven as HiDPI (points = pixels/2)
     public var isRetina: Bool { panelPixels.width >= panelPoints.width * 2 }
@@ -112,14 +181,18 @@ public struct StreamConfig: Codable, Equatable {
     public var linkKind: LinkKind
     /// A quality test stage: generated frames, no virtual display
     public var test: Bool
+    /// Frames per second: the receiver's refresh
+    public var frameRate: Double
 
-    public init(path: StreamPath, streamPixels: PixelSize, video: VideoLayer?, linkKind: LinkKind, test: Bool = false) {
+    public init(path: StreamPath, streamPixels: PixelSize, video: VideoLayer?, linkKind: LinkKind, test: Bool = false, frameRate: Double = 60) {
         self.path = path
         self.streamPixels = streamPixels
         self.video = video
         self.linkKind = linkKind
         self.test = test
+        self.frameRate = frameRate
     }
+
 }
 
 public struct ReceiverStats: Codable, Equatable {
@@ -135,10 +208,12 @@ public struct ReceiverStats: Codable, Equatable {
     public var audioBufferMs: Double?
     /// Per session; each underrun is an audible gap
     public var audioUnderruns: Int?
+    /// Receiver panel's own slider level; a set brightness starts there
+    public var panelLevel: Double?
 
     public init(receivedFPS: Double, displayedFPS: Double, uploadMs: Double, decompressMs: Double, lateFrames: Int,
                 cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double, audioBufferMs: Double? = nil,
-                audioUnderruns: Int? = nil) {
+                audioUnderruns: Int? = nil, panelLevel: Double? = nil) {
         self.receivedFPS = receivedFPS
         self.displayedFPS = displayedFPS
         self.uploadMs = uploadMs
@@ -149,6 +224,7 @@ public struct ReceiverStats: Codable, Equatable {
         self.gpuPercent = gpuPercent
         self.audioBufferMs = audioBufferMs
         self.audioUnderruns = audioUnderruns
+        self.panelLevel = panelLevel
     }
 }
 
@@ -208,11 +284,14 @@ public struct Bye: Codable, Equatable {
     /// Sender reconnects at once over another link or size
     /// Receiver keeps its picture up
     public var relink: Bool
+    /// Keys disagree: the sender drops its own, then pairs anew
+    public var repair: Bool?
 
-    public init(reason: String, pause: Bool = false, relink: Bool = false) {
+    public init(reason: String, pause: Bool = false, relink: Bool = false, repair: Bool? = nil) {
         self.reason = reason
         self.pause = pause
         self.relink = relink
+        self.repair = repair
     }
 
     public init(from decoder: Decoder) throws {
@@ -220,6 +299,7 @@ public struct Bye: Codable, Equatable {
         reason = try c.decode(String.self, forKey: .reason)
         pause = try c.decodeIfPresent(Bool.self, forKey: .pause) ?? false
         relink = try c.decodeIfPresent(Bool.self, forKey: .relink) ?? false
+        repair = try c.decodeIfPresent(Bool.self, forKey: .repair)
     }
 }
 
