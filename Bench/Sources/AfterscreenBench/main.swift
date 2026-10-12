@@ -8,7 +8,7 @@ import AfterscreenSenderKit
 
 // Tile pipeline benchmark per scenario
 // Sender encode/pack → framing → receiver parse/upload
-// Run: `swift run -c release --package-path Bench AfterscreenBench [WxH] [--link Gbps]`
+// Run: `swift run -c release --package-path Bench AfterscreenBench [WxH] [--link Gbps] [--fps rate]`
 
 // MARK: - Measurement
 
@@ -148,8 +148,11 @@ let frames = 120, warmup = 20
 /// `--link <Gbps>`; default Thunderbolt 3 class
 let linkGbps = CommandLine.arguments.firstIndex(of: "--link")
     .flatMap { $0 + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[$0 + 1]) : nil } ?? 40
+/// Stream rate the policy budgets for; `--fps <rate>`
+let fps = max(1, CommandLine.arguments.firstIndex(of: "--fps")
+    .flatMap { $0 + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[$0 + 1]) : nil } ?? 60)
 
-print("Afterscreen tile pipeline bench — \(width)×\(height), \(geometry.tileCount) tiles, \(frames - warmup) frames/scenario, link \(linkGbps) Gbps, \(device.name)")
+print("Afterscreen tile pipeline bench — \(width)×\(height), \(geometry.tileCount) tiles, \(frames - warmup) frames/scenario, link \(linkGbps) Gbps, \(Int(fps)) fps, \(device.name)")
 print("Building scenes…")
 let photoA = Scene.photo(width: width, height: height, seed: 1)
 let photoB = Scene.photo(width: width, height: height, seed: 2)
@@ -210,12 +213,12 @@ for (name, scenes, dirty) in scenarios {
     }
 
     let packer = TilePacker()
-    var policy = CompressionPolicy(capacityGbps: linkGbps)
+    var policy = CompressionPolicy(capacityGbps: linkGbps, fps: fps)
     for i in 0..<frames {
         let measuring = i >= warmup
         let texture = textures[i % textures.count]
         let encodeStage = measuring ? sEncode : Stage()
-        let encoded = encodeStage.measure { encoder.encode(texture: texture, forceAll: i == 0, dirty: dirty, now: Double(i) / 60) }
+        let encoded = encodeStage.measure { encoder.encode(texture: texture, forceAll: i == 0, dirty: dirty, now: Double(i) / fps) }
         encodeStage.gpu += encoder.lastGPUSeconds
         guard let frame = encoded else { continue }
         let packed = (measuring ? sPack : Stage()).measure { () -> (parts: [Data], wireBytes: Int, lz4In: Int, lz4Out: Int) in
@@ -247,7 +250,7 @@ for (name, scenes, dirty) in scenarios {
     }
 
     // Once settled, BC7 reference follows BC1 sent during motion
-    if let settled = encoder.refine(now: Double(frames) / 60 + 1) {
+    if let settled = encoder.refine(now: Double(frames) / fps + 1) {
         let packed = packer.pack(settled, geometry: geometry, compression: .none)
         let payload = packed.parts.reduce(Data(), +)
         let cb = receiverQueue.makeCommandBuffer()!

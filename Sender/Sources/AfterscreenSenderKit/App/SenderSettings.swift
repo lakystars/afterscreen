@@ -105,6 +105,7 @@ public final class SenderSettings: ObservableObject {
         static let sound = "sound"
         static let deband = "deband"
         static let streamResolution = "streamResolution"
+        static let highRefresh = "highRefresh"
         static let displayRole = "displayRole"
         static let deviceID = "deviceID"
         static let mirrorFit = "mirrorFit"
@@ -154,6 +155,11 @@ public final class SenderSettings: ObservableObject {
 
     @Published public var streamResolution: StreamResolution {
         didSet { defaults.set(streamResolution.rawValue, forKey: Key.streamResolution) }
+    }
+
+    /// Experiment: 120 fps on Thunderbolt if the encoder keeps up
+    @Published public var highRefresh: Bool {
+        didSet { defaults.set(highRefresh, forKey: Key.highRefresh) }
     }
 
     /// Frame rate and throughput next to the menu bar icon
@@ -206,6 +212,7 @@ public final class SenderSettings: ObservableObject {
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
         sound = defaults.object(forKey: Key.sound) as? Bool ?? true
         streamResolution = defaults.enumValue(forKey: Key.streamResolution, default: .auto)
+        highRefresh = defaults.bool(forKey: Key.highRefresh)
         deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
         brightnessFollows = defaults.object(forKey: Key.brightnessFollows) as? Bool ?? true
         receiverBrightness = defaults.object(forKey: Key.receiverBrightness) as? Double ?? 0.5

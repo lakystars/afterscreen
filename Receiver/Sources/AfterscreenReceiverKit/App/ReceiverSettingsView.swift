@@ -1,4 +1,5 @@
 import AfterscreenCore
+import AppKit
 import SwiftUI
 
 /// Receiver settings window content; SwiftUI as of macOS 10.15
@@ -7,6 +8,20 @@ struct ReceiverSettingsView: View {
     let pairings: PairingStoring
     /// Re-read after a removal; the keychain posts no change
     @State private var paired: [(id: String, name: String)] = []
+    /// Re-read as screens come and go
+    @State private var displays: [ReceiverDisplay] = []
+
+    /// Automatic is the empty key
+    private var displayChoice: Binding<String> {
+        Binding(get: { settings.display?.key ?? "" }, set: { key in
+            guard !key.isEmpty else { return settings.display = nil }
+            if let d = displays.first(where: { $0.key == key }) { settings.display = .init(key: d.key, name: d.name) }
+        })
+    }
+
+    private var chosenMissing: ReceiverSettings.ChosenDisplay? {
+        settings.display.flatMap { chosen in displays.contains { $0.key == chosen.key } ? nil : chosen }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -37,6 +52,34 @@ struct ReceiverSettingsView: View {
                 }
             }
             .onAppear { paired = pairings.pairs }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L10n.t("Show on", "표시할 화면")).font(.headline)
+                Picker("", selection: displayChoice) {
+                    Text(L10n.t("Automatic: \(ComputerName.current)'s own screen first", "자동: \(ComputerName.current) 자체 화면 우선")).tag("")
+                    ForEach(displays, id: \.key) { d in
+                        // Verbatim: no thousands separators
+                        Text(verbatim: "\(d.name) · \(d.pixels.width)×\(d.pixels.height)").tag(d.key)
+                    }
+                    if let missing = chosenMissing {
+                        Text(L10n.t("\(missing.name) (not connected)", "\(missing.name) (연결 안 됨)")).tag(missing.key)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 340)
+                if let missing = chosenMissing {
+                    Text(L10n.t("\(missing.name) is not connected, so the screen is picked automatically.",
+                                "\(missing.name)이(가) 연결돼 있지 않아 자동으로 고릅니다."))
+                        .font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                Toggle(L10n.t("Switch the screen to its 1:1 resolution while streaming", "스트리밍 중에는 화면을 패널 1:1 해상도로 전환"), isOn: $settings.matchPanelMode)
+                Text(L10n.t("A scaled resolution resamples the stream twice and blurs it. Windows on \(ComputerName.current) may move when it switches back. Applies from the next connection.",
+                            "스케일된 해상도에서는 스트림이 두 번 리샘플링돼 흐려집니다. 되돌릴 때 \(ComputerName.current)의 창 위치가 바뀔 수 있습니다. 다음 연결부터 적용됩니다."))
+                    .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .onAppear { displays = ReceiverDisplay.connected() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+                displays = ReceiverDisplay.connected()
+            }
             VStack(alignment: .leading, spacing: 4) {
                 Text(L10n.t("Show the stream", "스트림 표시 방식")).font(.headline)
                 Picker("", selection: $settings.presentation) {

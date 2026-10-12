@@ -6,12 +6,15 @@ import AppKit
 final class PairingCodeWindow {
     private var panel: NSPanel?
 
-    func show(code: String, sender: String) {
+    /// `screen`: where the stream will show; nil: the key screen
+    func show(code: String, sender: String, on screen: NSScreen?) {
         hide()
         let size = NSSize(width: 620, height: 290)
-        let frame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let panel = NSPanel(contentRect: NSRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2, width: size.width, height: size.height),
-                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let target = screen ?? NSScreen.main
+        let frame = target?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        // Centred, relative to the screen's origin as `screen:` takes it
+        let panel = NSPanel(contentRect: NSRect(x: (frame.width - size.width) / 2, y: (frame.height - size.height) / 2, width: size.width, height: size.height),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false, screen: target)
         panel.level = .screenSaver
         panel.isOpaque = false
         panel.backgroundColor = .clear

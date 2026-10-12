@@ -161,7 +161,7 @@ public final class AppModel: ObservableObject {
                                     deband: settings.deband, resolution: settings.streamResolution,
                                     role: settings.displayRole, fit: settings.mirrorFit,
                                     ownBrightness: settings.brightnessFollows ? nil : settings.receiverBrightness,
-                                    senderID: settings.deviceID, pairings: pairings)
+                                    highRefresh: settings.highRefresh, senderID: settings.deviceID, pairings: pairings)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.follow(pairing: s.pairing, wrongCodes: s.wrongCodes)
@@ -319,7 +319,7 @@ public final class AppModel: ObservableObject {
         // Resolution and mirroring size the typical-use stage
         let session = SenderSession(target: receiver, purpose: .qualityTest, link: settings.link, deband: settings.deband,
                                     resolution: settings.streamResolution, role: settings.displayRole, fit: settings.mirrorFit,
-                                    senderID: settings.deviceID, pairings: pairings)
+                                    highRefresh: settings.highRefresh, senderID: settings.deviceID, pairings: pairings)
         session.onUpdate = { [weak self] s in
             self?.follow(pairing: s.pairing, wrongCodes: s.wrongCodes)
             if let r = s.qualityTest { self?.testReport = r }
@@ -344,5 +344,5 @@ public final class AppModel: ObservableObject {
     }
 
     public var statusTitle: String { StatusTitle.text(snapshot, stats: settings.menuBarStats) }
-    public var statusIcon: NSImage { StatusIcon.image(link: StatusTitle.mark(snapshot)) }
+    public var statusIcon: NSImage { StatusIcon.image(link: StatusTitle.mark(snapshot), role: .sender) }
 }

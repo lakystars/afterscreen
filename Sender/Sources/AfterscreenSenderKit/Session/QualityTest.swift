@@ -101,7 +101,7 @@ final class QualityTestRun {
     private var report: QualityTest.Report
     private var index = -1
     private var streamer: FrameStreamer?
-    /// Pattern frames at the receiver's refresh
+    /// Pattern frames at the stream's rate
     private var ticker: DispatchSourceTimer?
     private var stageStart = 0.0
     private var warmup = 1.0

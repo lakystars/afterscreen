@@ -56,7 +56,7 @@ struct PowerSequence {
     }
 }
 
-/// Fullscreen stream window on the main display
+/// Fullscreen stream window on the chosen screen
 /// Cursor, hint and HUD overlays
 /// New window per session: closed full-screen windows leave no state
 final class StreamWindow {
@@ -158,6 +158,11 @@ final class StreamWindow {
     /// Applies at the next session's first show
     var presentation = ReceiverSettings.Presentation.space
     /// Applies at the next session's first show
+    /// nil: the screen with keyboard focus
+    var display: CGDirectDisplayID?
+    /// Applies at the next session's first show
+    var matchPanelMode = true
+    /// Applies at the next session's first show
     var effect = ReceiverSettings.Effect.tiles
     /// Main queue: a live redraw while the tile wave opens
     var onWaveRedraw: (() -> Void)? {
@@ -212,6 +217,11 @@ final class StreamWindow {
     private var idleTimer: Timer?
     private var observers: [NSObjectProtocol] = []
     private let actions = MenuActions()
+    private let panelMode = PanelMode()
+    /// Mode put back once a closed Space has slid away
+    private var restoreMode: DispatchWorkItem?
+    /// Waiting for screen frames after a mode switch
+    private var opening = false
 
     private let windowed: Bool
 
@@ -270,7 +280,7 @@ final class StreamWindow {
         hud.menuProvider = view.menuProvider
         view.onLayout = { [weak self, weak renderer] bounds, scale in
             self?.tube.layout(bounds: bounds)
-            renderer?.layout(bounds: bounds, scale: scale)
+            renderer?.layout(bounds: bounds, scale: scale, topInset: self?.notchInset ?? 0)
             self?.hintLayer.contentsScale = scale
             self?.noticeText.contentsScale = scale
             self?.placeCursor()
@@ -289,13 +299,43 @@ final class StreamWindow {
             hud.isHidden = false
             forcedHUD = true
         }
-        guard keyMonitor == nil else {
+        guard keyMonitor == nil, !opening else {
             view.needsLayout = true
             refreshHUD()
             return
         }
         closeNow()
+        // A new session keeps the switched mode
+        restoreMode?.cancel()
+        restoreMode = nil
         generation += 1
+        guard !windowed, matchPanelMode, let id = display, let size = panelMode.match(id) else {
+            // Turned off while the last session's mode was kept
+            if windowed || !matchPanelMode { panelMode.restore() }
+            return open()
+        }
+        opening = true
+        let session = generation
+        whenScreen(id, reaches: size) { [weak self] in
+            guard let self = self, self.generation == session else { return }
+            self.opening = false
+            self.open()
+        }
+    }
+
+    /// Screen frames follow a mode switch a moment later
+    /// Waits for the new size, two seconds at most
+    private func whenScreen(_ id: CGDirectDisplayID, reaches size: CGSize, _ body: @escaping () -> Void) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        func check() {
+            let now = NSScreen.screens.first { $0.displayID == id }?.frame.size
+            guard now != size, ProcessInfo.processInfo.systemUptime < deadline else { return body() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: check)
+        }
+        check()
+    }
+
+    private func open() {
         // Nothing carries over from an earlier window's effect
         shownEffect = effect
         cursorSuppressed = shownEffect == .tiles
@@ -312,8 +352,9 @@ final class StreamWindow {
         }
         hud.alphaValue = 0
         let style = Style(presentation: presentation, windowed: windowed)
-        let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let window = makeWindow(style, frame: style.initialFrame(in: screen))
+        let target = display.flatMap { id in NSScreen.screens.first { $0.displayID == id } } ?? NSScreen.main
+        let screen = target?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let window = makeWindow(style, frame: style.initialFrame(in: screen), on: target)
         NSApp.activate(ignoringOtherApps: true)
         if !windowed && !style.fullScreen {
             NSApp.presentationOptions = [.hideDock, .hideMenuBar]
@@ -416,6 +457,11 @@ final class StreamWindow {
         mouseMonitor = nil
         idleTimer?.invalidate()
         idleTimer = nil
+        if opening {
+            opening = false
+            generation += 1
+            return panelMode.restore()
+        }
         guard let window = window else { return }
         generation += 1
         NSAnimationContext.runAnimationGroup { context in
@@ -477,9 +523,17 @@ final class StreamWindow {
         if shownEffect == .tiles { wave.finish() }
         // Closing a full-screen window exits its Space via system transition
         // Closed either way: a window mid-slide must not come back
-        if !window.styleMask.contains(.fullScreen) { window.orderOut(nil) }
+        let fullScreen = window.styleMask.contains(.fullScreen)
+        if !fullScreen { window.orderOut(nil) }
         window.close()
         if !windowed { NSApp.presentationOptions = [] }
+        // After the Space's slide: a mode switch mid-slide stutters
+        let restore = DispatchWorkItem { [weak self] in
+            self?.restoreMode = nil
+            self?.panelMode.restore()
+        }
+        restoreMode = restore
+        DispatchQueue.main.asyncAfter(deadline: .now() + (fullScreen ? 1 : 0), execute: restore)
     }
 
     /// New session during a power-off: that window closes at once
@@ -489,10 +543,14 @@ final class StreamWindow {
         close(pending.window)
     }
 
-    private func makeWindow(_ style: Style, frame: NSRect) -> KeyWindow {
+    /// `screen`: without it AppKit moves the window to the main one
+    private func makeWindow(_ style: Style, frame: NSRect, on screen: NSScreen?) -> KeyWindow {
         observers.forEach(NotificationCenter.default.removeObserver)
         window?.contentView = nil
-        let window = KeyWindow(contentRect: frame, styleMask: style.mask, backing: .buffered, defer: false)
+        // This initializer takes the rect from the screen's origin
+        let origin = screen?.frame.origin ?? .zero
+        let local = NSRect(x: frame.minX - origin.x, y: frame.minY - origin.y, width: frame.width, height: frame.height)
+        let window = KeyWindow(contentRect: local, styleMask: style.mask, backing: .buffered, defer: false, screen: screen)
         window.title = "Afterscreen Receiver"
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
@@ -635,8 +693,21 @@ final class StreamWindow {
         placeCursor()
     }
 
+    /// The stream in view points
+    /// Placed as the renderer does: pixels, y down, then flipped
     private var videoRect: CGRect {
-        RenderGeometry.aspectFit(content: contentPixels, in: view.bounds)
+        let scale = window?.backingScaleFactor ?? 1
+        let w = view.bounds.width * scale, h = view.bounds.height * scale, inset = min(h, notchInset * scale)
+        let r = RenderGeometry.aspectFit(content: contentPixels, in: CGRect(x: 0, y: inset, width: w, height: h - inset))
+        return CGRect(x: r.minX / scale, y: (h - r.maxY) / scale, width: r.width / scale, height: r.height / scale)
+    }
+
+    /// Points of the view beside the camera notch
+    /// The stream sits below them
+    /// A full-screen Space already ends there
+    private var notchInset: CGFloat {
+        guard #available(macOS 12, *), let window = window, let screen = window.screen, screen.safeAreaInsets.top > 0 else { return 0 }
+        return max(0, min(window.frame.maxY, screen.frame.maxY) - (screen.frame.maxY - screen.safeAreaInsets.top))
     }
 
     private func placeCursor() {

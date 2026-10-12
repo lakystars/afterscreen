@@ -55,12 +55,12 @@ final class StatusButtonTests: XCTestCase {
     func testTheButtonIsTouchedOnlyWhenSomethingChanges() {
         // Each assignment lays out the item again, and the popover anchored to it closes its open menus
         let button = NSButton()
-        let idle = StatusIcon.image(link: nil)
+        let idle = StatusIcon.image(link: nil, role: .sender)
         XCTAssertTrue(StatusButton.show(button, image: idle, title: ""))
-        XCTAssertFalse(StatusButton.show(button, image: StatusIcon.image(link: nil), title: ""))
-        XCTAssertTrue(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt), title: ""))
-        XCTAssertTrue(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt), title: "60fps"))
-        XCTAssertFalse(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt), title: "60fps"))
+        XCTAssertFalse(StatusButton.show(button, image: StatusIcon.image(link: nil, role: .sender), title: ""))
+        XCTAssertTrue(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt, role: .sender), title: ""))
+        XCTAssertTrue(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt, role: .sender), title: "60fps"))
+        XCTAssertFalse(StatusButton.show(button, image: StatusIcon.image(link: .thunderbolt, role: .sender), title: "60fps"))
     }
 }
 
@@ -95,9 +95,23 @@ final class PopoverFocusKeeperTests: XCTestCase {
 
 final class SenderSettingsTests: XCTestCase {
     private var defaults: UserDefaults!
+    private var suite = ""
 
     override func setUp() {
-        defaults = UserDefaults(suiteName: "afterscreen-tests-\(UUID().uuidString)")
+        // A path: the plist stays out of ~/Library/Preferences
+        suite = FileManager.default.temporaryDirectory.appendingPathComponent("afterscreen-tests-\(UUID().uuidString)").path
+        defaults = UserDefaults(suiteName: suite)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(atPath: suite + ".plist")
+    }
+
+    func testHighRefreshIsAnExperimentOffByDefault() {
+        let settings = SenderSettings(defaults: defaults)
+        XCTAssertFalse(settings.highRefresh)
+        settings.highRefresh = true
+        XCTAssertTrue(SenderSettings(defaults: defaults).highRefresh)
     }
 
     func testDefaultsAndPersistence() {

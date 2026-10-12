@@ -2,10 +2,13 @@ import AppKit
 
 /// Menu bar icon of both apps
 /// Display outline with the link symbol in its screen
+/// Corner badge tells the apps apart: arrow out or in
 /// Same size for every link
 /// Custom-drawn: SF "display" stand leaves the mark too little room
 @available(macOS 11, *)
 public enum StatusIcon {
+    public enum Role { case sender, receiver }
+
     static let size = NSSize(width: 20, height: 17)
     /// Screen outline path; the stroke straddles it
     static let screen = NSRect(x: 0.75, y: 3.25, width: 18.5, height: 13)
@@ -14,28 +17,44 @@ public enum StatusIcon {
     /// 8.5 pt tall unless wider than 13 pt
     static let markHeight: CGFloat = 8.5
     static let markWidth: CGFloat = 13
+    /// Disc touching the bezel's outer top and right edges
+    static let badgeRadius: CGFloat = 3.75
+    /// Cleared around the disc: cuts the bezel and the mark
+    static let badgeGap: CGFloat = 1.25
+    /// Arrow ink knocked out of the disc
+    static let arrowHeight: CGFloat = 4.2
+    static var badgeCentre: NSPoint {
+        NSPoint(x: screen.maxX + bezel - badgeRadius, y: screen.maxY + bezel - badgeRadius)
+    }
+
+    private struct Key: Hashable {
+        let link: LinkKind?
+        let role: Role
+    }
 
     private static let lock = NSLock()
     private static var symbols: [String: (image: NSImage, ink: NSRect)] = [:]
-    private static var icons: [LinkKind?: NSImage] = [:]
+    private static var icons: [Key: NSImage] = [:]
 
-    /// One image per link
+    /// One image per link and role
     /// Unchanged link hands the status button the same object
-    public static func image(link: LinkKind?) -> NSImage {
+    public static func image(link: LinkKind?, role: Role) -> NSImage {
+        let key = Key(link: link, role: role)
         lock.lock()
-        let cached = icons[link]
+        let cached = icons[key]
         lock.unlock()
         if let cached = cached { return cached }
-        let made = draw(link: link)
+        let made = draw(link: link, role: role)
         lock.lock()
         defer { lock.unlock() }
-        if let raced = icons[link] { return raced }
-        icons[link] = made
+        if let raced = icons[key] { return raced }
+        icons[key] = made
         return made
     }
 
-    private static func draw(link: LinkKind?) -> NSImage {
+    private static func draw(link: LinkKind?, role: Role) -> NSImage {
         let mark = LinkLabel.symbol(link).map { symbol($0) }
+        let arrow = symbol(role == .sender ? "arrow.up.right" : "arrow.down.left", weight: .heavy)
         let image = NSImage(size: size, flipped: false) { _ in
             NSColor.black.set()
             let outline = NSBezierPath(roundedRect: screen, xRadius: 2.5, yRadius: 2.5)
@@ -44,10 +63,25 @@ public enum StatusIcon {
             NSBezierPath(rect: NSRect(x: 9, y: 1.5, width: 2, height: 1.75)).fill()
             NSBezierPath(roundedRect: NSRect(x: 6, y: 0.25, width: 8, height: 1.5), xRadius: 0.75, yRadius: 0.75).fill()
             if let mark = mark { mark.image.draw(in: destination(mark)) }
+            badge(arrow)
             return true
         }
         image.isTemplate = true
         return image
+    }
+
+    /// Gap cleared, disc filled, arrow knocked out of it
+    private static func badge(_ arrow: (image: NSImage, ink: NSRect)) {
+        let c = badgeCentre, r = badgeRadius, g = badgeRadius + badgeGap
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.compositingOperation = .clear
+        NSBezierPath(ovalIn: NSRect(x: c.x - g, y: c.y - g, width: g * 2, height: g * 2)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        NSBezierPath(ovalIn: NSRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)).fill()
+        let k = arrowHeight / max(arrow.ink.height, 0.1)
+        let rect = NSRect(x: c.x - arrow.ink.midX * k, y: c.y - arrow.ink.midY * k,
+                          width: arrow.image.size.width * k, height: arrow.image.size.height * k)
+        arrow.image.draw(in: rect, from: .zero, operation: .destinationOut, fraction: 1)
     }
 
     /// Where the mark's ink lands in the icon
@@ -75,14 +109,15 @@ public enum StatusIcon {
     }
 
     /// Symbol at 20 pt and its ink bounds, measured once
-    private static func symbol(_ name: String) -> (image: NSImage, ink: NSRect) {
+    private static func symbol(_ name: String, weight: NSFont.Weight = .bold) -> (image: NSImage, ink: NSRect) {
+        let key = "\(name) \(weight.rawValue)"
         lock.lock()
         defer { lock.unlock() }
-        if let cached = symbols[name] { return cached }
-        let config = NSImage.SymbolConfiguration(pointSize: 20, weight: .bold)
+        if let cached = symbols[key] { return cached }
+        let config = NSImage.SymbolConfiguration(pointSize: 20, weight: weight)
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config) ?? NSImage()
         let entry = (image, inkBounds(image))
-        symbols[name] = entry
+        symbols[key] = entry
         return entry
     }
 

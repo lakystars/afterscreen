@@ -46,19 +46,45 @@ final class StatLabelsTests: XCTestCase {
     }
 
     func testStatusIconKeepsItsSizeAndShowsTheLink() throws {
-        let idle = StatusIcon.image(link: nil)
-        let bolt = StatusIcon.image(link: .thunderbolt)
+        let idle = StatusIcon.image(link: nil, role: .sender)
+        let bolt = StatusIcon.image(link: .thunderbolt, role: .sender)
         XCTAssertTrue(idle.isTemplate)
         XCTAssertTrue(bolt.isTemplate)
         XCTAssertEqual(idle.size, bolt.size, "the menu bar item does not shift as the link changes")
-        XCTAssertEqual(StatusIcon.image(link: .wifi).size, idle.size)
+        XCTAssertEqual(StatusIcon.image(link: .wifi, role: .sender).size, idle.size)
         XCTAssertNotEqual(try pixels(idle), try pixels(bolt))
     }
 
-    func testStatusIconsAreMadeOncePerLink() {
-        XCTAssertTrue(StatusIcon.image(link: .wifi) === StatusIcon.image(link: .wifi))
-        XCTAssertTrue(StatusIcon.image(link: nil) === StatusIcon.image(link: nil))
-        XCTAssertFalse(StatusIcon.image(link: nil) === StatusIcon.image(link: .wifi))
+    func testStatusIconsAreMadeOncePerLinkAndRole() {
+        XCTAssertTrue(StatusIcon.image(link: .wifi, role: .sender) === StatusIcon.image(link: .wifi, role: .sender))
+        XCTAssertTrue(StatusIcon.image(link: nil, role: .receiver) === StatusIcon.image(link: nil, role: .receiver))
+        XCTAssertFalse(StatusIcon.image(link: nil, role: .sender) === StatusIcon.image(link: .wifi, role: .sender))
+        XCTAssertFalse(StatusIcon.image(link: nil, role: .sender) === StatusIcon.image(link: nil, role: .receiver))
+    }
+
+    func testTheCornerBadgeTellsTheAppsApart() throws {
+        let sender = StatusIcon.image(link: nil, role: .sender)
+        let receiver = StatusIcon.image(link: nil, role: .receiver)
+        XCTAssertEqual(sender.size, receiver.size)
+        XCTAssertNotEqual(try pixels(sender), try pixels(receiver), "arrow out and arrow in")
+        // Top bezel: whole, then the gap, then the disc
+        let c = StatusIcon.badgeCentre, r = StatusIcon.badgeRadius
+        let bezelY = StatusIcon.screen.maxY
+        let gapX = c.x - ((r + StatusIcon.badgeGap / 2) * (r + StatusIcon.badgeGap / 2) - (bezelY - c.y) * (bezelY - c.y)).squareRoot()
+        for image in [sender, receiver] {
+            XCTAssertGreaterThan(try alpha(image, at: NSPoint(x: 5, y: bezelY)), 0.9)
+            XCTAssertLessThan(try alpha(image, at: NSPoint(x: gapX, y: bezelY)), 0.1)
+            XCTAssertGreaterThan(try alpha(image, at: NSPoint(x: c.x, y: c.y + r - 0.5)), 0.9)
+        }
+        // Arrowhead: top right on the sender, bottom left on the receiver
+        let head = NSPoint(x: c.x + 0.8, y: c.y + 1.75), tail = NSPoint(x: c.x - 0.8, y: c.y - 1.75)
+        XCTAssertLessThan(try alpha(sender, at: head), 0.1)
+        XCTAssertGreaterThan(try alpha(sender, at: tail), 0.9)
+        XCTAssertLessThan(try alpha(receiver, at: tail), 0.1)
+        XCTAssertGreaterThan(try alpha(receiver, at: head), 0.9)
+        // Disc flush with the bezel's outer corner
+        XCTAssertEqual(c.x + r, StatusIcon.screen.maxX + StatusIcon.bezel, accuracy: 0.01)
+        XCTAssertEqual(c.y + r, StatusIcon.screen.maxY + StatusIcon.bezel, accuracy: 0.01)
     }
 
     func testLinkMarksFillTheScreenAlike() {
@@ -81,6 +107,19 @@ final class StatLabelsTests: XCTestCase {
         image.draw(in: NSRect(x: 0, y: 0, width: 64, height: 64))
         NSGraphicsContext.restoreGraphicsState()
         return try XCTUnwrap(rep.tiffRepresentation)
+    }
+
+    /// Alpha at a point in points, drawn at 4x
+    private func alpha(_ image: NSImage, at point: NSPoint) throws -> CGFloat {
+        let s: CGFloat = 4, w = Int(image.size.width * s), h = Int(image.size.height * s)
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
+                                                 hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
+        NSGraphicsContext.restoreGraphicsState()
+        // Bitmap rows run top down
+        return try XCTUnwrap(rep.colorAt(x: Int(point.x * s), y: Int((image.size.height - point.y) * s))).alphaComponent
     }
 
     func testJumboFramesAreAdvisedOnWiredLinks() {

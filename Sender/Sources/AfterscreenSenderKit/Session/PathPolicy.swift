@@ -36,14 +36,15 @@ public enum PathPolicy {
     static let heightRange = 480...4320
 
     /// `source`: mirrored display's pixels; nil streams a panel-sized display
-    /// `largestVideo`: biggest layer this Mac encodes at the receiver's rate
+    /// `largestVideo`: biggest layer encoded at the stream's rate
+    /// `maxFrameRate`: above 60 only by the high-refresh experiment
     public static func choose(link: LinkKind, capacityGbps: Double?, welcome: Welcome, resolution: StreamResolution = .panel,
-                              source: PixelSize? = nil, largestVideo: PixelSize? = nil) -> StreamConfig? {
+                              source: PixelSize? = nil, largestVideo: PixelSize? = nil, maxFrameRate: Double = HighRefresh.base) -> StreamConfig? {
         guard link != .unsupported, isPlausible(welcome) else { return nil }
         let screen = aligned(welcome.panelPixels)
         let picked = resolve(resolution, panel: screen, source: source, capacityGbps: capacityGbps)
         let panel = streamPixels(panel: screen, capacityGbps: capacityGbps, resolution: picked, source: source)
-        let fps = welcome.frameRate
+        let fps = min(welcome.frameRate, maxFrameRate)
         let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link, frameRate: fps)
         if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps(panel, fps: fps) { return tiles }
         guard welcome.hevcDecode || welcome.h264Decode else { return tiles }

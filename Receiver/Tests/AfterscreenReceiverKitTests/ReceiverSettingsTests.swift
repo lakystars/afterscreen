@@ -5,15 +5,19 @@ import XCTest
 
 final class ReceiverSettingsTests: XCTestCase {
     private var defaults: UserDefaults!
+    private var suite = ""
     private var agents: URL!
 
     override func setUpWithError() throws {
-        defaults = UserDefaults(suiteName: "afterscreen-receiver-tests-\(UUID().uuidString)")
+        // A path: the plist stays out of ~/Library/Preferences
+        suite = FileManager.default.temporaryDirectory.appendingPathComponent("afterscreen-receiver-tests-\(UUID().uuidString)").path
+        defaults = UserDefaults(suiteName: suite)
         agents = FileManager.default.temporaryDirectory.appendingPathComponent("agents-\(UUID().uuidString)")
     }
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: agents)
+        try? FileManager.default.removeItem(atPath: suite + ".plist")
     }
 
     private func settings() -> ReceiverSettings {
@@ -32,6 +36,18 @@ final class ReceiverSettingsTests: XCTestCase {
         XCTAssertEqual(again.presentation, .space, "a desktop of its own by default")
         again.presentation = .cover
         XCTAssertEqual(settings().presentation, .cover)
+    }
+
+    func testScreenChoiceIsRemembered() {
+        let s = settings()
+        XCTAssertNil(s.display, "automatic by default")
+        XCTAssertTrue(s.matchPanelMode)
+        s.display = ReceiverSettings.ChosenDisplay(key: "610-41057-1", name: "LG Ultra HD")
+        s.matchPanelMode = false
+        XCTAssertEqual(settings().display, ReceiverSettings.ChosenDisplay(key: "610-41057-1", name: "LG Ultra HD"))
+        XCTAssertFalse(settings().matchPanelMode)
+        s.display = nil
+        XCTAssertNil(settings().display)
     }
 
     func testConnectionEffectDefaultsToTheTileWave() {

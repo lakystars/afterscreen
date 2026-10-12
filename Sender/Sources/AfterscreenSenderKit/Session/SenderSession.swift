@@ -38,6 +38,8 @@ public struct SenderSnapshot {
     public var videoStartBitrate: Int?
     /// Congestion turned the picture down for a while
     public var qualityLowered = false
+    /// High-refresh experiment's outcome; nil while not asked
+    public var highRefresh: HighRefresh.Verdict?
     public var qualityTest: QualityTest.Report?
     /// Chosen link did not answer; the fastest carries the stream
     public var missingLink: LinkKind?
@@ -98,12 +100,14 @@ public final class SenderSession {
     private var cursorConnection: Connection?
     private var displaySize: DisplaySize
     private var sound: Bool
+    /// Experiment: above 60 fps when the encoder keeps up
+    private let highRefresh: Bool
     private var deband: Deband
     /// Last brightness sent; the receiver's panel follows this Mac's
     private var brightnessSent: Double?
     /// Receiver's own slider level; nil follows this Mac
     private var ownBrightness: Double?
-    /// Largest video layer this Mac encodes at the receiver's rate
+    /// Largest video layer encoded at the stream's rate
     private var videoCap: PixelSize?
     /// Ignored by the quality test, which measures the panel
     private let resolution: StreamResolution
@@ -147,7 +151,7 @@ public final class SenderSession {
     /// `link`: link to use; nil or unreachable uses the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
                 sound: Bool = false, deband: Deband = .normal, resolution: StreamResolution = .panel,
-                role: DisplayRole = .extend, fit: MirrorFit = .mac, ownBrightness: Double? = nil,
+                role: DisplayRole = .extend, fit: MirrorFit = .mac, ownBrightness: Double? = nil, highRefresh: Bool = false,
                 senderID: String = "", pairings: PairingStoring = MemoryPairingStore()) {
         self.target = target
         self.senderID = senderID
@@ -161,6 +165,7 @@ public final class SenderSession {
         self.role = role
         self.fit = fit
         self.ownBrightness = ownBrightness
+        self.highRefresh = highRefresh
     }
 
     /// Main queue: nil follows this Mac; a level sets the receiver's
@@ -546,23 +551,50 @@ public final class SenderSession {
         probe()
     }
 
+    /// 60 fps unless the experiment is on, over Thunderbolt
+    /// fast enough for lossless tiles at 120
+    /// and the encoder takes under half a 120 fps frame
+    /// Timed off main at the panel's size
+    private func chooseFrameRate(link: LinkKind, gbps: Double, welcome: Welcome) {
+        let hz = welcome.frameRate, size = PathPolicy.aligned(welcome.panelPixels)
+        let fits = gbps >= PathPolicy.tileCapacityGbps(size, fps: HighRefresh.ceiling)
+        let decide = { [weak self] (ms: Double?) in
+            guard let self = self, !self.ended else { return }
+            let verdict = HighRefresh.verdict(enabled: self.highRefresh, link: link, receiverHz: hz, gbps: gbps, tilesFit: fits, encodeMs: ms)
+            self.update { $0.highRefresh = verdict }
+            if SenderSession.logStats, let v = verdict {
+                FileHandle.standardError.write(Data("[sender] high refresh: \(v), receiver \(Int(hz)) Hz\n".utf8))
+            }
+            self.configure(link: link, gbps: gbps, welcome: welcome, maxRate: HighRefresh.maxFrameRate(verdict))
+        }
+        guard HighRefresh.worthTiming(enabled: highRefresh, link: link, receiverHz: hz, tilesFit: fits) else { return decide(nil) }
+        update { $0.state = L10n.t("Timing the encoder", "인코더 속도 확인 중") }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ms = TileCapacity.fullMotionMs(size, limitMs: HighRefresh.budgetMs)
+            DispatchQueue.main.async { decide(ms) }
+        }
+    }
+
     /// Picks the path and size, then starts the picture
     /// Waits up to 2 s for a changing main display
     /// For example, a virtual display that was main just left
-    private func configure(link: LinkKind, gbps: Double, welcome: Welcome, attempt: Int = 0) {
+    /// `maxRate`: nil until the high-refresh experiment has decided
+    private func configure(link: LinkKind, gbps: Double, welcome: Welcome, attempt: Int = 0, maxRate: Double? = nil) {
         guard !ended else { return }
+        guard let maxRate = maxRate else { return chooseFrameRate(link: link, gbps: gbps, welcome: welcome) }
         if purpose == .display, role == .mirror, fit == .mac {
             guard let source = MirrorSource.main else {
                 guard attempt < 8 else { return end(L10n.t("No display to mirror", "복제할 디스플레이가 없습니다")) }
                 return DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                    self?.configure(link: link, gbps: gbps, welcome: welcome, attempt: attempt + 1)
+                    self?.configure(link: link, gbps: gbps, welcome: welcome, attempt: attempt + 1, maxRate: maxRate)
                 }
             }
             mirrorSource = source
         }
         let test = purpose == .qualityTest
         let choose = { (resolution: StreamResolution, source: PixelSize?, largest: PixelSize?) in
-            PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome, resolution: resolution, source: source, largestVideo: largest)
+            PathPolicy.choose(link: link, capacityGbps: gbps, welcome: welcome, resolution: resolution, source: source, largestVideo: largest,
+                              maxFrameRate: maxRate)
         }
         // Automatic resolved per receiver; near the line it holds
         let key = welcome.receiverID ?? target.name, screen = PathPolicy.aligned(welcome.panelPixels)

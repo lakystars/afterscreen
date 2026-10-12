@@ -119,7 +119,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     private lazy var statsWidth: CGFloat = {
         let font = statusItem.button?.font ?? NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         let text = ceil(("60fps · 888M" as NSString).size(withAttributes: [.font: font]).width)
-        return ceil(StatusIcon.image(link: nil).size.width) + 4 + text + 12
+        return ceil(StatusIcon.image(link: nil, role: .sender).size.width) + 4 + text + 12
     }()
 
     @objc private func toggle() {

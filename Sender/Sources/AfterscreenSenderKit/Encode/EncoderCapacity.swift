@@ -14,7 +14,7 @@ enum EncoderCapacity {
     static let frames = 30
     /// Not timed: first keyframe, encoder warming up
     static let warmup = 3
-    /// Headroom over the receiver's rate
+    /// Headroom over the stream's rate
     static let margin = 1.05
     /// Busy encoders read short: low results measured again after this
     static let retrySeconds: TimeInterval = 600

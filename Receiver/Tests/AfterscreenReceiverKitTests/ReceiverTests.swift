@@ -74,6 +74,7 @@ final class FakeDisplay: StreamDisplay {
     var notices: [Bool] = []
     var cursors: [Float] = []
     func setBrightness(_ light: PanelLight) { record { brightnessSet.append(light) } }
+    var panelLevel: Double? { nil }
     func showCongestionNotice(wifi: Bool) { record { notices.append(wifi) } }
     var audioPackets: [AudioWire.Packet] = []
     func playAudio(_ packet: AudioWire.Packet) { record { audioPackets.append(packet) } }
@@ -623,10 +624,24 @@ final class HardwareInfoTests: XCTestCase {
         XCTAssertNil(HardwareInfo.nativePanel([]))
     }
 
+    func testAOneToOneCurrentModeOutranksTheNativeFlag() {
+        // A 2560×1600 portable monitor flagging 1080p native
+        // Its current mode is not in the list
+        let modes = [
+            DisplayModeInfo(width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080, isNative: true),
+            DisplayModeInfo(width: 960, height: 540, pixelWidth: 1920, pixelHeight: 1080, isNative: true),
+        ]
+        let current = DisplayModeInfo(width: 2560, height: 1600, pixelWidth: 2560, pixelHeight: 1600, isNative: false)
+        XCTAssertEqual(HardwareInfo.nativePanel(modes, current: current), PixelSize(width: 2560, height: 1600))
+        let scaled = DisplayModeInfo(width: 1800, height: 1169, pixelWidth: 3600, pixelHeight: 2338, isNative: false)
+        let panel = [DisplayModeInfo(width: 3024, height: 1964, pixelWidth: 3024, pixelHeight: 1964, isNative: true)]
+        XCTAssertEqual(HardwareInfo.nativePanel(panel, current: scaled), PixelSize(width: 3024, height: 1964), "scaled backing is not the panel")
+    }
+
     func testMarketingNames() {
-        XCTAssertEqual(HardwareInfo.marketingName(modelID: "iMac14,2"), "iMac 27\" (Late 2013)")
-        XCTAssertEqual(HardwareInfo.marketingName(modelID: "iMac18,3"), "iMac 27\" 5K (2017)")
-        XCTAssertEqual(HardwareInfo.marketingName(modelID: "Mac17,9"), "Mac17,9")
+        XCTAssertEqual(HardwareInfo.marketingName(modelID: "iMac14,2"), "iMac (27-inch, Late 2013)")
+        XCTAssertEqual(HardwareInfo.marketingName(modelID: "iMac18,3"), "iMac (Retina 5K, 27-inch, 2017)")
+        XCTAssertEqual(HardwareInfo.marketingName(modelID: "Mac17,9"), "MacBook Pro (14-inch, M5 Pro or M5 Max)")
     }
 
     func testPanelPointsHalfOnRetina() {
@@ -641,11 +656,11 @@ final class HardwareInfoTests: XCTestCase {
         #if arch(arm64)
         XCTAssertTrue(HardwareInfo.hevcMain10Decode, "every Apple silicon Mac decodes Main10")
         #endif
-        XCTAssertEqual(HardwareInfo.welcome(name: "test").hevcMain10Decode, HardwareInfo.hevcMain10Decode)
+        XCTAssertEqual(HardwareInfo.welcome(name: "test", display: CGMainDisplayID()).hevcMain10Decode, HardwareInfo.hevcMain10Decode)
     }
 
     func testWelcomeDescribesThisMac() {
-        let w = HardwareInfo.welcome(name: "test")
+        let w = HardwareInfo.welcome(name: "test", display: CGMainDisplayID())
         XCTAssertEqual(w.protocolVersion, AfterscreenProtocol.version)
         XCTAssertGreaterThan(w.panelPixels.width, 0)
         XCTAssertFalse(w.modelID.isEmpty)

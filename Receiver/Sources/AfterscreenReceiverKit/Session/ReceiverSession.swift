@@ -38,6 +38,8 @@ public protocol StreamDisplay: AnyObject {
     /// Main queue
     /// Matches the sender's nits on this panel when it can
     func setBrightness(_ light: PanelLight)
+    /// The stream's screen, 0…1; nil when unreadable
+    var panelLevel: Double? { get }
     /// Main queue: the sender lowered quality for congestion
     func showCongestionNotice(wifi: Bool)
     /// Any queue
@@ -511,7 +513,7 @@ public final class ReceiverSession {
                                   cpuPercent: m.cpuPercent, memoryBytes: m.memoryBytes,
                                   gpuPercent: display.gpuMeter.percentSinceLastRead(),
                                   audioBufferMs: display.audioBuffered.map { $0 * 1000 },
-                                  audioUnderruns: display.audioUnderruns, panelLevel: PanelBrightness.level,
+                                  audioUnderruns: display.audioUnderruns, panelLevel: display.panelLevel,
                                   shown: display.isShown)
         record {
             $0.receiver = stats

@@ -4,7 +4,7 @@ import IOKit
 import IOKit.graphics
 
 /// Panel brightness: private DisplayServices, else IOKit
-/// Receiver sets its main panel; sender reads its built-in one
+/// Receiver sets its chosen screen; sender reads its built-in one
 /// Level: the slider's position; linear: share of peak luminance
 /// Panels map the slider differently; linear compares across them
 public enum PanelBrightness {
@@ -17,10 +17,12 @@ public enum PanelBrightness {
     private static let linearGetter = services.flatMap { dlsym($0, "DisplayServicesGetLinearBrightness") }.map { unsafeBitCast($0, to: Get.self) }
     private static let linearSetter = services.flatMap { dlsym($0, "DisplayServicesSetLinearBrightness") }.map { unsafeBitCast($0, to: Set.self) }
 
-    /// Main display, 0…1; nil when unreadable
-    public static var level: Double? {
+    /// 0…1; nil when unreadable
+    public static func level(_ display: CGDirectDisplayID) -> Double? {
         var value: Float = 0
-        if let get = getter, get(CGMainDisplayID(), &value) == 0 { return Double(value) }
+        if let get = getter, get(display, &value) == 0 { return Double(value) }
+        // IOKit takes no display ID: built-in panels only
+        guard CGDisplayIsBuiltin(display) != 0 else { return nil }
         return firstDisplay { service in
             var v: Float = 0
             return IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &v) == kIOReturnSuccess ? Double(v) : nil
@@ -41,10 +43,12 @@ public enum PanelBrightness {
     /// XDR laptops: aurora-maximum-nits above the built-in backlight
     /// Others: measured like the receiver's
     /// Read once; nil when the Mac reports neither
-    public static let builtInPeakNits: Double? = backlightMaximumNits ?? builtInID.flatMap(measuredPeakNits)
+    public static let builtInPeakNits: Double? = ratedBuiltInNits ?? builtInID.flatMap(measuredPeakNits)
 
-    /// From the built-in backlight up; external XDRs carry their own
-    private static var backlightMaximumNits: Double? {
+    /// XDR laptops' rated peak, from the built-in backlight up
+    /// Their current nits read a fixed 100: unmeasurable
+    /// External XDRs carry their own
+    public static let ratedBuiltInNits: Double? = {
         let backlight = IOServiceGetMatchingService(0, IOServiceMatching("AppleARMBacklight"))
         guard backlight != 0 else { return nil }
         defer { IOObjectRelease(backlight) }
@@ -53,7 +57,7 @@ public enum PanelBrightness {
               data.count == 4 else { return nil }
         let nits = Double(Float(bitPattern: data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian))
         return nits.isFinite && nits > 0 ? nits : nil
-    }
+    }()
 
     /// Peak from CoreDisplay's current nits over the linear level
     /// Non-EDR panels report their light; XDR reports a fixed 100
@@ -66,13 +70,13 @@ public enum PanelBrightness {
         return peak.isFinite && peak > 0 ? peak : nil
     }
 
-    /// Main panel to `nits` given its `peak`
+    /// `display` to `nits` given its `peak`
     /// Linear is a share of peak; sliders differ per panel
     /// Without the linear call: the slider, as the closest stand-in
-    public static func set(nits: Double, peak: Double) {
+    public static func set(nits: Double, peak: Double, display: CGDirectDisplayID) {
         let linear = min(1, max(0, nits / peak))
-        if let set = linearSetter, set(CGMainDisplayID(), Float(linear)) == 0 { return }
-        self.set(linear)
+        if let set = linearSetter, set(display, Float(linear)) == 0 { return }
+        self.set(linear, display: display)
     }
 
     private typealias Nominal = @convention(c) (CGDirectDisplayID) -> Float
@@ -92,8 +96,9 @@ public enum PanelBrightness {
         _ = set(id, Float(min(1, max(0, level))))
     }
 
-    public static func set(_ level: Double) {
-        if let set = setter, set(CGMainDisplayID(), Float(level)) == 0 { return }
+    public static func set(_ level: Double, display: CGDirectDisplayID) {
+        if let set = setter, set(display, Float(level)) == 0 { return }
+        guard CGDisplayIsBuiltin(display) != 0 else { return }
         _ = firstDisplay { service in
             IODisplaySetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, Float(level)) == kIOReturnSuccess ? level : nil
         }

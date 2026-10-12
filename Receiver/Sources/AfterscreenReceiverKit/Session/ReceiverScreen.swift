@@ -87,6 +87,26 @@ public final class ReceiverScreen: StreamDisplay {
         }
     }
 
+    /// Main queue: the screen for the next session
+    /// Read on the session's queue for brightness
+    public var display: CGDirectDisplayID {
+        get { displayLock.lock(); defer { displayLock.unlock() }; return chosenDisplay }
+        set {
+            displayLock.lock()
+            chosenDisplay = newValue
+            displayLock.unlock()
+            window.display = newValue
+        }
+    }
+    private let displayLock = NSLock()
+    private var chosenDisplay = CGMainDisplayID()
+
+    /// Main queue: applies from the next session
+    public var matchPanelMode: Bool {
+        get { window.matchPanelMode }
+        set { window.matchPanelMode = newValue }
+    }
+
     /// Main queue: applies from the next session
     public var presentation: ReceiverSettings.Presentation {
         get { window.presentation }
@@ -202,15 +222,19 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     public func setBrightness(_ light: PanelLight) {
-        guard let nits = light.nits, let peak = panelPeakNits else { return PanelBrightness.set(light.level) }
-        PanelBrightness.set(nits: nits, peak: peak)
+        let id = display
+        guard let nits = light.nits, let peak = panelPeakNits else { return PanelBrightness.set(light.level, display: id) }
+        PanelBrightness.set(nits: nits, peak: peak, display: id)
     }
 
-    /// This panel's peak in nits, measured once, kept per panel
-    /// A Mac mini may change displays
+    public var panelLevel: Double? { PanelBrightness.level(display) }
+
+    /// This panel's peak in nits
+    /// Built-in XDR: its rating; others measured once, kept per panel
     /// Too dim to measure yet: the sender's slider stands in
     public var panelPeakNits: Double? {
-        let id = CGMainDisplayID()
+        let id = display
+        if CGDisplayIsBuiltin(id) != 0, let rated = PanelBrightness.ratedBuiltInNits { return rated }
         let key = "panelPeakNits.\(CGDisplayVendorNumber(id))-\(CGDisplayModelNumber(id))-\(CGDisplaySerialNumber(id))"
         if let kept = UserDefaults.standard.object(forKey: key) as? Double { return kept }
         guard let measured = PanelBrightness.measuredPeakNits(id) else { return nil }

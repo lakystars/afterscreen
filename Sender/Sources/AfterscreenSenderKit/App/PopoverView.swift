@@ -211,6 +211,9 @@ private struct SettingsPage: View {
                 .labelsHidden()
                 .fixedSize()
             }
+            SwitchRow(title: L10n.t("120 fps (experimental)", "120fps (실험)"), isOn: $settings.highRefresh)
+                .help(L10n.t("For receivers at 120 Hz or more over Thunderbolt: \(mac)'s encoder is timed when connecting, and the stream goes at 120 fps when it takes under half a frame. Off: up to 60 fps. Applies from the next connection",
+                             "120Hz 이상인 수신 화면에 Thunderbolt로 연결할 때, 연결하면서 \(mac)의 인코딩 시간을 재서 한 프레임의 절반 안에 끝나면 120fps로 보냅니다. 끄면 최대 60fps입니다. 다음 연결부터 적용됩니다"))
             Button(L10n.t("Arrange Displays…", "디스플레이 배치…")) {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
             }
@@ -322,6 +325,7 @@ private struct SwitchRow: View {
 }
 
 /// Sound: play on the receiver, and this Mac's volume
+/// Session only: idle has no receiver to play on
 private struct SoundCard: View {
     @ObservedObject var model: AppModel
     @ObservedObject var settings: SenderSettings
@@ -637,7 +641,6 @@ public struct PopoverView: View {
                     Button(L10n.t("Open Settings", "설정 열기")) { model.openPrivacySettings() }
                 }
             }
-            SoundCard(model: model)
             if let report = model.testReport { QualityCard(report: report, testing: false) }
             Card(title: L10n.t("Receivers", "수신기")) {
                 if model.receivers.isEmpty {
@@ -773,6 +776,11 @@ public struct PopoverView: View {
                 Row(StatName.frames,
                     "\(Int(s.captureFPS.rounded())) · \(Int(s.sentFPS.rounded())) · \(Int((s.receiver?.displayedFPS ?? 0).rounded()))",
                     help: L10n.t("Per second: frames \(mac) drew, sent, and \(receiver) showed", "초당 프레임: \(mac)에서 그린 것, 보낸 것, \(receiver)에서 표시한 것"))
+                if let verdict = s.highRefresh {
+                    Text(HighRefreshLabel.text(verdict)).font(.system(size: 11))
+                        .foregroundStyle(verdict == .needsThunderbolt ? Color.secondary : Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Row(StatName.dropped, "\(s.droppedPerMinute)",
                     help: L10n.t("Frames replaced by a newer one before they could be sent", "보내기 전에 더 새 프레임으로 대체된 수"))
                 if let c = s.config {
@@ -834,6 +842,30 @@ public struct PopoverView: View {
                 Spacer()
                 Button(L10n.t("Disconnect", "연결 끊기")) { model.disconnect() }
             }
+        }
+    }
+}
+
+/// The high-refresh experiment's outcome, one line
+enum HighRefreshLabel {
+    static func text(_ verdict: HighRefresh.Verdict) -> String {
+        let ms = { (v: Double) in String(format: "%.1f", v) }
+        switch verdict {
+        case .high(let t):
+            return L10n.t("120 fps experiment: encoding takes \(ms(t)) ms, sending at 120 fps",
+                          "120fps 실험: 인코딩 \(ms(t))ms로 여유가 있어 120fps로 보냅니다")
+        case .encoderBusy(let t?):
+            return L10n.t("120 fps experiment: encoding takes \(ms(t)) ms, too long for 120; sending at 60 fps",
+                          "120fps 실험: 인코딩이 프레임당 \(ms(t))ms라 여유가 없어 60fps로 보냅니다")
+        case .encoderBusy(nil):
+            return L10n.t("120 fps experiment: the encoder could not be timed; sending at 60 fps",
+                          "120fps 실험: 인코더를 측정하지 못해 60fps로 보냅니다")
+        case .needsThunderbolt:
+            return L10n.t("120 fps experiment: Thunderbolt only; sending at 60 fps",
+                          "120fps 실험: Thunderbolt 연결에서만 켜집니다. 지금은 60fps로 보냅니다")
+        case .linkTooSlow(let gbps):
+            return L10n.t("120 fps experiment: the link measured \(String(format: "%.1f", gbps)) Gbps, too slow for lossless 120 fps; sending at 60 fps",
+                          "120fps 실험: 링크 실측 \(String(format: "%.1f", gbps))Gbps로 120fps 무손실에 부족해 60fps로 보냅니다")
         }
     }
 }

@@ -38,6 +38,18 @@ public final class ReceiverSettings: ObservableObject {
         case sleepDisplay
     }
 
+    /// A screen picked in the settings
+    /// Name kept to show it while unplugged
+    public struct ChosenDisplay: Equatable {
+        public var key: String
+        public var name: String
+
+        public init(key: String, name: String) {
+            self.key = key
+            self.name = name
+        }
+    }
+
     private enum Key {
         static let accept = "accept"
         static let onDisconnect = "onDisconnect"
@@ -48,6 +60,9 @@ public final class ReceiverSettings: ObservableObject {
         static let hudCollapsed = "hudCollapsed"
         static let pairedOnly = "pairedOnly"
         static let deviceID = "deviceID"
+        static let display = "display"
+        static let displayName = "displayName"
+        static let matchPanelMode = "matchPanelMode"
     }
 
     /// Networks need a paired Mac; point-to-point cables never do
@@ -67,6 +82,18 @@ public final class ReceiverSettings: ObservableObject {
     }
     @Published public var presentation: Presentation {
         didSet { defaults.set(presentation.rawValue, forKey: Key.presentation) }
+    }
+    /// nil: automatic, this Mac's panel first
+    /// Applies from the next connection
+    @Published public var display: ChosenDisplay? {
+        didSet {
+            defaults.set(display?.key, forKey: Key.display)
+            defaults.set(display?.name, forKey: Key.displayName)
+        }
+    }
+    /// Scaled resolutions switch to the panel's own while streaming
+    @Published public var matchPanelMode: Bool {
+        didSet { defaults.set(matchPanelMode, forKey: Key.matchPanelMode) }
     }
     /// Applies from the next connection
     @Published public var effect: Effect {
@@ -104,6 +131,8 @@ public final class ReceiverSettings: ObservableObject {
         hudCorner = defaults.enumValue(forKey: Key.hudCorner, default: .topRight)
         hudCollapsed = defaults.bool(forKey: Key.hudCollapsed)
         pairedOnly = defaults.object(forKey: Key.pairedOnly) as? Bool ?? true
+        display = defaults.string(forKey: Key.display).map { ChosenDisplay(key: $0, name: defaults.string(forKey: Key.displayName) ?? $0) }
+        matchPanelMode = defaults.object(forKey: Key.matchPanelMode) as? Bool ?? true
         if let id = defaults.string(forKey: Key.deviceID) {
             deviceID = id
         } else {

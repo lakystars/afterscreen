@@ -1,5 +1,6 @@
 import AppKit
 import AfterscreenCore
+import Combine
 import SwiftUI
 
 /// Menu bar app: Bonjour advertising, one sender at a time
@@ -9,7 +10,14 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private var service: NetService?
     private var session: ReceiverSession?
     private var screen: ReceiverScreen?
-    private var hardware: Welcome!
+    /// Development: `--panel` size and scale reported instead
+    private var panelOverride: (pixels: PixelSize, scale: Int?)?
+    private let windowed = CommandLine.arguments.contains("--windowed")
+    private var cancellables: Set<AnyCancellable> = []
+    /// Published record; set again only when it changes
+    private var advertised: [String: Data] = [:]
+    /// A screen gone a moment: a waking monitor drops out too
+    private var screenCheck: DispatchWorkItem?
     private var terminateSignal: DispatchSourceSignal?
     private var screenSignal: DispatchSourceSignal?
     /// Keep first: sets UI language used by later properties
@@ -51,18 +59,13 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         screenshot.resume()
         screenSignal = screenshot
         let name = ComputerName.current
-        hardware = HardwareInfo.welcome(name: name)
         // Development: report another panel, e.g. --panel 2880x1800@2
-        // Scale after "@"; this Mac's when left out
+        // Scale after "@"; the screen's when left out
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--panel"), i + 1 < args.count {
             let spec = args[i + 1].split(separator: "@")
             let wh = spec[0].split(separator: "x").compactMap { Int($0) }
-            if wh.count == 2 {
-                hardware.panelPixels = PixelSize(width: wh[0], height: wh[1])
-                let scale = spec.count > 1 ? Int(spec[1]) ?? HardwareInfo.backingScale : HardwareInfo.backingScale
-                hardware.panelPoints = HardwareInfo.points(forPanel: hardware.panelPixels, scale: scale)
-            }
+            if wh.count == 2 { panelOverride = (PixelSize(width: wh[0], height: wh[1]), spec.count > 1 ? Int(spec[1]) : nil) }
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
@@ -71,7 +74,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         menu.delegate = self
         statusItem.menu = menu
 
-        screen = ReceiverScreen(windowed: CommandLine.arguments.contains("--windowed"))
+        screen = ReceiverScreen(windowed: windowed)
+        screen?.display = target()?.id ?? CGMainDisplayID()
         if let peak = screen?.panelPeakNits { FileHandle.standardError.write(Data("[receiver] Panel peak \(Int(peak.rounded())) nits\n".utf8)) }
         screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
         screen?.onSettingsRequest = { [weak self] in self?.openSettings(overStream: true) }
@@ -93,6 +97,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self.listener = listener
             publish(port: listener.port, name: name)
             state("Waiting for a sender", "송신기를 기다리는 중")
+            watchScreens()
         } catch {
             state("Cannot listen: \(error)", "연결을 받을 수 없습니다: \(error)")
         }
@@ -106,15 +111,65 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
 
     private func publish(port: UInt16, name: String) {
         let service = NetService(domain: "local.", type: AfterscreenProtocol.bonjourType + ".", name: name, port: Int32(port))
+        service.delegate = self
+        self.service = service
+        advertise()
+        service.publish()
+    }
+
+    /// Model and the chosen screen's size, as senders list them
+    private func advertise() {
+        let hardware = welcome(for: target())
         let txt: [String: Data] = [
             "model": Data(hardware.marketingName.utf8),
             "panel": Data("\(hardware.panelPixels.width)x\(hardware.panelPixels.height)".utf8),
             "id": Data(settings.deviceID.utf8),
         ]
-        service.setTXTRecord(NetService.data(fromTXTRecord: txt))
-        service.delegate = self
-        service.publish()
-        self.service = service
+        guard txt != advertised else { return }
+        advertised = txt
+        service?.setTXTRecord(NetService.data(fromTXTRecord: txt))
+    }
+
+    /// The screen a session would show on now
+    private func target() -> ReceiverDisplay? {
+        DisplayChoice.pick(ReceiverDisplay.connected(), saved: settings.display?.key)
+    }
+
+    /// Read per connection: screens come and go
+    private func welcome(for display: ReceiverDisplay?) -> Welcome {
+        let id = display?.id ?? CGMainDisplayID()
+        var hardware = HardwareInfo.welcome(name: ComputerName.current, display: id, switching: settings.matchPanelMode && !windowed)
+        if let o = panelOverride {
+            hardware.panelPixels = o.pixels
+            hardware.panelPoints = HardwareInfo.points(forPanel: o.pixels, scale: o.scale ?? HardwareInfo.backingScale(id))
+        }
+        return hardware
+    }
+
+    /// Screens plugged, unplugged or rearranged; a new choice
+    /// A session whose screen left ends; the sender reconnects
+    private func watchScreens() {
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                self.advertise()
+                self.screenCheck?.cancel()
+                let check = DispatchWorkItem { [weak self] in self?.endIfScreenLeft() }
+                self.screenCheck = check
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: check)
+            }
+            .store(in: &cancellables)
+        settings.$display.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.advertise() }
+            .store(in: &cancellables)
+    }
+
+    /// Other screens stay on: no display sleep as for a disconnect
+    private func endIfScreenLeft() {
+        guard let session = session, let id = screen?.display,
+              !ReceiverDisplay.connected().contains(where: { $0.id == id }) else { return }
+        stoppedHere = true
+        session.stop(reason: L10n.t("The screen was disconnected", "화면 연결이 끊겼습니다"))
     }
 
     private func refuse(_ connection: Connection, _ reason: String) {
@@ -131,6 +186,9 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
                                                                               "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다")) }
         screen.presentation = settings.presentation
         screen.effect = settings.effect
+        let display = target()
+        screen.display = display?.id ?? CGMainDisplayID()
+        screen.matchPanelMode = settings.matchPanelMode
         // A point-to-point cable is proof enough; anything else pairs
         // Unclassified links pair too: fail closed
         // Packets must arrive on the cable, not via Wi-Fi
@@ -145,9 +203,9 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
                 FileHandle.standardError.write(Data("[receiver] Pairing code \(code)\n".utf8))
             }
             self.state("Pairing with \(sender)", "\(sender)와(과) 페어링 중")
-            self.codeWindow.show(code: code, sender: sender)
+            self.codeWindow.show(code: code, sender: sender, on: display?.screen)
         }
-        let session = ReceiverSession(connection: connection, hardware: hardware, display: screen, auth: auth)
+        let session = ReceiverSession(connection: connection, hardware: welcome(for: display), display: screen, auth: auth)
         session.onPeer = { [weak self] hello in
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
             self?.showStatus(link: link)
@@ -179,7 +237,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     /// Text on macOS 10.15, which lacks SF Symbols
     private func showStatus(link: LinkKind?) {
         if #available(macOS 11, *) {
-            statusItem.button?.image = StatusIcon.image(link: link)
+            statusItem.button?.image = StatusIcon.image(link: link, role: .receiver)
             statusItem.button?.title = ""
         } else {
             statusItem.button?.title = link == nil ? "▭" : "▭ ●"
@@ -202,8 +260,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         }
         info("Afterscreen Receiver — \(stateLine)")
         menu.addItem(.separator())
+        let display = target()
+        let hardware = welcome(for: display)
         info(hardware.marketingName)
-        info(L10n.t("Panel", "패널") + " \(hardware.panelPixels.width)×\(hardware.panelPixels.height) · macOS \(hardware.osVersion)")
+        info(L10n.t("Screen", "화면") + " \(display?.name ?? "—") · \(hardware.panelPixels.width)×\(hardware.panelPixels.height) · macOS \(hardware.osVersion)")
         info("GPU \(hardware.gpuNames.joined(separator: ", "))")
         let yes = L10n.t("yes", "지원"), no = L10n.t("no", "미지원")
         info(L10n.t("Hardware decode", "하드웨어 디코딩") + ": BC7 · HEVC \(hardware.hevcDecode ? yes : no) · Main10 \(hardware.hevcMain10Decode ? yes : no) · H.264 \(hardware.h264Decode ? yes : no)")
@@ -281,7 +341,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         // Window IDs as raw values, as the call takes them
         var ids = NSApp.windows.filter(\.isVisible).map { UnsafeRawPointer(bitPattern: UInt($0.windowNumber)) }
         guard !ids.isEmpty, let list = CFArrayCreate(nil, &ids, ids.count, nil),
-              let image = CGImage(windowListFromArrayScreenBounds: CGDisplayBounds(CGMainDisplayID()), windowArray: list, imageOption: .bestResolution),
+              let image = CGImage(windowListFromArrayScreenBounds: .null, windowArray: list, imageOption: .bestResolution),
               let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
         try? png.write(to: URL(fileURLWithPath: "/tmp/afterscreen-screen.png"))
     }

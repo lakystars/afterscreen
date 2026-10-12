@@ -16,10 +16,12 @@ print "== Signing identity: $IDENTITY"
 
 mkdir -p "$OUT"
 
-print "== App icon"
+print "== App icons"
 rm -rf "$OUT/icon"
 swift "$ROOT/scripts/icons.swift" "$OUT/icon"
-iconutil -c icns "$OUT/icon/AppIcon.iconset" -o "$OUT/icon/AppIcon.icns"
+for role in Sender Receiver; do
+    iconutil -c icns "$OUT/icon/$role.iconset" -o "$OUT/icon/$role.icns"
+done
 
 plist() { # name bundle-id executable min-os extra-keys
     cat <<PLIST
@@ -46,14 +48,14 @@ $5
 PLIST
 }
 
-bundle() { # app-path executable-src executable-name plist-content
+bundle() { # app-path executable-src executable-name icon plist-content
     rm -rf "$1"
     mkdir -p "$1/Contents/MacOS" "$1/Contents/Resources"
     cp "$2" "$1/Contents/MacOS/$3"
-    cp "$OUT/icon/AppIcon.icns" "$1/Contents/Resources/"
+    cp "$OUT/icon/$4.icns" "$1/Contents/Resources/AppIcon.icns"
     # Symbols only serve debugging; stripped executables are about 45% smaller
     strip "$1/Contents/MacOS/$3"
-    print -r -- "$4" > "$1/Contents/Info.plist"
+    print -r -- "$5" > "$1/Contents/Info.plist"
     print -n "APPL????" > "$1/Contents/PkgInfo"
     codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$1" >/dev/null
 }
@@ -61,7 +63,7 @@ bundle() { # app-path executable-src executable-name plist-content
 print "== Sender"
 swift build -c release --package-path "$ROOT/Sender" >/dev/null
 SENDER_BIN="$(swift build -c release --package-path "$ROOT/Sender" --show-bin-path)/AfterscreenSender"
-bundle "$OUT/Afterscreen.app" "$SENDER_BIN" Afterscreen \
+bundle "$OUT/Afterscreen.app" "$SENDER_BIN" Afterscreen Sender \
     "$(plist Afterscreen io.github.lakystars.afterscreen.sender Afterscreen 14.0 '    <key>NSScreenCaptureUsageDescription</key><string>Afterscreen captures its virtual display to show it on the receiver.</string><key>NSAudioCaptureUsageDescription</key><string>Afterscreen plays the sound of this Mac on the receiver.</string>')"
 
 # SwiftPM in current Xcode targets macOS 12+ only
@@ -84,7 +86,7 @@ build_receiver x86_64 10.15
 print "== Receiver (arm64, macOS 11)"
 build_receiver arm64 11.0
 lipo -create "$OUT/receiver-x86_64/AfterscreenReceiver" "$OUT/receiver-arm64/AfterscreenReceiver" -output "$OUT/AfterscreenReceiver-universal"
-bundle "$OUT/Afterscreen Receiver.app" "$OUT/AfterscreenReceiver-universal" "Afterscreen Receiver" \
+bundle "$OUT/Afterscreen Receiver.app" "$OUT/AfterscreenReceiver-universal" "Afterscreen Receiver" Receiver \
     "$(plist 'Afterscreen Receiver' io.github.lakystars.afterscreen.receiver 'Afterscreen Receiver' 10.15 '')"
 
 codesign --verify --strict "$OUT/Afterscreen.app" "$OUT/Afterscreen Receiver.app"

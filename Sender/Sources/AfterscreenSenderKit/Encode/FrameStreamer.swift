@@ -40,7 +40,7 @@ final class FrameStreamer {
     private let connection: Connection
     // Per-item autorelease: a busy queue would retain Metal objects
     private let queue = DispatchQueue(label: "afterscreen.frames", qos: .userInteractive, autoreleaseFrequency: .workItem)
-    /// Paced to the receiver's refresh, 2 ms early for jitter
+    /// Paced to the stream's rate, 2 ms early for jitter
     private var gate: FrameGate<CapturedFrame>
     private var pumpTimer: DispatchSourceTimer?
     /// Sends BC7 reference of settled BC1 tiles
@@ -58,8 +58,7 @@ final class FrameStreamer {
     private var outbox: [Outgoing] = []
     private let lock = NSLock()
     private var keyframeRequested = true
-    /// Since the last encoded frame: send queue held one back,
-    /// or a newer capture replaced an unsent one
+    /// Since the last encoded frame: the socket held two back
     /// Stream lags source: tile changed in consecutive frames is moving
     private var queueWasFull = false
     /// A refinement waits for the link to drain
@@ -127,10 +126,11 @@ final class FrameStreamer {
             var frame = frame
             offeredFrames += 1
             if let unsent = gate.pending { frame.dirty = CapturedFrame.merge(unsent.dirty, into: frame.dirty) }
-            if gate.offer(frame) {
-                drops.tick()
-                queueWasFull = true
-            }
+            // Replaced while the gate was open: a frame lost
+            // Replaced while it paces: a capture above the stream's rate
+            // Neither is congestion; `pump` reads the socket for that
+            let open = gate.delay(now: ProcessInfo.processInfo.systemUptime) == 0
+            if gate.offer(frame), open { drops.tick() }
             pump()
         }
     }

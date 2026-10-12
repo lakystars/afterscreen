@@ -44,6 +44,7 @@ final class StreamRenderer {
     private var maskRing = 0
     private let sizeLock = NSLock()
     private var drawableSize = CGSize.zero
+    private var insetPixels: CGFloat = 0
     /// First-pass deband radius in texels; under `sizeLock`
     private var debandRange = Deband.normal.rangePixels
     /// The next draw also goes to a PNG in /tmp
@@ -336,13 +337,15 @@ final class StreamRenderer {
     }
 
     /// Main thread: keeps the drawable in step with the view
-    func layout(bounds: CGRect, scale: CGFloat) {
+    /// `topInset`: points beside a camera notch, left black
+    func layout(bounds: CGRect, scale: CGFloat, topInset: CGFloat = 0) {
         layer.frame = bounds
         layer.contentsScale = scale
         let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
         layer.drawableSize = size
         sizeLock.lock()
         drawableSize = size
+        insetPixels = min(size.height, topInset * scale)
         sizeLock.unlock()
     }
 
@@ -604,7 +607,7 @@ final class StreamRenderer {
 
     private func encodeDraw(_ cb: MTLCommandBuffer, content: CGSize, tilePixels: Int, bind picture: @escaping (MTLRenderCommandEncoder) -> Void) {
         sizeLock.lock()
-        let size = drawableSize
+        let size = drawableSize, inset = insetPixels
         let current = wave
         sizeLock.unlock()
         var params = current?.parameters(at: CACurrentMediaTime(), tilePixels: tilePixels, size: content) ?? Wave.still
@@ -635,7 +638,8 @@ final class StreamRenderer {
             cb.commit()
             return
         }
-        let rect = RenderGeometry.aspectFit(content: content, in: CGRect(origin: .zero, size: size))
+        // Viewport y runs down: the notch strip on top
+        let rect = RenderGeometry.aspectFit(content: content, in: CGRect(x: 0, y: inset, width: size.width, height: size.height - inset))
         enc.setViewport(MTLViewport(originX: Double(rect.minX), originY: Double(rect.minY),
                                     width: Double(rect.width), height: Double(rect.height), znear: 0, zfar: 1))
         bind(enc)

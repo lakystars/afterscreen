@@ -21,7 +21,7 @@ Turn an iMac into an extended or mirrored display for an Apple Silicon Mac, at t
 
 ### Receiver
 
-Any iMac that runs macOS 10.15 Catalina or newer: Intel iMacs from Late 2013 on, and Apple Silicon iMacs. The receiver is one universal app (x86_64 for macOS 10.15+, arm64 for macOS 11+). It needs no video decoder for the cable links, because every Mac GPU in this range samples BC7 texture blocks in hardware.
+Any iMac that runs macOS 10.15 Catalina or newer: Intel iMacs from Late 2013 on, and Apple Silicon iMacs. Any other Apple Silicon Mac works too, with its own panel (a MacBook) or a monitor attached to it. The receiver is one universal app (x86_64 for macOS 10.15+, arm64 for macOS 11+). It needs no video decoder for the cable links, because every Mac GPU in this range samples BC7 texture blocks in hardware. The sender shows each receiver by its model name, from a table of the Macs in this range; a newer Mac shows its model identifier.
 
 | iMac | Model IDs | Panel | Cable links to an Apple Silicon Mac | Video for slow links | Status |
 |---|---|---|---|---|---|
@@ -51,6 +51,9 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 **Display**
 - Extend or mirror, chosen in the menu. Mirroring shows the Mac's main display the way macOS, AirPlay and Sidecar do: the Mac keeps its resolution, and the iMac shows the picture centred at its own shape with black bars around it. The stream carries the main display's own pixels, never upscaled before sending. When the stream is reduced, a main display within four fifths of the panel keeps its still areas 1:1, and only moving areas go at four fifths. Optimize for iMac turns the mirror the other way, as macOS's own "Optimize for": the desktop takes the iMac's shape and resolution and fills it edge to edge, while the Mac's panel shows it with bars; the Mac returns to its own resolution when the session ends. Changing the Mac's resolution or main display starts a new session at the new size.
 - Extended desktop at the iMac's native resolution, with four "looks like" sizes (Larger text, Default, More space, Most space) that also appear in System Settings → Displays. Changes apply while streaming.
+- The receiver's screen is picked in its settings. Automatic takes the Mac's own panel (iMac, MacBook), else the screen with the menu bar; a chosen monitor that is unplugged falls back to automatic, and a session whose screen goes away ends and reconnects. The sender learns that screen's panel, size and refresh at each connection.
+- On a MacBook with a camera notch the stream fills the panel below it, pixel for pixel (14-inch: 3024 × 1896), in either presentation. While streaming, a scaled resolution on the receiver's screen ("More Space") switches to the panel's own and returns afterwards, so the stream is not resampled twice; windows on that Mac may move when it switches back, and a setting turns this off.
+- Up to 60 fps. On Thunderbolt, an experimental setting sends 120 fps to a receiver at 120 Hz or more (MacBook Pro) when the measured link carries lossless tiles at 120 fps and this Mac's tile encoder takes under half a frame: it encodes moving test frames at the panel's size while connecting (M5 Pro: 1.7 ms at 3024 × 1900).
 - Transfer resolution: automatic, panel resolution, or four fifths. Automatic decides by the measured link rate, whatever the link kind: the panel's resolution when the link settles a full screen of lossless tiles within a quarter second, four fifths below that. On a 5K iMac that is 5120 × 2880 from about 0.47 Gbps (gigabit Ethernet, fast Wi-Fi) and 4096 × 2304 under it. A mirrored display is measured at its own size. Near the line the last choice for that iMac holds until the rate moves 20%, so the desktop does not change size from one connection to the next. At four fifths the desktop switches to exactly half the stream's size, so the Mac draws the very pixels it sends; the size is worked out from the connected iMac's own panel.
 
 **Links**
@@ -126,7 +129,7 @@ This produces:
 - `build/Afterscreen.app`: the sender (arm64, macOS 14+)
 - `build/Afterscreen Receiver.app`: the receiver (universal, macOS 10.15+)
 
-The script draws the app icon from `scripts/icons.swift`, strips symbols from both executables and signs them with `AFTERSCREEN_SIGN_IDENTITY` when set, else with the first Apple Development identity in the keychain, else ad hoc. An ad hoc signature changes with every build, so macOS asks for the privacy permissions again each time.
+The script draws both app icons from `scripts/icons.swift`, strips symbols from both executables and signs them with `AFTERSCREEN_SIGN_IDENTITY` when set, else with the first Apple Development identity in the keychain, else ad hoc. An ad hoc signature changes with every build, so macOS asks for the privacy permissions again each time.
 
 The receiver is compiled with `swiftc` directly, because current SwiftPM refuses deployment targets below macOS 12. The Swift packages are used for the tests:
 
@@ -141,7 +144,7 @@ swift test --package-path Receiver
 1. Connect the Macs with a Thunderbolt cable, a USB-C cable or an Ethernet cable (a USB-C Ethernet adapter on the Apple Silicon Mac), or put both on the same Wi-Fi.
 2. Start **Afterscreen Receiver** on the iMac and allow Local Network access.
 3. Start **Afterscreen** on the Apple Silicon Mac and allow Local Network access and Screen Recording.
-4. Click the ▭ menu bar item and choose **Connect** next to the iMac, or **Test** to run the quality test.
+4. Click the Afterscreen menu bar item, a display with ↗ in its corner (the receiver's has ↙; ▭ on macOS 10.15), and choose **Connect** next to the iMac, or **Test** to run the quality test.
 
 On the iMac, ⌥⌘I shows a heads-up display and pressing Esc twice stops the session.
 
@@ -160,6 +163,7 @@ Sender (**Settings** in the menu opens them in place; **Back** returns):
 | Use as | Extend or Mirror; mirroring fits this Mac or the receiver, both named. |
 | Size | Larger text, Default, More space, Most space. On a 5K iMac these look like 2048, 2560, 2880 and 3200 points wide. |
 | Transfer resolution | Automatic (default), panel resolution, or four fifths, as described under [Features](#features). Takes effect by reconnecting. |
+| 120 fps (experimental) | Off by default. On Thunderbolt to a receiver at 120 Hz or more, 120 fps when the encoder keeps up; the menu says which rate was chosen and why. |
 | Connect automatically | Connects to the receiver you last connected to. **Disconnect** pauses it until that receiver goes away. |
 | Open at login | Starts Afterscreen at login. |
 | Arrange Displays… | Opens System Settings for arrangement and the main display. |
@@ -176,6 +180,8 @@ Receiver (**Settings…** in its menu):
 | Open at login | Starts the receiver at login (a LaunchAgent, so it works on macOS 10.15). |
 | Language | System, English or Korean. |
 | Accept connections over | Any network, or cables only (Wi-Fi refused). |
+| Show on | Automatic (this Mac's own panel first), or one of the connected screens. |
+| Switch the screen to its 1:1 resolution while streaming | On by default: a scaled resolution blurs the stream by resampling it twice. |
 | When the sender disconnects | Show this Mac's desktop, or turn the display off. A stop on the receiver always shows the desktop. |
 
 ### Quality test
@@ -219,7 +225,7 @@ The iMac shows the pattern with its heads-up display, and the menu lists the fra
 
 ## Status
 
-Verified with automated tests (core, sender and receiver), with both apps on one Mac, and on a 2017 5K iMac over Thunderbolt Bridge, USB networking, Gigabit Ethernet and Wi-Fi. Not yet verified: macOS 10.15 receivers, Thunderbolt 2 iMacs, H.264-only receivers, and the Apple Silicon iMacs. See [docs/Testing.md](docs/Testing.md), including how to save what the receiver draws for debugging.
+Verified with automated tests (core, sender and receiver), with both apps on one Mac (a 14-inch MacBook Pro as the receiver, on its notched panel and on external monitors), and on a 2017 5K iMac over Thunderbolt Bridge, USB networking, Gigabit Ethernet and Wi-Fi. Not yet verified: macOS 10.15 receivers, Thunderbolt 2 iMacs, H.264-only receivers, the Apple Silicon iMacs, an M1 sender, and 120 fps across two Macs. See [docs/Testing.md](docs/Testing.md), including how to save what the receiver draws for debugging.
 
 Design notes: [docs/specs](docs/specs).
 
