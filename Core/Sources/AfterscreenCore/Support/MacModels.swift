@@ -1,7 +1,7 @@
 import Foundation
 
 /// Model identifier to name, from appledb.dev
-/// Supported range: Intel iMacs from Late 2013, Apple silicon Macs
+/// Supported range: Intel Macs that run macOS 10.15, Apple silicon Macs
 /// Newer models show the identifier
 public enum MacModels {
     public static func name(for identifier: String) -> String {
@@ -10,6 +10,9 @@ public enum MacModels {
 
     private static let names: [String: String] = [
         // Intel iMac
+        "iMac13,1": "iMac (21.5-inch, Late 2012)",
+        "iMac13,2": "iMac (27-inch, Late 2012)",
+        "iMac13,3": "iMac (21.5-inch, Early 2013)",
         "iMac14,1": "iMac (21.5-inch, Late 2013, Integrated Graphics)",
         "iMac14,2": "iMac (27-inch, Late 2013)",
         "iMac14,3": "iMac (21.5-inch, Late 2013, Dedicated Graphics)",
@@ -26,6 +29,50 @@ public enum MacModels {
         "iMac20,1": "iMac (Retina 5K, 27-inch, 2020)",
         "iMac20,2": "iMac (Retina 5K, 27-inch, 2020)",
         "iMacPro1,1": "iMac Pro (Retina 5K, 27-inch, Late 2017)",
+        // Intel MacBook
+        "MacBook8,1": "MacBook (Retina, 12-inch, Early 2015)",
+        "MacBook9,1": "MacBook (Retina, 12-inch, Early 2016)",
+        "MacBook10,1": "MacBook (Retina, 12-inch, 2017)",
+        "MacBookAir5,1": "MacBook Air (11-inch, Mid 2012)",
+        "MacBookAir5,2": "MacBook Air (13-inch, Mid 2012)",
+        "MacBookAir6,1": "MacBook Air (11-inch, Mid 2013 or Early 2014)",
+        "MacBookAir6,2": "MacBook Air (13-inch, Mid 2013 or Early 2014)",
+        "MacBookAir7,1": "MacBook Air (11-inch, Early 2015)",
+        "MacBookAir7,2": "MacBook Air (13-inch, Early 2015 or 2017)",
+        "MacBookAir8,1": "MacBook Air (Retina, 13-inch, 2018)",
+        "MacBookAir8,2": "MacBook Air (Retina, 13-inch, 2019)",
+        "MacBookAir9,1": "MacBook Air (Retina, 13-inch, 2020)",
+        "MacBookPro9,1": "MacBook Pro (15-inch, Mid 2012)",
+        "MacBookPro9,2": "MacBook Pro (13-inch, Mid 2012)",
+        "MacBookPro10,1": "MacBook Pro (Retina, 15-inch, Mid 2012 or Early 2013)",
+        "MacBookPro10,2": "MacBook Pro (Retina, 13-inch, Late 2012 or Early 2013)",
+        "MacBookPro11,1": "MacBook Pro (Retina, 13-inch, Late 2013 or Mid 2014)",
+        "MacBookPro11,2": "MacBook Pro (Retina, 15-inch, Late 2013 or Mid 2014, Integrated graphics)",
+        "MacBookPro11,3": "MacBook Pro (Retina, 15-inch, Late 2013 or Mid 2014, Dedicated graphics)",
+        "MacBookPro11,4": "MacBook Pro (Retina, 15-inch, Mid 2015, Integrated graphics)",
+        "MacBookPro11,5": "MacBook Pro (Retina, 15-inch, Mid 2015, Dedicated graphics)",
+        "MacBookPro12,1": "MacBook Pro (Retina, 13-inch, Early 2015)",
+        "MacBookPro13,1": "MacBook Pro (13-inch, 2016, Two Thunderbolt 3 ports)",
+        "MacBookPro13,2": "MacBook Pro (13-inch, 2016, Four Thunderbolt 3 ports)",
+        "MacBookPro13,3": "MacBook Pro (15-inch, 2016)",
+        "MacBookPro14,1": "MacBook Pro (13-inch, 2017, Two Thunderbolt 3 ports)",
+        "MacBookPro14,2": "MacBook Pro (13-inch, 2017, Four Thunderbolt 3 ports)",
+        "MacBookPro14,3": "MacBook Pro (15-inch, 2017)",
+        "MacBookPro15,1": "MacBook Pro (15-inch, Mid 2018 or 2019)",
+        "MacBookPro15,2": "MacBook Pro (13-inch, 2018 or 2019, Four Thunderbolt 3 ports)",
+        "MacBookPro15,3": "MacBook Pro (15-inch, Late 2018 or 2019, Radeon Pro Vega Graphics)",
+        "MacBookPro15,4": "MacBook Pro (13-inch, 2019, Two Thunderbolt 3 ports)",
+        "MacBookPro16,1": "MacBook Pro (16-inch, 2019)",
+        "MacBookPro16,2": "MacBook Pro (13-inch, 2020, Four Thunderbolt 3 ports)",
+        "MacBookPro16,3": "MacBook Pro (13-inch, 2020, Two Thunderbolt 3 ports)",
+        "MacBookPro16,4": "MacBook Pro (16-inch, 2019, Radeon Pro 5600M Graphics)",
+        // Intel Mac mini, Mac Pro
+        "Macmini6,1": "Mac mini (Late 2012, Core i5)",
+        "Macmini6,2": "Mac mini (Late 2012, Core i7)",
+        "Macmini7,1": "Mac mini (Late 2014)",
+        "Macmini8,1": "Mac mini (Late 2018)",
+        "MacPro6,1": "Mac Pro (Late 2013)",
+        "MacPro7,1": "Mac Pro (2019)",
         // Apple silicon
         "Mac13,1": "Mac Studio (2022)",
         "Mac13,2": "Mac Studio (2022)",

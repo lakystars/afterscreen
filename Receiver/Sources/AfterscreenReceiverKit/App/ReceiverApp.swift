@@ -74,8 +74,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         menu.delegate = self
         statusItem.menu = menu
 
-        screen = ReceiverScreen(windowed: windowed)
-        screen?.display = target()?.id ?? CGMainDisplayID()
+        screen = ReceiverScreen(windowed: windowed, display: target()?.id ?? CGMainDisplayID())
+        if let gpu = screen?.gpuName { FileHandle.standardError.write(Data("[receiver] Drawing on \(gpu)\n".utf8)) }
         if let peak = screen?.panelPeakNits { FileHandle.standardError.write(Data("[receiver] Panel peak \(Int(peak.rounded())) nits\n".utf8)) }
         screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
         screen?.onSettingsRequest = { [weak self] in self?.openSettings(overStream: true) }

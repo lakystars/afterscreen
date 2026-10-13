@@ -10,6 +10,10 @@ OUT="$ROOT/build"
 VERSION="${AFTERSCREEN_VERSION:-0.1.0}"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 SDK="$(xcrun --show-sdk-path --sdk macosx)"
+# Current SwiftUI APIs need Swift concurrency, in macOS from 12
+# Receiver bundles the toolchain's back-deployed copy for 10.15, 11
+CONCURRENCY="$(dirname "$(dirname "$(xcrun --find swiftc)")")/lib/swift-5.5/macosx/libswift_Concurrency.dylib"
+[[ -f "$CONCURRENCY" ]] || { print -u2 "Missing $CONCURRENCY"; exit 1 }
 IDENTITY="${AFTERSCREEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development/ { print $2; exit }' || true)}"
 IDENTITY="${IDENTITY:--}"
 print "== Signing identity: $IDENTITY"
@@ -48,16 +52,27 @@ $5
 PLIST
 }
 
-bundle() { # app-path executable-src executable-name icon plist-content
-    rm -rf "$1"
-    mkdir -p "$1/Contents/MacOS" "$1/Contents/Resources"
-    cp "$2" "$1/Contents/MacOS/$3"
-    cp "$OUT/icon/$4.icns" "$1/Contents/Resources/AppIcon.icns"
+bundle() { # app-path executable-src executable-name icon plist-content [dylib...]
+    local app="$1" exe="$3"
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp "$2" "$app/Contents/MacOS/$exe"
+    cp "$OUT/icon/$4.icns" "$app/Contents/Resources/AppIcon.icns"
     # Symbols only serve debugging; stripped executables are about 45% smaller
-    strip "$1/Contents/MacOS/$3"
-    print -r -- "$5" > "$1/Contents/Info.plist"
-    print -n "APPL????" > "$1/Contents/PkgInfo"
-    codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$1" >/dev/null
+    strip "$app/Contents/MacOS/$exe"
+    print -r -- "$5" > "$app/Contents/Info.plist"
+    print -n "APPL????" > "$app/Contents/PkgInfo"
+    shift 5
+    local runtime=(--options runtime)
+    # Nested code signed before the app
+    for lib in "$@"; do
+        mkdir -p "$app/Contents/Frameworks"
+        cp "$lib" "$app/Contents/Frameworks/"
+        codesign --force --timestamp=none --sign "$IDENTITY" "$app/Contents/Frameworks/${lib:t}" >/dev/null
+        # No Team ID: library validation would refuse the copy
+        if codesign -dv "$app/Contents/Frameworks/${lib:t}" 2>&1 | grep -q '^TeamIdentifier=not set'; then runtime=(); fi
+    done
+    codesign --force "${runtime[@]}" --timestamp=none --sign "$IDENTITY" "$app" >/dev/null
 }
 
 print "== Sender"
@@ -76,7 +91,8 @@ build_receiver() { # arch min-os
         -emit-library -static -o "$dir/libAfterscreenCore.a" "$ROOT"/Core/Sources/AfterscreenCore/**/*.swift
     swiftc "${flags[@]}" -parse-as-library -module-name AfterscreenReceiverKit -I "$dir" -emit-module -emit-module-path "$dir/AfterscreenReceiverKit.swiftmodule" \
         -emit-library -static -o "$dir/libAfterscreenReceiverKit.a" "$ROOT"/Receiver/Sources/AfterscreenReceiverKit/**/*.swift
-    swiftc "${flags[@]}" -I "$dir" -L "$dir" -lAfterscreenReceiverKit -lAfterscreenCore \
+    # /usr/lib/swift first: macOS 12+ keeps its own concurrency library
+    swiftc "${flags[@]}" -I "$dir" -L "$dir" -lAfterscreenReceiverKit -lAfterscreenCore -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
         -framework AppKit -framework Metal -framework QuartzCore -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOKit -framework SystemConfiguration -framework SwiftUI -framework AudioToolbox \
         -o "$dir/AfterscreenReceiver" "$ROOT/Receiver/Sources/AfterscreenReceiver/main.swift"
 }
@@ -87,9 +103,9 @@ print "== Receiver (arm64, macOS 11)"
 build_receiver arm64 11.0
 lipo -create "$OUT/receiver-x86_64/AfterscreenReceiver" "$OUT/receiver-arm64/AfterscreenReceiver" -output "$OUT/AfterscreenReceiver-universal"
 bundle "$OUT/Afterscreen Receiver.app" "$OUT/AfterscreenReceiver-universal" "Afterscreen Receiver" Receiver \
-    "$(plist 'Afterscreen Receiver' io.github.lakystars.afterscreen.receiver 'Afterscreen Receiver' 10.15 '')"
+    "$(plist 'Afterscreen Receiver' io.github.lakystars.afterscreen.receiver 'Afterscreen Receiver' 10.15 '    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>')" "$CONCURRENCY"
 
-codesign --verify --strict "$OUT/Afterscreen.app" "$OUT/Afterscreen Receiver.app"
+codesign --verify --strict --deep "$OUT/Afterscreen.app" "$OUT/Afterscreen Receiver.app"
 print "== Done"
 print "  $OUT/Afterscreen.app"
 print "  $OUT/Afterscreen Receiver.app ($(lipo -archs "$OUT/AfterscreenReceiver-universal"))"

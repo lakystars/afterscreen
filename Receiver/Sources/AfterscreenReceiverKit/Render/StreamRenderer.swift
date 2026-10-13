@@ -19,14 +19,48 @@ final class StreamRenderer {
     var uploadMs: Double { statsLock.lock(); defer { statsLock.unlock() }; return stats.uploadMs }
     var decodeMs: Double { statsLock.lock(); defer { statsLock.unlock() }; return stats.decodeMs }
 
-    private let device: MTLDevice
-    private let queue: MTLCommandQueue
-    private let tilePipeline: MTLRenderPipelineState
-    private let hybridPipeline: MTLRenderPipelineState
-    private let tileTexture: TileTexture
-    /// nil if the deband kernel fails to build: no debanding
-    private let debandCache: DebandCache?
-    private var textureCache: CVMetalTextureCache?
+    /// Everything tied to one GPU
+    private struct GPU {
+        let device: MTLDevice
+        let queue: MTLCommandQueue
+        let tilePipeline: MTLRenderPipelineState
+        let hybridPipeline: MTLRenderPipelineState
+        let tileTexture: TileTexture
+        /// nil if the deband kernel fails to build: no debanding
+        let debandCache: DebandCache?
+        let textureCache: CVMetalTextureCache?
+
+        init?(device: MTLDevice) {
+            guard let queue = device.makeCommandQueue(),
+                  let library = try? device.makeLibrary(source: StreamRenderer.shaders, options: nil) else { return nil }
+            func pipeline(_ fragment: String) -> MTLRenderPipelineState? {
+                let desc = MTLRenderPipelineDescriptor()
+                desc.vertexFunction = library.makeFunction(name: "screenQuad")
+                desc.fragmentFunction = library.makeFunction(name: fragment)
+                desc.colorAttachments[0].pixelFormat = StreamRenderer.drawableFormat
+                return try? device.makeRenderPipelineState(descriptor: desc)
+            }
+            guard let tile = pipeline("tileFragment"), let hybrid = pipeline("hybridFragment") else { return nil }
+            var cache: CVMetalTextureCache?
+            CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
+            self.device = device
+            self.queue = queue
+            tilePipeline = tile
+            hybridPipeline = hybrid
+            tileTexture = TileTexture(device: device)
+            debandCache = DebandCache(device: device, library: library)
+            textureCache = cache
+        }
+    }
+
+    /// Replaced on the decode queue by `use`, under `gpuLock`
+    /// Closing wave draws come from another queue: read under it
+    private var gpu: GPU
+    private let gpuLock = NSLock()
+    var deviceName: String { gpuLock.lock(); defer { gpuLock.unlock() }; return gpu.device.name }
+    /// Decode queue: written only there
+    var deviceID: UInt64 { gpu.device.registryID }
+
     private var decoder: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
     /// Latest decoded video picture (NV12 planes)
@@ -307,23 +341,8 @@ final class StreamRenderer {
     """
 
     init?(device: MTLDevice) {
-        guard let queue = device.makeCommandQueue(),
-              let library = try? device.makeLibrary(source: StreamRenderer.shaders, options: nil) else { return nil }
-        func pipeline(_ fragment: String) -> MTLRenderPipelineState? {
-            let desc = MTLRenderPipelineDescriptor()
-            desc.vertexFunction = library.makeFunction(name: "screenQuad")
-            desc.fragmentFunction = library.makeFunction(name: fragment)
-            desc.colorAttachments[0].pixelFormat = StreamRenderer.drawableFormat
-            return try? device.makeRenderPipelineState(descriptor: desc)
-        }
-        guard let tile = pipeline("tileFragment"), let hybrid = pipeline("hybridFragment") else { return nil }
-        self.device = device
-        self.queue = queue
-        tilePipeline = tile
-        hybridPipeline = hybrid
-        tileTexture = TileTexture(device: device)
-        debandCache = DebandCache(device: device, library: library)
-        CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache)
+        guard let gpu = GPU(device: device) else { return nil }
+        self.gpu = gpu
         layer.device = device
         layer.pixelFormat = StreamRenderer.drawableFormat
         layer.framebufferOnly = true
@@ -371,7 +390,7 @@ final class StreamRenderer {
         statsLock.lock()
         let recent = CACurrentMediaTime() - lastDraw < 0.008
         statsLock.unlock()
-        guard !recent, let g = lastGeometry, let cb = queue.makeCommandBuffer() else { return }
+        guard !recent, let g = lastGeometry, let cb = gpu.queue.makeCommandBuffer() else { return }
         encodePicture(cb, geometry: g)
     }
 
@@ -385,11 +404,11 @@ final class StreamRenderer {
     /// Decode queue, before `releaseResources`
     /// Keeps the picture at stream size for a closing wave
     func keepFarewell() {
-        guard let g = lastGeometry, let cb = queue.makeCommandBuffer(), let bind = pictureBind(cb, geometry: g) else { return }
+        guard let g = lastGeometry, let cb = gpu.queue.makeCommandBuffer(), let bind = pictureBind(cb, geometry: g) else { return }
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: StreamRenderer.drawableFormat, width: g.width, height: g.height, mipmapped: false)
         desc.usage = [.renderTarget, .shaderRead]
         desc.storageMode = .private
-        guard let target = device.makeTexture(descriptor: desc) else { return cb.commit() }
+        guard let target = gpu.device.makeTexture(descriptor: desc) else { return cb.commit() }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .dontCare
@@ -409,12 +428,14 @@ final class StreamRenderer {
 
     /// Any queue: the kept picture under the current wave
     func drawFarewell() {
+        gpuLock.lock()
+        defer { gpuLock.unlock() }
         sizeLock.lock()
         let kept = farewell
         sizeLock.unlock()
-        guard let kept = kept, let cb = queue.makeCommandBuffer() else { return }
+        guard let kept = kept, let cb = gpu.queue.makeCommandBuffer() else { return }
         let content = CGSize(width: kept.texture.width, height: kept.texture.height)
-        encodeDraw(cb, content: content, tilePixels: kept.tilePixels) { [tilePipeline] enc in
+        encodeDraw(cb, content: content, tilePixels: kept.tilePixels) { [tilePipeline = gpu.tilePipeline] enc in
             enc.setRenderPipelineState(tilePipeline)
             enc.setFragmentTexture(kept.texture, index: 0)
         }
@@ -449,8 +470,26 @@ final class StreamRenderer {
     func releaseResources() {
         reset()
         maskBuffers = []
-        tileTexture.release()
-        debandCache?.release()
+        gpu.tileTexture.release()
+        gpu.debandCache?.release()
+    }
+
+    /// Decode queue: draws on `device` from the next frame
+    /// The old GPU's pictures are dropped, the farewell too
+    /// false when `device` cannot build the pipelines
+    func use(_ device: MTLDevice) -> Bool {
+        guard device.registryID != gpu.device.registryID else { return true }
+        guard let next = GPU(device: device) else { return false }
+        releaseResources()
+        gpuLock.lock()
+        defer { gpuLock.unlock() }
+        dropFarewell()
+        gpu = next
+        // No run loop on this queue: committed here
+        CATransaction.begin()
+        layer.device = device
+        CATransaction.commit()
+        return true
     }
 
     // MARK: - Tile path
@@ -458,22 +497,22 @@ final class StreamRenderer {
     /// false when the tile data fails to decode
     /// Without `present`, the upload commits undrawn
     func applyTiles(_ frame: TileFrame, present: Bool = true) -> Bool {
-        guard let cb = queue.makeCommandBuffer() else { return false }
+        guard let cb = gpu.queue.makeCommandBuffer() else { return false }
         let start = ProcessInfo.processInfo.systemUptime
-        tileTexture.ensure(geometry: frame.geometry)
+        gpu.tileTexture.ensure(geometry: frame.geometry)
         do {
-            try tileTexture.encodeUpload(frame, into: cb)
+            try gpu.tileTexture.encodeUpload(frame, into: cb)
         } catch {
             cb.commit()
             return false
         }
-        let decode = tileTexture.lastDecodeMs
+        let decode = gpu.tileTexture.lastDecodeMs
         statsLock.lock()
         stats.decodeMs = decode
         stats.uploadMs = max(0, (ProcessInfo.processInfo.systemUptime - start) * 1000 - decode)
         statsLock.unlock()
         mask.apply(frame.runs, geometry: frame.geometry)
-        debandCache?.mark(frame.runs, geometry: frame.geometry)
+        gpu.debandCache?.mark(frame.runs, geometry: frame.geometry)
         lastGeometry = frame.geometry
         sizeLock.lock()
         let visible = isVisible
@@ -495,16 +534,16 @@ final class StreamRenderer {
     /// Pipeline and inputs for the current picture
     /// Encodes a due deband pass into `cb` first
     private func pictureBind(_ cb: MTLCommandBuffer, geometry g: TileGeometry) -> ((MTLRenderCommandEncoder) -> Void)? {
-        guard let texture = tileTexture.texture else { return nil }
+        guard let texture = gpu.tileTexture.texture else { return nil }
         sizeLock.lock()
         let range = debandRange
         sizeLock.unlock()
-        let image = debandCache?.update(source: texture, geometry: g, range: range, into: cb) ?? texture
+        let image = gpu.debandCache?.update(source: texture, geometry: g, range: range, into: cb) ?? texture
         if mask.shown > 0, let picture = video, let luma = CVMetalTextureGetTexture(picture.luma),
            let chroma = CVMetalTextureGetTexture(picture.chroma), let maskBuffer = nextMaskBuffer() {
             cb.addCompletedHandler { _ in _ = picture }
             let grid = [UInt32(g.tilesX), UInt32(g.tilePixels), UInt32(g.width), UInt32(g.height)]
-            return { [hybridPipeline] enc in
+            return { [hybridPipeline = gpu.hybridPipeline] enc in
                 var grid = grid
                 enc.setRenderPipelineState(hybridPipeline)
                 enc.setFragmentTexture(image, index: 0)
@@ -514,7 +553,7 @@ final class StreamRenderer {
                 enc.setFragmentBytes(&grid, length: 16, index: 1)
             }
         }
-        return { [tilePipeline] enc in
+        return { [tilePipeline = gpu.tilePipeline] enc in
             enc.setRenderPipelineState(tilePipeline)
             enc.setFragmentTexture(image, index: 0)
         }
@@ -524,7 +563,7 @@ final class StreamRenderer {
     private func nextMaskBuffer() -> MTLBuffer? {
         let bytes = mask.bytes
         if maskBuffers.first.map({ $0.length != bytes.count }) ?? true {
-            maskBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: bytes.count, options: .storageModeShared) }
+            maskBuffers = (0..<3).compactMap { _ in gpu.device.makeBuffer(length: bytes.count, options: .storageModeShared) }
         }
         guard maskBuffers.count == 3 else { return nil }
         maskRing = (maskRing + 1) % 3
@@ -576,7 +615,7 @@ final class StreamRenderer {
         let status = VTDecompressionSessionDecodeFrame(decoder, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, _, buffer, _, _ in
             if status == noErr { image = buffer }
         }
-        guard status == noErr, let pixelBuffer = image, let cache = textureCache else { return false }
+        guard status == noErr, let pixelBuffer = image, let cache = gpu.textureCache else { return false }
         var luma: CVMetalTexture?, chroma: CVMetalTexture?
         // 10-bit samples sit in the high bits: same normalized math
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, tenBit ? .r16Unorm : .r8Unorm,

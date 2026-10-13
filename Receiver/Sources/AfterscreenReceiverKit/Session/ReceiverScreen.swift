@@ -38,8 +38,9 @@ public final class ReceiverScreen: StreamDisplay {
     /// Declared user activity; held until the stream ends
     private var userActivity = IOPMAssertionID(0)
 
-    public init?(windowed: Bool = false) {
-        guard let device = MTLCreateSystemDefaultDevice(), let renderer = StreamRenderer(device: device) else { return nil }
+    /// `display`: the screen sessions show on
+    public init?(windowed: Bool = false, display: CGDirectDisplayID = CGMainDisplayID()) {
+        guard let device = GPUChoice.device(for: display, streaming: false), let renderer = StreamRenderer(device: device) else { return nil }
         self.renderer = renderer
         // `kill -USR1 <pid>` saves the next drawn frame
         // For SSH debugging: screen captures there miss the stream
@@ -57,7 +58,10 @@ public final class ReceiverScreen: StreamDisplay {
             if visible { self?.onRedrawNeeded?() }
         }
         window.onShownChange = { [weak self] in self?.isShown = $0 }
+        self.display = display
     }
+
+    public var gpuName: String { renderer.deviceName }
 
     public var gpuMeter: GPUTimeMeter { renderer.gpuMeter }
     public var displayedFPS: Double { renderer.displayed.ratePerSecond() }
@@ -77,6 +81,8 @@ public final class ReceiverScreen: StreamDisplay {
     public var decodeMs: Double { renderer.decodeMs }
 
     public func begin(config: StreamConfig) {
+        settle?.cancel()
+        settle = nil
         window.show(config: config)
         if awake == nil {
             // Wakes a display slept by the last session's end
@@ -136,12 +142,53 @@ public final class ReceiverScreen: StreamDisplay {
     public func prepare(config: StreamConfig) {
         renderer.dropFarewell()
         renderer.reset()
+        streaming = true
+        let id = display
+        // Requested first: the panel moves while pipelines build
+        if GPUChoice.kind(for: id, streaming: true) == .discrete { discrete.hold() }
+        // Not drawing on it: the panel stays put
+        if !use(GPUChoice.device(for: id, streaming: true)) { discrete.release() }
     }
 
     public func releaseDecodeResources() {
         // Tile wave closes over the last picture, after texture release
         if effect == .tiles { renderer.keepFarewell() }
         renderer.releaseResources()
+        streaming = false
+    }
+
+    /// Decode queue: between `prepare` and `releaseDecodeResources`
+    private var streaming = false
+    /// Decode queue
+    private let discrete = DiscreteGPURequest()
+    /// Main queue: return to the idle GPU, cancelled by `begin`
+    private var settle: DispatchWorkItem?
+
+    /// Decode queue: false when not drawing on `device`
+    @discardableResult
+    private func use(_ device: MTLDevice?) -> Bool {
+        guard let device = device else { return false }
+        guard device.registryID != renderer.deviceID else { return true }
+        let moved = renderer.use(device)
+        let line = moved ? "Drawing on \(device.name)" : "Still on \(renderer.deviceName): \(device.name) failed"
+        FileHandle.standardError.write(Data("[receiver] \(line); screen on \(GPUChoice.drivingName(display))\n".utf8))
+        return moved
+    }
+
+    /// Main queue: the idle GPU once the window has closed
+    /// After the Space's slide: a GPU switch mid-slide stutters
+    /// The discrete request goes after the renderer leaves it
+    private func settleGPU() {
+        settle?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.decodeQueue.async {
+                guard let self = self, !self.streaming else { return }
+                self.use(GPUChoice.device(for: self.display, streaming: false))
+                self.discrete.release()
+            }
+        }
+        settle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + StreamWindow.longestOff + 1.5, execute: work)
     }
 
     public func end(reason: String, relink: Bool) {
@@ -153,12 +200,14 @@ public final class ReceiverScreen: StreamDisplay {
             return window.hold(for: StreamWindow.relinkWait) { [weak self] in
                 self?.releaseAwake()
                 self?.output.restore()
+                self?.settleGPU()
                 self?.onRelinkTimeout?()
             }
         }
         window.hide()
         releaseAwake()
         output.restore()
+        settleGPU()
     }
 
     /// Main queue: puts back the iMac's own output level

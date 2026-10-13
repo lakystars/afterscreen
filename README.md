@@ -21,17 +21,32 @@ Turn an iMac into an extended or mirrored display for an Apple Silicon Mac, at t
 
 ### Receiver
 
-Any iMac that runs macOS 10.15 Catalina or newer: Intel iMacs from Late 2013 on, and Apple Silicon iMacs. Any other Apple Silicon Mac works too, with its own panel (a MacBook) or a monitor attached to it. The receiver is one universal app (x86_64 for macOS 10.15+, arm64 for macOS 11+). It needs no video decoder for the cable links, because every Mac GPU in this range samples BC7 texture blocks in hardware. The sender shows each receiver by its model name, from a table of the Macs in this range; a newer Mac shows its model identifier.
+Any Mac that runs macOS 10.15 Catalina or newer, Intel or Apple Silicon: an iMac or MacBook on its own panel, or a Mac mini, Mac Pro or closed MacBook on a monitor attached to it. The rest of this README says "the iMac" for whichever Mac receives. The receiver is one universal app (x86_64 for macOS 10.15+, arm64 for macOS 11+). It needs no video decoder for the cable links, because every Mac GPU in this range samples BC7 texture blocks in hardware. It draws with the GPU that drives its screen. A 15- or 16-inch MacBook Pro with two GPUs asks macOS for the discrete GPU only while it streams on its own panel, and draws with the integrated GPU between sessions, so an idle receiver does not hold the discrete GPU. The sender shows each receiver by its model name, from a table of the Macs in this range; a newer Mac shows its model identifier.
 
 | iMac | Model IDs | Panel | Cable links to an Apple Silicon Mac | Video for slow links | Status |
 |---|---|---|---|---|---|
-| 21.5" and 27", Late 2013; 21.5", Mid 2014 | iMac14,1–14,4 | 1920 × 1080, 2560 × 1440 | Thunderbolt 2 (with Apple's Thunderbolt 3 to Thunderbolt 2 adapter), Ethernet | H.264 | Expected |
+| 21.5" and 27", Late 2012; 21.5", Early 2013 | iMac13,1–13,3 | 1920 × 1080, 2560 × 1440 | Thunderbolt 1 (with Apple's Thunderbolt 3 to Thunderbolt 2 adapter), Ethernet | H.264 | Expected |
+| 21.5" and 27", Late 2013; 21.5", Mid 2014 | iMac14,1–14,4 | 1920 × 1080, 2560 × 1440 | Thunderbolt 1 (adapter), Ethernet | H.264 | Expected |
 | 27" 5K, Late 2014 and Mid 2015 | iMac15,1 | 5120 × 2880 | Thunderbolt 2 (adapter), Ethernet | H.264 | Expected |
 | 21.5", Late 2015 (including 4K) | iMac16,1, iMac16,2 | 1920 × 1080, 4096 × 2304 | Thunderbolt 2 (adapter), Ethernet | H.264 | Expected |
 | 27" 5K, Late 2015 | iMac17,1 | 5120 × 2880 | Thunderbolt 2 (adapter), Ethernet | HEVC | Expected |
 | 21.5" and 27", 2017–2020 | iMac18,1–20,2 | 1920 × 1080, 4096 × 2304, 5120 × 2880 | Thunderbolt 3, USB-C, Ethernet | HEVC 10-bit | **Verified on iMac18,3** (27" 5K, 2017) |
 | iMac Pro, 2017 | iMacPro1,1 | 5120 × 2880 | Thunderbolt 3, USB-C, Ethernet | Detected at run time | Expected |
 | 24", Apple Silicon: M1 (2021), M3, M4 | iMac21,1, iMac21,2 and later | 4480 × 2520 | Thunderbolt / USB 4, USB-C, Ethernet where fitted | HEVC 10-bit | Expected |
+
+| Other Intel Mac | Model IDs | Screen | Cable links to an Apple Silicon Mac | Video for slow links | Status |
+|---|---|---|---|---|---|
+| MacBook Air, Mid 2012–2017 | MacBookAir5,1–7,2 | 1366 × 768, 1440 × 900 | Thunderbolt 1 or 2 (adapter) | H.264 | Expected |
+| MacBook Air, 2018–2020 | MacBookAir8,1–9,1 | 2560 × 1600 | Thunderbolt 3, USB-C | HEVC 10-bit | Expected |
+| MacBook 12", 2015–2017 | MacBook8,1–10,1 | 2304 × 1440 | USB-C (no Thunderbolt) | H.264 (2015), HEVC (2016), HEVC 10-bit (2017) | Expected |
+| MacBook Pro, Mid 2012–2015 | MacBookPro9,1–12,1 | 1280 × 800 to 2880 × 1800 | Thunderbolt 1 or 2 (adapter); Ethernet on the Mid 2012 models without Retina | H.264 | Expected |
+| MacBook Pro, 2016–2020 | MacBookPro13,1–16,4 | 2560 × 1600, 2880 × 1800, 3072 × 1920 | Thunderbolt 3, USB-C | HEVC (2016), HEVC 10-bit (2017–2020) | Expected |
+| Mac mini, Late 2012 and Late 2014 | Macmini6,1, Macmini6,2, Macmini7,1 | Its monitor | Thunderbolt 1 or 2 (adapter), Ethernet | H.264 | Expected |
+| Mac mini, 2018 | Macmini8,1 | Its monitor | Thunderbolt 3, USB-C, Ethernet | HEVC 10-bit | Expected |
+| Mac Pro, Late 2013 | MacPro6,1 | Its monitor | Thunderbolt 2 (adapter), Ethernet | Detected at run time | Expected |
+| Mac Pro, 2019 | MacPro7,1 | Its monitor | Thunderbolt 3, USB-C, Ethernet | Detected at run time | Expected |
+
+MacBooks without an Ethernet port reach Ethernet through an adapter. A monitor keeps its own brightness unless macOS itself can set it, as on Apple's displays.
 
 The receiver detects its own hardware decoders at run time, so the "Video for slow links" column is what these models usually report. Wi-Fi works with every model. "Expected" means the model meets the requirements but has not been tested yet; see [Status](#status).
 
@@ -131,7 +146,7 @@ This produces:
 
 The script draws both app icons from `scripts/icons.swift`, strips symbols from both executables and signs them with `AFTERSCREEN_SIGN_IDENTITY` when set, else with the first Apple Development identity in the keychain, else ad hoc. An ad hoc signature changes with every build, so macOS asks for the privacy permissions again each time.
 
-The receiver is compiled with `swiftc` directly, because current SwiftPM refuses deployment targets below macOS 12. The Swift packages are used for the tests:
+The receiver is compiled with `swiftc` directly, because current SwiftPM refuses deployment targets below macOS 12. It carries the toolchain's back-deployed Swift concurrency library: code built against the current SwiftUI SDK needs it, and macOS includes it only from 12. Signed without a Team ID (ad hoc or self-signed), the receiver goes without the hardened runtime, whose library validation would refuse that copy. The Swift packages are used for the tests:
 
 ```sh
 swift test --package-path Core
@@ -225,7 +240,7 @@ The iMac shows the pattern with its heads-up display, and the menu lists the fra
 
 ## Status
 
-Verified with automated tests (core, sender and receiver), with both apps on one Mac (a 14-inch MacBook Pro as the receiver, on its notched panel and on external monitors), and on a 2017 5K iMac over Thunderbolt Bridge, USB networking, Gigabit Ethernet and Wi-Fi. Not yet verified: macOS 10.15 receivers, Thunderbolt 2 iMacs, H.264-only receivers, the Apple Silicon iMacs, an M1 sender, and 120 fps across two Macs. See [docs/Testing.md](docs/Testing.md), including how to save what the receiver draws for debugging.
+Verified with automated tests (core, sender and receiver), with both apps on one Mac (a 14-inch MacBook Pro as the receiver, on its notched panel and on external monitors), and on a 2017 5K iMac over Thunderbolt Bridge, USB networking, Gigabit Ethernet and Wi-Fi. Not yet verified: macOS 10.15 receivers, Thunderbolt 1 and 2 Macs, H.264-only receivers, Intel MacBooks, Mac minis and Mac Pros (including a two-GPU MacBook Pro switching GPUs per session), the Apple Silicon iMacs, an M1 sender, and 120 fps across two Macs. See [docs/Testing.md](docs/Testing.md), including how to save what the receiver draws for debugging.
 
 Design notes: [docs/specs](docs/specs).
 

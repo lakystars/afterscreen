@@ -1,3 +1,4 @@
+import Metal
 import XCTest
 import AfterscreenCore
 @testable import AfterscreenReceiverKit
@@ -89,5 +90,78 @@ final class PanelModeTests: XCTestCase {
         let full = DisplayModeInfo(width: 2560, height: 1440, pixelWidth: 2560, pixelHeight: 1440, isNative: true)
         XCTAssertEqual(PanelMode.nativeMode([low, full], panel: PixelSize(width: 2560, height: 1440), current: low), 1)
         XCTAssertNil(PanelMode.nativeMode([low], panel: PixelSize(width: 2560, height: 1440), current: low), "no mode draws the panel")
+    }
+}
+
+final class GPUChoiceTests: XCTestCase {
+    private let integrated = GPUChoice.GPU(id: 1, lowPower: true, headless: false, removable: false)
+    private let discrete = GPUChoice.GPU(id: 2, lowPower: false, headless: false, removable: false)
+
+    func testOnlyATwoGPUMacBookProSwitches() {
+        XCTAssertTrue(GPUChoice.switching([discrete, integrated], model: "MacBookPro11,5"))
+        XCTAssertFalse(GPUChoice.switching([integrated], model: "MacBookPro12,1"))
+        // Apple silicon: one GPU, not low power
+        XCTAssertFalse(GPUChoice.switching([discrete], model: "MacBookPro18,3"))
+        // iMac: the integrated GPU only decodes video
+        let decoder = GPUChoice.GPU(id: 1, lowPower: true, headless: true, removable: false)
+        XCTAssertFalse(GPUChoice.switching([discrete, decoder], model: "MacBookPro16,1"))
+        XCTAssertFalse(GPUChoice.switching([discrete, integrated], model: "iMac18,3"))
+    }
+
+    func testItStreamsItsPanelOnTheDiscreteGPUOnly() {
+        // Either GPU may drive the panel when the session starts
+        let gpus = [discrete, integrated]
+        let streaming = GPUChoice.preference(switching: true, builtIn: true, streaming: true)
+        let idle = GPUChoice.preference(switching: true, builtIn: true, streaming: false)
+        XCTAssertEqual(GPUChoice.pick(gpus, driving: 1, prefer: streaming), 2)
+        XCTAssertEqual(GPUChoice.pick(gpus, driving: 2, prefer: idle), 1)
+    }
+
+    func testItsMonitorStreamsOnTheGPUDrivingIt() {
+        let kind = GPUChoice.preference(switching: true, builtIn: false, streaming: true)
+        XCTAssertNil(kind)
+        XCTAssertEqual(GPUChoice.pick([discrete, integrated], driving: 2, prefer: kind), 2)
+        XCTAssertEqual(GPUChoice.preference(switching: true, builtIn: false, streaming: false), .integrated,
+                       "idle: never holds the discrete GPU")
+    }
+
+    func testOtherMacsDrawOnTheGPUDrivingTheirScreen() {
+        XCTAssertNil(GPUChoice.preference(switching: false, builtIn: true, streaming: true))
+        // Mac Pro with two cards; a monitor on an eGPU
+        let second = GPUChoice.GPU(id: 3, lowPower: false, headless: false, removable: false)
+        let egpu = GPUChoice.GPU(id: 4, lowPower: false, headless: false, removable: true)
+        XCTAssertEqual(GPUChoice.pick([discrete, second], driving: 3, prefer: nil), 3)
+        XCTAssertEqual(GPUChoice.pick([integrated, egpu], driving: 4, prefer: nil), 4)
+    }
+
+    func testNoDrivingGPULeavesTheSystemDefault() {
+        XCTAssertNil(GPUChoice.pick([discrete], driving: nil, prefer: nil))
+        XCTAssertNil(GPUChoice.pick([discrete], driving: 9, prefer: nil))
+    }
+
+    func testOneGPUMacsKeepIt() throws {
+        let system = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        try XCTSkipUnless(MTLCopyAllDevices().count == 1, "one GPU")
+        XCTAssertNil(GPUChoice.kind(for: CGMainDisplayID(), streaming: true))
+        XCTAssertEqual(GPUChoice.device(for: CGMainDisplayID(), streaming: false)?.registryID, system.registryID)
+        XCTAssertEqual(GPUChoice.device(for: CGMainDisplayID(), streaming: true)?.registryID, system.registryID)
+    }
+
+    func testTheSameGPUKeepsTheRenderer() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let renderer = try XCTUnwrap(StreamRenderer(device: device))
+        XCTAssertTrue(renderer.use(device))
+        XCTAssertEqual(renderer.deviceID, device.registryID)
+        XCTAssertTrue(renderer.layer.device === device)
+    }
+
+    func testTheDiscreteRequestIsHeldUntilReleased() {
+        let request = DiscreteGPURequest()
+        request.hold()
+        XCTAssertTrue(request.isHeld, "OpenGL found and a pixel format made")
+        request.hold()
+        request.release()
+        XCTAssertFalse(request.isHeld)
+        request.release()
     }
 }

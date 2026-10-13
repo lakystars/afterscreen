@@ -105,7 +105,7 @@ public enum HardwareInfo {
     ]
 
     /// Whether a hardware decoder accepts a 4K Main10 stream
-    /// Kaby Lake and later Intel iMacs, and Apple silicon
+    /// Kaby Lake and later Intel Macs, and Apple silicon
     public static let hevcMain10Decode: Bool = {
         var format: CMVideoFormatDescription?
         let created: OSStatus = main10Probe.withPointers { pointers, sizes in
