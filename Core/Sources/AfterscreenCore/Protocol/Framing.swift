@@ -15,6 +15,20 @@ public enum MessageType: UInt8, CaseIterable {
     case paired = 0x07
     /// Wrong code; the same code stays up for another try
     case pairWrong = 0x08
+    // A second connection taking over the session's link
+    /// Sender: first message on the new connection
+    case handover = 0x09
+    /// Receiver: its nonce for the proof
+    case handoverChallenge = 0x0A
+    /// Sender's proof of the session secret
+    case handoverProof = 0x0B
+    /// Receiver's proof back; the switch may start
+    case handoverOK = 0x0C
+    /// Sender: last message on the old connection
+    /// Receiver: echoed on the new one once it reads there
+    case switchover = 0x0D
+    /// Path and video layer for the new link; picture kept
+    case reconfigure = 0x0E
     case tileFrame = 0x10
     case videoParams = 0x11
     case videoFrame = 0x12

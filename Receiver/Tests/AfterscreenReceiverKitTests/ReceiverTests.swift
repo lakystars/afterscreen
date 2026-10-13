@@ -104,6 +104,8 @@ final class ReceiverSessionTests: XCTestCase {
     private let display = FakeDisplay()
     private var inbox: [Message] = []
     private var inboxWaiter: XCTestExpectation?
+    /// What a handover's link needs, as the app judges
+    private var linkAdmission: ReceiverSession.LinkAdmission = .open
 
     private let welcome = Welcome(protocolVersion: AfterscreenProtocol.version, name: "iMac", modelID: "iMac18,3",
                                   marketingName: "iMac 27\" 5K (2017)", osVersion: "13.7", gpuNames: ["GPU"],
@@ -119,6 +121,7 @@ final class ReceiverSessionTests: XCTestCase {
             // As the app does: a connection during a session may be its cursor channel
             if let session = session { return session.offerChannel(c) }
             session = ReceiverSession(connection: c, hardware: welcome, display: display, idleTimeout: 1.5)
+            session.admission = { [unowned self] _ in linkAdmission }
             session.start()
             accepted.fulfill()
         }
@@ -174,7 +177,9 @@ final class ReceiverSessionTests: XCTestCase {
         XCTAssertEqual(reply.type, .welcome)
         var got = try JSONWire.decode(Welcome.self, from: reply.payload)
         XCTAssertNotEqual(got.channelToken, 0, "each session hands out a cursor channel token")
+        XCTAssertEqual(got.handoverToken?.count, 16, "and a handover token")
         got.channelToken = 0
+        got.handoverToken = nil
         XCTAssertEqual(got, welcome)
     }
 
@@ -455,6 +460,198 @@ final class ReceiverSessionTests: XCTestCase {
         wait(for: [closed], timeout: 3)
         channel.send(Message(type: .cursorPos, payload: CursorWire.pos(x: 0.75, y: 0.5, visible: true)))
         XCTAssertTrue(display.read { display.cursors.isEmpty })
+    }
+
+    /// Messages a second test connection receives
+    private final class Mailbox {
+        private let lock = NSLock()
+        private var messages: [Message] = []
+        private var wanted: (types: Set<MessageType>, done: XCTestExpectation)?
+
+        func put(_ m: Message) {
+            lock.lock()
+            messages.append(m)
+            let w = wanted
+            lock.unlock()
+            if let w = w, w.types.contains(m.type) { w.done.fulfill() }
+        }
+
+        /// The first of `types` arriving from now on
+        func next(_ types: Set<MessageType>, in test: XCTestCase, after send: () -> Void) -> Message? {
+            let e = test.expectation(description: "\(types)")
+            e.assertForOverFulfill = false
+            lock.lock()
+            let start = messages.count
+            wanted = (types, e)
+            lock.unlock()
+            send()
+            test.wait(for: [e], timeout: 3)
+            lock.lock()
+            defer { wanted = nil; lock.unlock() }
+            return messages[start...].first { types.contains($0.type) }
+        }
+    }
+
+    private func welcomed() throws -> Welcome {
+        let replies = expectReply {
+            client.send(try! JSONWire.message(.hello, Hello(protocolVersion: AfterscreenProtocol.version, name: "MBP", model: "Mac17,1", osVersion: "27")))
+        }
+        return try JSONWire.decode(Welcome.self, from: try XCTUnwrap(replies.first).payload)
+    }
+
+    /// A new connection through the handover handshake
+    /// `token`: the secret the sender proves; the receiver's when nil
+    private func handOver(_ welcome: Welcome, token: Data? = nil) throws -> (connection: Connection, mail: Mailbox, last: Message?) {
+        var c: Connection?
+        let connected = expectation(description: "handover connection")
+        Connection.connect(host: "127.0.0.1", port: listener.port, interfaceName: nil, timeout: 2) { c = try? $0.get(); connected.fulfill() }
+        wait(for: [connected], timeout: 3)
+        let next = try XCTUnwrap(c), mail = Mailbox()
+        next.onMessage = { mail.put($0) }
+        next.start(queue: queue)
+        let nonce = Pairing.nonce()
+        let challenge = mail.next([.handoverChallenge, .bye], in: self) {
+            next.send(try! JSONWire.message(.handover, HandoverNonce(nonce: nonce)))
+        }
+        // Refused at once: the bye is the answer
+        guard let challenge = challenge, challenge.type == .handoverChallenge else { return (next, mail, challenge) }
+        let theirs = try JSONWire.decode(HandoverNonce.self, from: challenge.payload).nonce
+        let secret = Handover.secret(key: nil, token: try XCTUnwrap(token ?? welcome.handoverToken))
+        let answer = mail.next([.handoverOK, .bye], in: self) {
+            next.send(try! JSONWire.message(.handoverProof, AuthProof(mac: Handover.proof(secret, role: .sender, senderNonce: nonce, receiverNonce: theirs))))
+        }
+        if answer?.type == .handoverOK {
+            let proof = try JSONWire.decode(AuthProof.self, from: try XCTUnwrap(answer).payload)
+            XCTAssertTrue(Pairing.matches(proof.mac, Handover.proof(secret, role: .receiver, senderNonce: nonce, receiverNonce: theirs)),
+                          "the receiver proves the same secret")
+        }
+        return (next, mail, answer)
+    }
+
+    func testAHandoverMovesTheStreamToTheNewConnection() throws {
+        let welcome = try welcomed()
+        let g = TileGeometry(width: 256, height: 128)
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload
+        client.send(try! JSONWire.message(.config, tileConfig))
+        client.send(Message(type: .tileFrame, payload: frame))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        let (next, mail, ok) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(ok?.type, .handoverOK)
+        let closed = expectation(description: "old connection closed")
+        client.onClose = { _ in closed.fulfill() }
+        // Old connection's last message; echoed on the new one
+        XCTAssertNotNil(mail.next([.switchover], in: self) { client.send(Message(type: .switchover)) })
+        wait(for: [closed], timeout: 3)
+        next.send(Message(type: .tileFrame, payload: frame))
+        waitForDisplay { [display] in display.tiles.count == 2 }
+        XCTAssertNotNil(mail.next([.pong], in: self) { next.send(Message(type: .ping, payload: PingWire.encode(7))) })
+        XCTAssertTrue(display.read { display.ended.isEmpty }, "the old connection's close ends nothing")
+        XCTAssertEqual(display.read { display.begun.count }, 1, "the window was not shown again")
+    }
+
+    func testAHandoverWithoutTheSecretIsRefused() throws {
+        let welcome = try welcomed()
+        let (next, _, answer) = try handOver(welcome, token: Pairing.nonce())
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(answer?.type, .bye)
+        XCTAssertNotNil(expectReply { client.send(Message(type: .ping, payload: PingWire.encode(1))) }.first, "the session goes on")
+    }
+
+    func testASessionWithoutAKeyStaysOffLinksThatNeedPairing() throws {
+        let welcome = try welcomed()
+        linkAdmission = .pairing
+        let (next, _, answer) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(answer?.type, .bye)
+        linkAdmission = .refused("Wi-Fi off")
+        let (other, _, refused) = try handOver(welcome)
+        defer { other.close(reason: "test end") }
+        XCTAssertEqual(refused?.type, .bye)
+    }
+
+    func testTheNewConnectionWaitsForTheScreenLikeTheOld() throws {
+        let welcome = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        let (next, mail, _) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        XCTAssertNotNil(mail.next([.switchover], in: self) { client.send(Message(type: .switchover)) })
+        let g = TileGeometry(width: 256, height: 128)
+        let gate = DispatchSemaphore(value: 0)
+        display.tileGate = gate
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload
+        for _ in 0..<12 { next.send(Message(type: .tileFrame, payload: frame)) }
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertLessThanOrEqual(session.framesInFlight, ReceiverSession.maxFramesInFlight, "reading stops while the screen is busy")
+        display.tileGate = nil
+        for _ in 0..<12 { gate.signal() }
+    }
+
+    func testTheNewLinkIsMeasuredThenReconfiguredWithoutRedrawing() throws {
+        let welcome = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        let (next, mail, _) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        let result = mail.next([.probeResult], in: self) {
+            for _ in 0..<4 { next.send(Message(type: .probe, payload: Data(count: 1 << 20))) }
+            next.send(Message(type: .probe, flags: ProbeFlags.end, payload: Data()))
+        }
+        XCTAssertEqual(try JSONWire.decode(ProbeResult.self, from: try XCTUnwrap(result).payload).bytes, 4 << 20, "measured on the new link")
+        XCTAssertNotNil(mail.next([.switchover], in: self) { client.send(Message(type: .switchover)) })
+        var faster = tileConfig
+        faster.linkKind = .ethernet
+        next.send(try! JSONWire.message(.reconfigure, faster))
+        XCTAssertEqual(mail.next([.pong], in: self) { next.send(Message(type: .ping, payload: PingWire.encode(5))) }?.type, .pong)
+        XCTAssertEqual(session.config?.linkKind, .ethernet)
+        XCTAssertEqual(display.read { display.log.filter { $0 == "prepare" }.count }, 1, "the picture is kept")
+        // Another size would need a new display: refused
+        var bigger = tileConfig
+        bigger.streamPixels = PixelSize(width: 512, height: 256)
+        XCTAssertNotNil(mail.next([.bye], in: self) { next.send(try! JSONWire.message(.reconfigure, bigger)) })
+    }
+
+    /// A handover changes the path: video starts, then stops
+    func testAReconfigureMovesBetweenTilesAndVideo() throws {
+        let welcome = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        let (next, mail, _) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        XCTAssertNotNil(mail.next([.switchover], in: self) { client.send(Message(type: .switchover)) })
+        next.send(try! JSONWire.message(.reconfigure, hybridConfig))
+        next.send(Message(type: .videoParams, payload: VideoWire.params(codec: .hevc, sets: [Data([1])])))
+        next.send(.videoFrame, parts: VideoWire.frame(keyframe: true, avcc: Data([0, 0, 0, 1, 9])))
+        waitForDisplay { [display] in display.videoFrames == 1 }
+        next.send(try! JSONWire.message(.reconfigure, tileConfig))
+        let bye = mail.next([.bye], in: self) { next.send(.videoFrame, parts: VideoWire.frame(keyframe: false, avcc: Data([0, 0, 0, 1, 9]))) }
+        XCTAssertNotNil(bye, "video on the tile path is refused again")
+        XCTAssertEqual(display.read { display.videoFrames }, 1)
+    }
+
+    func testATakeoverGoneBeforeTheSwitchoverLeavesTheSessionWhereItWas() throws {
+        let welcome = try welcomed()
+        let (next, _, ok) = try handOver(welcome)
+        XCTAssertEqual(ok?.type, .handoverOK)
+        next.close(reason: "sender gave up")
+        Thread.sleep(forTimeInterval: 0.2)
+        client.send(Message(type: .switchover))
+        XCTAssertEqual(expectReply { client.send(Message(type: .ping, payload: PingWire.encode(3))) }.first?.type, .pong,
+                       "still on the old connection")
+        XCTAssertTrue(display.read { display.ended.isEmpty })
+    }
+
+    func testASecondCursorChannelWithoutAHandoverIsRefused() throws {
+        let token = try token()
+        let first = try channel(token)
+        defer { first.close(reason: "test end") }
+        Thread.sleep(forTimeInterval: 0.2)
+        let second = try channel(token)
+        let closed = expectation(description: "second closed")
+        second.onClose = { _ in closed.fulfill() }
+        wait(for: [closed], timeout: 3)
+        first.send(Message(type: .cursorPos, payload: CursorWire.pos(x: 0.25, y: 0.5, visible: true)))
+        waitForDisplay { [display] in display.cursors == [0.25] }
     }
 
     func testPingEchoesAsPong() throws {

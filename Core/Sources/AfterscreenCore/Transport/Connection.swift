@@ -191,6 +191,16 @@ public final class Connection {
         t.start()
     }
 
+    /// Started connection: closes after `timeout` without bytes
+    /// For a connection that later carries the session
+    public func watchIdle(_ timeout: TimeInterval) {
+        lock.lock()
+        let queue = watchdog == nil ? delegateQueue : nil
+        lastRead = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+        if let queue = queue { startWatchdog(timeout: timeout, queue: queue) }
+    }
+
     private func startWatchdog(timeout: TimeInterval, queue: DispatchQueue) {
         let period = min(0.5, timeout / 2)
         let timer = DispatchSource.repeating(on: queue, every: period, after: period) { [weak self] in

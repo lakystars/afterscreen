@@ -72,6 +72,9 @@ public final class TileEncoder {
     private var lastCongested = false
     /// Receiver shows these tiles as BC1 or video
     private var lossy: [Bool]
+    /// Shown from the video layer; BC1 tiles are lossy only
+    /// Kept apart: the motion mode may change mid-session
+    private var onVideo: [Bool]
     /// Gather mode per tile
     /// 0 BC7 from cur, 1 BC7 from ref
     /// 2 BC1 from the texture, 3 reference only
@@ -123,6 +126,7 @@ public final class TileEncoder {
         lastChange = [TimeInterval](repeating: -.infinity, count: geometry.tileCount)
         lastFrame = [Int](repeating: -2, count: geometry.tileCount)
         lossy = [Bool](repeating: false, count: geometry.tileCount)
+        onVideo = [Bool](repeating: false, count: geometry.tileCount)
         modes = [UInt32](repeating: 0, count: geometry.tileCount)
         self.placeholder = placeholder
         uploads = try (0..<max(1, uploadBuffers)).map { _ in
@@ -231,7 +235,7 @@ public final class TileEncoder {
                 lastFrame[t] = encodes
                 if inMotion && motion == .video {
                     // Video tiles become lossy once a frame carries their run
-                    if lossy[t] {
+                    if onVideo[t] {
                         flags[t] = 0
                         modes[t] = 3
                         referenceOnly.append(t)
@@ -245,6 +249,7 @@ public final class TileEncoder {
                     moving.append(t)
                 } else {
                     lossy[t] = false
+                    onVideo[t] = false
                     mark(t, mode: 0, in: flags)
                 }
             } else if lossy[t] && now - lastChange[t] >= TileEncoder.settleDelay && settling.count < settleLimit {
@@ -257,17 +262,28 @@ public final class TileEncoder {
         let sharp = moving.count <= bc7MotionLimit
         for t in moving {
             lossy[t] = !sharp
+            onVideo[t] = false
             mark(t, mode: sharp ? 0 : 2, in: flags)
         }
         let frame = gather(texture: texture, referenceOnly: referenceOnly)
-        if frame != nil { entering.forEach { lossy[$0] = true } }
+        if frame != nil {
+            for t in entering {
+                lossy[t] = true
+                onVideo[t] = true
+            }
+        }
         changedTiles = changed
         return settle(settling, frame)
     }
 
     /// Settling tiles stay lossy until a frame carries their BC7
     private func settle(_ tiles: [Int], _ frame: EncodedFrame?) -> EncodedFrame? {
-        if frame != nil { tiles.forEach { lossy[$0] = false } }
+        if frame != nil {
+            for t in tiles {
+                lossy[t] = false
+                onVideo[t] = false
+            }
+        }
         lossyTiles = lossy.reduce(0) { $1 ? $0 + 1 : $0 }
         return frame
     }

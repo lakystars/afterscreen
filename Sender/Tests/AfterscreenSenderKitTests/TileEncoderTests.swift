@@ -381,6 +381,22 @@ extension MotionTests {
         }
     }
 
+    /// Handover from tiles to video: BC1 tiles not on video
+    func testABC1TileMovesOntoTheVideoLayerAfterAModeChange() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let g = TileGeometry(width: w, height: h)
+        let encoder = try TileEncoder(device: device, geometry: g, uploadBuffers: 6)
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0)
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 1), w, h), forceAll: false, dirty: nil, now: 1)
+        let bc1 = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 2), w, h), forceAll: false, dirty: nil, now: 1.016))
+        XCTAssertEqual(bc1.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
+        encoder.motion = .video
+        let video = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: false, dirty: nil, now: 1.032),
+                                  "still moving: the receiver must be told to show video")
+        XCTAssertEqual(video.runs, [TileRun(row: 0, first: 0, count: 2, format: .video)])
+    }
+
     func testMovingTilesSwitchToTheVideoLayerAndSettleToTheLatestBC7() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let w = 128, h = 64

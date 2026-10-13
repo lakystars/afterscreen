@@ -45,11 +45,6 @@ public enum PathPolicy {
         let picked = resolve(resolution, panel: screen, source: source, capacityGbps: capacityGbps)
         let panel = streamPixels(panel: screen, capacityGbps: capacityGbps, resolution: picked, source: source)
         let fps = min(welcome.frameRate, maxFrameRate)
-        let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link, frameRate: fps)
-        if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps(panel, fps: fps) { return tiles }
-        guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
-        let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
-        let rate = bitrate(capacityGbps: capacityGbps)
         // Mirror keeps still areas 1:1 where extend sends four fifths
         // Moving areas take the four fifths: video cost unchanged
         let motion = source.map { s -> PixelSize in
@@ -57,6 +52,25 @@ public enum PathPolicy {
             let full = aligned(fit(s, within: screen))
             return fit(aligned(PixelSize(width: full.width * 4 / 5, height: full.height * 4 / 5)), within: panel)
         } ?? panel
+        return path(panel, motion: motion, link: link, capacityGbps: capacityGbps, welcome: welcome, fps: fps, largestVideo: largestVideo)
+    }
+
+    /// A session moving to another link: size and rate stay
+    /// Path, video layer and bitrate follow the new capacity
+    public static func relink(_ current: StreamConfig, link: LinkKind, capacityGbps: Double?, welcome: Welcome,
+                              largestVideo: PixelSize? = nil) -> StreamConfig {
+        path(current.streamPixels, motion: current.streamPixels, link: link, capacityGbps: capacityGbps, welcome: welcome,
+             fps: current.frameRate, largestVideo: largestVideo)
+    }
+
+    /// Lossless tiles when the link carries them, else video
+    private static func path(_ panel: PixelSize, motion: PixelSize, link: LinkKind, capacityGbps: Double?, welcome: Welcome,
+                             fps: Double, largestVideo: PixelSize?) -> StreamConfig {
+        let tiles = StreamConfig(path: .tile, streamPixels: panel, video: nil, linkKind: link, frameRate: fps)
+        if link.isWired, (capacityGbps ?? 0) >= tileCapacityGbps(panel, fps: fps) { return tiles }
+        guard welcome.hevcDecode || welcome.h264Decode else { return tiles }
+        let codec: VideoCodec = welcome.hevcDecode ? .hevc : .h264
+        let rate = bitrate(capacityGbps: capacityGbps)
         let video = VideoLayer(codec: codec, pixels: videoPixels(motion, bitrate: rate, codec: codec, fps: fps, largest: largestVideo),
                                bitrate: rate, tenBit: codec == .hevc && welcome.hevcMain10Decode)
         return StreamConfig(path: .hybrid, streamPixels: panel, video: video, linkKind: link, frameRate: fps)

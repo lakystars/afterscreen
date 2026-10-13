@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import AfterscreenCore
 
@@ -157,10 +158,39 @@ public final class ReceiverSession {
     private let telemetryLock = NSLock()
     private var currentTelemetry = HUDTelemetry()
 
-    private let connection: Connection
+    /// Session queue; a handover replaces it
+    private var connection: Connection
     /// Second connection for cursor and audio; never waits behind frames
     private var cursorChannel: Connection?
     private let channelToken = UInt32.random(in: 1...UInt32.max)
+    /// Proven by a connection taking the session over
+    private let handoverToken = Pairing.nonce()
+    /// Pairing key the sender proved; nil when admitted without one
+    private var sessionKey: Data?
+    private struct PendingHandover {
+        let connection: Connection
+        let senderNonce: Data
+        let receiverNonce: Data
+        let secret: SymmetricKey
+    }
+    /// Connections proving the handover secret
+    /// One each: a stranger cannot block the real sender
+    private var handovers: [ObjectIdentifier: PendingHandover] = [:]
+    /// Proven; carries the session once `switchover` arrives
+    private var takeover: Connection?
+    /// After a switchover: the sender reopens its cursor channel
+    private var cursorReplaceable = false
+    /// What a new connection's link needs; nil refuses handovers
+    public var admission: ((Connection) -> LinkAdmission)?
+    /// Main queue, after a handover: the new main connection
+    public var onHandover: ((Connection) -> Void)?
+
+    public enum LinkAdmission: Equatable {
+        case refused(String)
+        /// A cable on its own interface, or pairing off
+        case open
+        case pairing
+    }
     private let hardware: Welcome
     private let auth: ReceiverAuth?
     /// Session queue: a hello waiting on its proof or pairing
@@ -224,10 +254,10 @@ public final class ReceiverSession {
 
     /// Reader thread: blocks while the screen pipeline is full
     /// TCP backpressure then reaches the sender
-    private func waitForFrameSlot(_ m: Message) {
+    private func waitForFrameSlot(_ m: Message, on c: Connection) {
         guard m.type == .tileFrame || m.type == .videoFrame else { return }
         while frameSlots.wait(timeout: .now() + 0.25) == .timedOut {
-            if connection.isClosed { return }
+            if c.isClosed { return }
         }
     }
 
@@ -240,11 +270,22 @@ public final class ReceiverSession {
     }
 
     public func start() {
-        connection.onMessage = { [weak self] m in self?.handle(m) }
-        connection.onClose = { [weak self] reason in self?.finish(reason: reason) }
-        connection.readGate = { [weak self] m in self?.waitForFrameSlot(m) }
+        bind(connection)
         connection.start(queue: queue, idleTimeout: idleTimeout)
         statsTimer = DispatchSource.repeating(on: queue, every: 1, after: 1) { [weak self] in self?.sendStats() }
+    }
+
+    /// A replaced connection's close ends nothing
+    private func bind(_ c: Connection) {
+        c.onMessage = { [weak self] m in self?.handle(m) }
+        c.onClose = { [weak self, weak c] reason in
+            guard let self = self, self.connection === c else { return }
+            self.finish(reason: reason)
+        }
+        c.readGate = { [weak self, weak c] m in
+            guard let c = c else { return }
+            self?.waitForFrameSlot(m, on: c)
+        }
     }
 
     /// User-initiated stop; `pause` asks the sender not to auto-reconnect
@@ -266,6 +307,7 @@ public final class ReceiverSession {
             guard currentPeer == nil, pendingHello == nil, let hello = try? JSONWire.decode(Hello.self, from: m.payload) else { return fail("bad hello") }
             var welcome = hardware
             welcome.channelToken = channelToken
+            welcome.handoverToken = handoverToken
             welcome.receiverID = auth?.receiverID
             if hello.protocolVersion != AfterscreenProtocol.version {
                 connection.send(.welcome, json: welcome)
@@ -310,6 +352,7 @@ public final class ReceiverSession {
             }
             connection.send(.authOK, json: AuthProof(mac: Pairing.proof(key: key, role: .receiver, transcript: t)))
             pendingHello = nil
+            sessionKey = key
             accept(hello)
         case .pair:
             guard issued == .pair, let hello = pendingHello, let auth = auth, let senderID = hello.senderID, let senderNonce = hello.nonce,
@@ -326,11 +369,13 @@ public final class ReceiverSession {
             pairing = nil
             DispatchQueue.main.async { auth.onCode(nil, hello.name) }
             auth.limiter.succeeded()
-            guard auth.store.save(Pairing.pairingKey(session, code: code, transcript: t), for: senderID, name: hello.name) else {
+            let kept = Pairing.pairingKey(session, code: code, transcript: t)
+            guard auth.store.save(kept, for: senderID, name: hello.name) else {
                 return fail(L10n.t("\(hardware.name) could not keep the pairing", "\(hardware.name)에 페어링을 저장하지 못했습니다"))
             }
             connection.send(.paired, json: AuthProof(mac: Pairing.pairedProof(session, transcript: t)))
             pendingHello = nil
+            sessionKey = kept
             accept(hello)
         case .config:
             guard let config = try? JSONWire.decode(StreamConfig.self, from: m.payload),
@@ -402,15 +447,14 @@ public final class ReceiverSession {
             guard currentPeer != nil, let light = try? BrightnessWire.decode(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(light) }
         case .probe:
-            if probeStart == nil { probeStart = Date() }
-            if m.flags & ProbeFlags.end != 0 {
-                let seconds = max(1e-6, Date().timeIntervalSince(probeStart ?? Date()))
-                connection.send(.probeResult, json: ProbeResult(bytes: probeBytes, seconds: seconds))
-                probeBytes = 0
-                probeStart = nil
-            } else {
-                probeBytes += m.payload.count
-            }
+            probe(m, on: connection)
+        case .reconfigure:
+            // Same size only: the picture and its tiles stay
+            guard let next = try? JSONWire.decode(StreamConfig.self, from: m.payload), ReceiverSession.isPlausible(next),
+                  next.streamPixels == config?.streamPixels else { return fail("bad reconfigure") }
+            configLock.lock()
+            currentConfig = next
+            configLock.unlock()
         case .ping:
             connection.send(Message(type: .pong, payload: m.payload))
         case .bye:
@@ -425,8 +469,50 @@ public final class ReceiverSession {
             DispatchQueue.main.async { [weak self] in
                 self?.display?.powerOff { self?.stop(reason: bye.reason) }
             }
-        case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel, .authOK, .paired, .pairWrong:
+        case .switchover:
+            switchOver()
+        case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel, .authOK, .paired, .pairWrong,
+             .handover, .handoverChallenge, .handoverProof, .handoverOK:
             break
+        }
+    }
+
+    /// The old connection's last message: the proven one takes over
+    /// Its echo tells the sender frames may follow there
+    private func switchOver() {
+        guard let next = takeover, !ended else { return }
+        takeover = nil
+        // Gone meanwhile: stay; the sender relinks or ends
+        guard !next.isClosed else { return }
+        let old = connection
+        connection = next
+        bind(next)
+        next.watchIdle(idleTimeout)
+        next.send(Message(type: .switchover))
+        cursorReplaceable = true
+        old.closeAfterFlush(reason: "handed over")
+        DispatchQueue.main.async { [weak self] in self?.onHandover?(next) }
+    }
+
+    /// Measures the link `c` runs over; answers there
+    private func probe(_ m: Message, on c: Connection) {
+        if probeStart == nil { probeStart = Date() }
+        if m.flags & ProbeFlags.end != 0 {
+            let seconds = max(1e-6, Date().timeIntervalSince(probeStart ?? Date()))
+            c.send(.probeResult, json: ProbeResult(bytes: probeBytes, seconds: seconds))
+            probeBytes = 0
+            probeStart = nil
+        } else {
+            probeBytes += m.payload.count
+        }
+    }
+
+    /// Session queue: link of the main connection, for the HUD
+    public func linkChanged(to kind: LinkKind) {
+        queue.async { [self] in
+            configLock.lock()
+            currentConfig?.linkKind = kind
+            configLock.unlock()
         }
     }
 
@@ -453,31 +539,99 @@ public final class ReceiverSession {
 
     /// Any queue: a connection made during the session
     /// First message with this session's token: becomes the cursor channel
+    /// A handover proving the session secret: may take it over
     /// Anything else is refused as busy
     public func offerChannel(_ c: Connection) {
         c.onMessage = { [weak self, weak c] m in
             guard let self = self, let c = c else { return }
-            // No cursor channel before the peer is accepted
-            guard self.cursorChannel === c else { return self.gated ? c.close(reason: "not accepted") : self.adopt(c, first: m) }
-            if m.type == .cursorPos || m.type == .cursorImage { self.cursor(m) }
-            if m.type == .audio { self.audio(m) }
-            if m.type == .volume { self.volume(m) }
+            if self.cursorChannel === c {
+                if m.type == .cursorPos || m.type == .cursorImage { self.cursor(m) }
+                if m.type == .audio { self.audio(m) }
+                if m.type == .volume { self.volume(m) }
+                return
+            }
+            if let pending = self.handovers[ObjectIdentifier(c)] { return self.proveHandover(m, pending) }
+            // Proven: only its link is measured before the switch
+            if self.takeover === c {
+                if m.type == .probe { self.probe(m, on: c) }
+                return
+            }
+            // No side channel before the peer is accepted
+            self.gated ? c.close(reason: "not accepted") : self.adopt(c, first: m)
+        }
+        c.onClose = { [weak self, weak c] _ in
+            guard let self = self, let c = c else { return }
+            self.handovers[ObjectIdentifier(c)] = nil
+            if self.takeover === c { self.takeover = nil }
+            if self.cursorChannel === c { self.cursorChannel = nil }
+        }
+        // Read once at start: a takeover's frames need backpressure
+        c.readGate = { [weak self, weak c] m in
+            guard let c = c else { return }
+            self?.waitForFrameSlot(m, on: c)
         }
         c.start(queue: queue)
-        // Closes a connection that never presents the token
+        // Closes a connection with no token or proof in time
         queue.asyncAfter(deadline: .now() + 3) { [weak self, weak c] in
-            guard let self = self, let c = c, self.cursorChannel !== c else { return }
-            c.close(reason: "no cursor channel token")
+            guard let self = self, let c = c, self.cursorChannel !== c, self.takeover !== c, self.connection !== c else { return }
+            self.handovers[ObjectIdentifier(c)] = nil
+            c.close(reason: "no cursor channel token or handover proof")
         }
     }
 
     private func adopt(_ c: Connection, first m: Message) {
-        guard !ended, cursorChannel == nil, m.type == .cursorChannel, (try? ChannelWire.decode(m.payload)) == channelToken else {
+        guard !ended else { return c.close(reason: "session ended") }
+        if m.type == .handover { return askHandover(c, m) }
+        // A second channel only right after a handover
+        guard m.type == .cursorChannel, (try? ChannelWire.decode(m.payload)) == channelToken, cursorChannel == nil || cursorReplaceable else {
             c.send(.bye, json: Bye(reason: "Receiver is busy with another sender"))
             c.closeAfterFlush(reason: "busy")
             return
         }
+        cursorReplaceable = false
+        cursorChannel?.close(reason: "replaced")
         cursorChannel = c
+    }
+
+    /// Same admission as a session over that link
+    /// No pairing key: only a link that needs no pairing
+    private func askHandover(_ c: Connection, _ m: Message) {
+        let refuse = { (reason: String) in
+            c.send(.bye, json: Bye(reason: reason))
+            c.closeAfterFlush(reason: reason)
+        }
+        guard takeover == nil, handovers.count < 4, let request = try? JSONWire.decode(HandoverNonce.self, from: m.payload),
+              request.nonce.count == 16 else {
+            return refuse("handover refused")
+        }
+        switch admission?(c) ?? .refused("handover refused") {
+        case .refused(let reason):
+            return refuse(reason)
+        case .pairing where sessionKey == nil:
+            return refuse(L10n.t("This link needs pairing", "이 링크는 페어링이 필요합니다"))
+        case .open, .pairing:
+            let nonce = Pairing.nonce()
+            handovers[ObjectIdentifier(c)] = PendingHandover(connection: c, senderNonce: request.nonce, receiverNonce: nonce,
+                                                             secret: Handover.secret(key: sessionKey, token: handoverToken))
+            c.send(.handoverChallenge, json: HandoverNonce(nonce: nonce))
+        }
+    }
+
+    private func proveHandover(_ m: Message, _ h: PendingHandover) {
+        guard m.type == .handoverProof else { return }
+        handovers[ObjectIdentifier(h.connection)] = nil
+        let expected = Handover.proof(h.secret, role: .sender, senderNonce: h.senderNonce, receiverNonce: h.receiverNonce)
+        // One takeover at a time
+        guard takeover == nil, let proof = try? JSONWire.decode(AuthProof.self, from: m.payload), Pairing.matches(proof.mac, expected) else {
+            h.connection.send(.bye, json: Bye(reason: "handover proof did not match"))
+            return h.connection.closeAfterFlush(reason: "bad handover proof")
+        }
+        takeover = h.connection
+        // A takeover lost mid-probe leaves no count behind
+        probeBytes = 0
+        probeStart = nil
+        h.connection.send(.handoverOK, json: AuthProof(mac: Handover.proof(h.secret, role: .receiver, senderNonce: h.senderNonce,
+                                                                           receiverNonce: h.receiverNonce)))
     }
 
     private func decodeTiles(_ payload: Data, expecting geometry: TileGeometry) {
@@ -557,6 +711,10 @@ public final class ReceiverSession {
         if pairing != nil, let auth = auth { DispatchQueue.main.async { auth.onCode(nil, "") } }
         cursorChannel?.close(reason: reason)
         cursorChannel = nil
+        handovers.values.forEach { $0.connection.close(reason: reason) }
+        handovers.removeAll()
+        takeover?.close(reason: reason)
+        takeover = nil
         // Captures the display, not the session
         // App may drop the session at onEnd before this runs
         decodeQueue.async { [display] in display?.releaseDecodeResources() }

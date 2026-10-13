@@ -78,6 +78,15 @@ public struct AuthChallenge: Codable, Equatable {
     }
 }
 
+/// Opens a handover, or answers one: a fresh nonce
+public struct HandoverNonce: Codable, Equatable {
+    public var nonce: Data
+
+    public init(nonce: Data) {
+        self.nonce = nonce
+    }
+}
+
 /// An HMAC proof, either way
 public struct AuthProof: Codable, Equatable {
     public var mac: Data
@@ -125,6 +134,9 @@ public struct Welcome: Codable, Equatable {
     public var panelMillimeters: PixelSize?
     /// Panel's highest refresh rate; the stream paces to it
     public var refreshHz: Double?
+    /// Per session, 128 bits; set by receivers taking handovers
+    /// A new connection proves it, never sends it
+    public var handoverToken: Data?
 
     public init(protocolVersion: Int, name: String, modelID: String, marketingName: String, osVersion: String,
                 gpuNames: [String], panelPixels: PixelSize, panelPoints: PixelSize,

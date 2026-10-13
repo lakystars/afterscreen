@@ -48,6 +48,17 @@ final class PopoverLabelTests: XCTestCase {
         XCTAssertTrue(LinkMenu.choices(available: [], pinned: nil).isEmpty)
     }
 
+    func testAutomaticLinkMovesOnlyToAFasterOne() {
+        XCTAssertEqual(RoutePlanner.upgrade(from: .wifi, available: [.ethernet, .wifi]), .ethernet, "a cable plugged in")
+        XCTAssertEqual(RoutePlanner.upgrade(from: .ethernet, available: [.thunderbolt, .ethernet, .wifi]), .thunderbolt)
+        XCTAssertNil(RoutePlanner.upgrade(from: .ethernet, available: [.ethernet, .wifi]), "already the fastest")
+        XCTAssertNil(RoutePlanner.upgrade(from: .thunderbolt, available: [.usb, .wifi]), "never down")
+        XCTAssertNil(RoutePlanner.upgrade(from: .loopback, available: [.wifi]))
+        XCTAssertNil(RoutePlanner.upgrade(from: nil, available: [.ethernet]))
+        XCTAssertEqual(AppModel.fasterLinkOutcome(wanted: .ethernet, got: .ethernet), "Switched to the faster Ethernet")
+        XCTAssertEqual(AppModel.fasterLinkOutcome(wanted: .ethernet, got: .wifi), "Ethernet did not connect; on Wi-Fi instead")
+    }
+
     func testWireStatsCarryThePopoverNumbers() {
         var s = SenderSnapshot()
         s.interface = "bridge0"
@@ -144,6 +155,20 @@ final class PathPolicyTests: XCTestCase {
     }
 
     private let fiveK = PixelSize(width: 5120, height: 2880)
+
+    func testARelinkKeepsSizeAndRateAndFollowsTheNewLink() throws {
+        let w = welcome(panel: fiveK)
+        let wifi = try XCTUnwrap(PathPolicy.choose(link: .wifi, capacityGbps: 0.2, welcome: w, resolution: .reduced))
+        let ethernet = PathPolicy.relink(wifi, link: .ethernet, capacityGbps: 0.95, welcome: w)
+        XCTAssertEqual(ethernet.streamPixels, wifi.streamPixels, "the desktop keeps its size")
+        XCTAssertEqual(ethernet.frameRate, wifi.frameRate)
+        XCTAssertEqual(ethernet.linkKind, .ethernet)
+        XCTAssertGreaterThan(try XCTUnwrap(ethernet.video?.bitrate), try XCTUnwrap(wifi.video?.bitrate))
+        let thunderbolt = PathPolicy.relink(wifi, link: .thunderbolt, capacityGbps: 12, welcome: w)
+        XCTAssertEqual(thunderbolt.path, .tile)
+        XCTAssertEqual(thunderbolt.streamPixels, wifi.streamPixels)
+        XCTAssertEqual(PathPolicy.relink(thunderbolt, link: .wifi, capacityGbps: 0.2, welcome: w).path, .hybrid, "and back")
+    }
 
     func testThunderboltWithCapacityUsesTilesAtPanelPixels() {
         let c = PathPolicy.choose(link: .thunderbolt, capacityGbps: 10, welcome: welcome(panel: fiveK))

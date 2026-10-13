@@ -3,6 +3,17 @@ import CryptoKit
 import Foundation
 import AfterscreenCore
 
+/// Connection carrying sound; set on main, read by audio
+private final class SoundRoute {
+    private let lock = NSLock()
+    private var current: Connection?
+
+    var connection: Connection? {
+        get { lock.lock(); defer { lock.unlock() }; return current }
+        set { lock.lock(); current = newValue; lock.unlock() }
+    }
+}
+
 /// Everything the menu bar shows, refreshed at 1 Hz
 public struct SenderSnapshot {
     public var state = "Idle"
@@ -98,7 +109,9 @@ public final class SenderSession {
     private var fallback: [Route] = []
     /// Cursor and audio channel; never waits behind queued frames
     /// Main connection is the fallback
-    private var cursorConnection: Connection?
+    private var cursorConnection: Connection? { didSet { routeSound() } }
+    /// Where sound goes now; the audio thread reads it
+    private let soundRoute = SoundRoute()
     private var displaySize: DisplaySize
     private var sound: Bool
     /// Experiment: above 60 fps when the encoder keeps up
@@ -126,7 +139,8 @@ public final class SenderSession {
     private var output: OutputWatcher?
     private var outputSent = false
     private var testRun: QualityTestRun?
-    private var connection: Connection?
+    private var connection: Connection? { didSet { routeSound() } }
+    private var handoff: Handoff?
     private var display: VirtualDisplay?
     private var capture: Capture?
     private var cursor: CursorTracker?
@@ -193,14 +207,14 @@ public final class SenderSession {
     }
 
     private func startSound() {
-        guard audioTap == nil, sound, snapshot.peer?.audioPlayback == true else { return }
-        // Cursor channel from the handshake: sound never waits behind frames
-        guard let channel = cursorConnection ?? connection else { return }
+        guard audioTap == nil, sound, snapshot.peer?.audioPlayback == true, soundRoute.connection != nil else { return }
         // Level first: no sound at the iMac's own level
         sendOutputLevel(playing: true)
         if #available(macOS 14.2, *) {
+            // Looked up per packet: a handover moves the channel
+            let route = soundRoute
             audioTap = AudioTap(onSamples: { rate, channels, samples in
-                channel.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: rate, channels: channels, samples: samples)))
+                route.connection?.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: rate, channels: channels, samples: samples)))
             }, onChange: { [weak self] in
                 // A new output device or format: rebuild the tap
                 self?.stopSound()
@@ -215,6 +229,11 @@ public final class SenderSession {
                 self.sendOutputLevel(playing: self.audioTap != nil)
             }
         }
+    }
+
+    /// Cursor channel from the handshake: sound never waits behind frames
+    private func routeSound() {
+        soundRoute.connection = cursorConnection ?? connection
     }
 
     /// Receiver keeps this Mac's level across a tap rebuild
@@ -370,6 +389,222 @@ public final class SenderSession {
     /// Live link: pings and stats at least twice a second
     static let idleTimeout: TimeInterval = 4
 
+    // MARK: - Handover (main queue)
+
+    public enum HandoverOutcome {
+        /// Frames flow on the new link
+        case switched
+        /// Still on the old link
+        case stayed
+        /// The receiver may have moved: the session relinks
+        case lost
+    }
+
+    private struct Handoff {
+        let kind: LinkKind
+        let secret: SymmetricKey
+        let nonce = Pairing.nonce()
+        let done: (HandoverOutcome) -> Void
+        var connection: Connection?
+        var route: Route?
+        var receiverNonce: Data?
+        /// Both proofs checked: the new link is measured next
+        var proven = false
+        /// The new link's measure and the config it gives
+        var gbps: Double?
+        var config: StreamConfig?
+        var videoCap: PixelSize?
+        /// `switchover` sent: the receiver may read the new connection
+        var switching = false
+    }
+
+    public var isHandingOver: Bool { handoff != nil }
+
+    /// Handshake, measure, encoder check and switch
+    static let handoverTimeout: TimeInterval = 6
+
+    /// Moves the stream to `kind` within this session
+    /// false: this receiver or session cannot; relink instead
+    public func handover(to kind: LinkKind, done: @escaping (HandoverOutcome) -> Void) -> Bool {
+        guard purpose == .display, snapshot.isStreaming, closing == nil, !ended, handoff == nil, streamer != nil,
+              let welcome = snapshot.peer, let token = welcome.handoverToken else { return false }
+        // 120 fps is Thunderbolt only; elsewhere a new session
+        guard (snapshot.config?.frameRate ?? 0) <= HighRefresh.base || kind == .thunderbolt else { return false }
+        // The key this session proved; none for an open session
+        let key = welcome.auth == nil ? nil : welcome.receiverID.flatMap { pairings.key(for: $0) }
+        guard welcome.auth == nil || key != nil else { return false }
+        let h = Handoff(kind: kind, secret: Handover.secret(key: key, token: token), done: done)
+        handoff = h
+        RoutePlanner.routes(to: target) { [weak self] routes in
+            DispatchQueue.main.async { self?.connectHandoff(routes.filter { $0.kind == kind }) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + SenderSession.handoverTimeout) { [weak self] in
+            guard let self = self, self.handoff?.nonce == h.nonce else { return }
+            self.handoffFailed("handover timed out")
+        }
+        return true
+    }
+
+    private func connectHandoff(_ routes: [Route]) {
+        guard let nonce = handoff?.nonce, !ended else { return }
+        guard let route = routes.first else { return handoffFailed("no route") }
+        Connection.connect(host: route.address, port: target.port,
+                           interfaceName: route.kind == .loopback ? nil : route.interface, timeout: 2) { [weak self] result in
+            DispatchQueue.main.async {
+                // A later handover's result is not this one's
+                guard let self = self, var h = self.handoff, h.nonce == nonce, h.connection == nil, !self.ended else {
+                    if case let .success(c) = result { c.close(reason: "Cancelled") }
+                    return
+                }
+                guard case let .success(c) = result else { return self.connectHandoff(Array(routes.dropFirst())) }
+                h.connection = c
+                h.route = route
+                self.handoff = h
+                c.onMessage = { [weak self, weak c] m in
+                    guard let self = self, self.handoff?.connection === c else { return }
+                    self.handoffMessage(m)
+                }
+                c.onClose = { [weak self, weak c] reason in
+                    guard let self = self, self.handoff?.connection === c else { return }
+                    self.handoffFailed(reason)
+                }
+                c.start(queue: .main)
+                c.send(.handover, json: HandoverNonce(nonce: h.nonce))
+            }
+        }
+    }
+
+    private func handoffMessage(_ m: Message) {
+        guard var h = handoff, let c = h.connection else { return }
+        switch m.type {
+        case .handoverChallenge:
+            guard let challenge = try? JSONWire.decode(HandoverNonce.self, from: m.payload), challenge.nonce.count == 16 else {
+                return handoffFailed("bad handover challenge")
+            }
+            h.receiverNonce = challenge.nonce
+            handoff = h
+            c.send(.handoverProof, json: AuthProof(mac: Handover.proof(h.secret, role: .sender, senderNonce: h.nonce, receiverNonce: challenge.nonce)))
+        case .handoverOK:
+            // Proven both ways before any frame goes there
+            guard let theirs = h.receiverNonce, let proof = try? JSONWire.decode(AuthProof.self, from: m.payload),
+                  Pairing.matches(proof.mac, Handover.proof(h.secret, role: .receiver, senderNonce: h.nonce, receiverNonce: theirs)) else {
+                return handoffFailed(L10n.t("The receiver's handover proof did not match", "수신기의 링크 전환 증명이 맞지 않습니다"))
+            }
+            h.proven = true
+            handoff = h
+            // The old link streams on meanwhile
+            probe(c)
+        case .probeResult:
+            guard h.proven, h.gbps == nil, let result = try? JSONWire.decode(ProbeResult.self, from: m.payload) else { return }
+            h.gbps = result.gbps
+            handoff = h
+            chooseHandoff(gbps: result.gbps)
+        case .switchover:
+            guard h.switching, let route = h.route else { return }
+            switched(to: c, route: route, kind: h.kind)
+        case .bye:
+            handoffFailed((try? JSONWire.decode(Bye.self, from: m.payload))?.reason ?? "handover refused")
+        default:
+            break
+        }
+    }
+
+    /// Size and rate stay; path and video follow the link
+    /// A larger video layer is checked against the encoder first
+    private func chooseHandoff(gbps: Double) {
+        guard let h = handoff, let welcome = snapshot.peer, let current = snapshot.config else { return handoffFailed("no stream to move") }
+        let first = PathPolicy.relink(current, link: h.kind, capacityGbps: gbps, welcome: welcome, largestVideo: videoCap)
+        guard let layer = first.video else { return beginSwitch(first, videoCap: videoCap) }
+        let boxes = PathPolicy.videoBoxes(bitrate: layer.bitrate, codec: layer.codec, fps: first.frameRate)
+        // Stream's encoder busy: kept results, else its cap
+        if current.video != nil {
+            let largest = EncoderCapacity.knownLargest(of: boxes, codec: layer.codec, tenBit: layer.tenBit, fps: first.frameRate) ?? videoCap
+            return beginSwitch(PathPolicy.relink(current, link: h.kind, capacityGbps: gbps, welcome: welcome, largestVideo: largest), videoCap: largest)
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let largest = EncoderCapacity.largest(of: boxes, codec: layer.codec, tenBit: layer.tenBit, bitrate: layer.bitrate, fps: first.frameRate)
+            DispatchQueue.main.async {
+                guard let self = self, self.handoff?.nonce == h.nonce else { return }
+                self.beginSwitch(PathPolicy.relink(current, link: h.kind, capacityGbps: gbps, welcome: welcome, largestVideo: largest), videoCap: largest)
+            }
+        }
+    }
+
+    private func beginSwitch(_ config: StreamConfig, videoCap: PixelSize?) {
+        guard var h = handoff, let c = h.connection else { return }
+        h.config = config
+        h.videoCap = videoCap
+        h.switching = true
+        handoff = h
+        // The receiver closes the old one on reading the new
+        // That close may beat the echo: not an end
+        connection?.onClose = { [weak self] reason in
+            guard let self = self, self.handoff?.switching != true else { return }
+            self.end(reason)
+        }
+        streamer?.switchConnection(to: c)
+    }
+
+    /// The receiver reads the new connection: the session moves there
+    private func switched(to c: Connection, route: Route, kind: LinkKind) {
+        guard let h = handoff else { return }
+        handoff = nil
+        let old = connection
+        connection = c
+        self.route = route
+        c.onMessage = { [weak self] m in self?.handle(m) }
+        c.onClose = { [weak self] reason in self?.end(reason) }
+        c.paceBitsPerSecond = SenderSession.simulatedLinkMbps.map { $0 * 1e6 }
+        c.watchIdle(SenderSession.idleTimeout)
+        streamer?.finishSwitch(config: h.config, capacityGbps: h.gbps)
+        if let cap = h.videoCap { videoCap = cap }
+        // The new link starts its own congestion record
+        qualityNotice = QualityNotice()
+        // Its close ends nothing now
+        old?.onClose = nil
+        old?.onMessage = nil
+        old?.closeAfterFlush(reason: "handed over")
+        lastTCP = nil
+        update {
+            $0.link = SenderSession.simulatedLinkMbps == nil ? kind : .wifi
+            $0.interface = route.interface
+            $0.mtu = Interfaces.mtu(route.interface)
+            $0.config = h.config ?? $0.config
+            $0.config?.linkKind = kind
+            $0.missingLink = nil
+            $0.capacityGbps = h.gbps
+            $0.videoBitrate = h.config?.video?.bitrate
+            $0.videoStartBitrate = h.config?.video?.bitrate
+            $0.qualityLowered = false
+        }
+        // Cursor and sound follow over the new route
+        cursorConnection?.close(reason: "handed over")
+        cursorConnection = nil
+        if let token = snapshot.peer?.channelToken { openCursorChannel(token: token) }
+        if SenderSession.logStats {
+            let video = h.config?.video.map { "\($0.pixels.width)x\($0.pixels.height) at \($0.bitrate / 1_000_000) Mbps" } ?? "none"
+            let line = String(format: "[sender] handed over to %@ via %@, %.2f Gbps measured, %@ path, video %@\n", kind.rawValue, route.interface,
+                              h.gbps ?? 0, h.config?.path.rawValue ?? "same", video)
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+        h.done(.switched)
+    }
+
+    private func handoffFailed(_ reason: String) {
+        guard let h = handoff else { return }
+        handoff = nil
+        if let c = h.connection {
+            c.onClose = nil
+            c.onMessage = nil
+            c.close(reason: reason)
+        }
+        if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] handover to \(h.kind.rawValue) failed: \(reason)\n".utf8)) }
+        guard h.switching else { return h.done(.stayed) }
+        // Receiver may read the new one: relink, or end if cut
+        h.done(.lost)
+        connection?.isClosed == false ? stop(reason: reason, relink: true) : end(reason)
+    }
+
     private func end(_ reason: String) {
         guard !ended else { return }
         ended = true
@@ -391,6 +626,11 @@ public final class SenderSession {
         cursor = nil
         cursorConnection?.close(reason: reason)
         cursorConnection = nil
+        if let c = handoff?.connection {
+            c.onClose = nil
+            c.close(reason: reason)
+        }
+        handoff = nil
         stopSound()
         // Unmirror before the virtual display goes: this Mac's mode returns
         osMirror?.stop()
@@ -549,7 +789,7 @@ public final class SenderSession {
         setDeband(deband)
         if purpose == .display { openCursorChannel(token: welcome.channelToken) }
         update { $0.state = L10n.t("Measuring the link", "링크 속도 측정 중") }
-        probe()
+        if let c = connection { probe(c) }
     }
 
     /// 60 fps unless the experiment is on, over Thunderbolt
@@ -692,8 +932,8 @@ public final class SenderSession {
         }
     }
 
-    private func probe() {
-        guard let c = connection else { return }
+    /// 0.3 s of 1 MiB messages on `c`; answered there
+    private func probe(_ c: Connection) {
         DispatchQueue.global(qos: .userInitiated).async {
             let chunk = Data(count: 1 << 20)
             let deadline = ProcessInfo.processInfo.systemUptime + 0.3

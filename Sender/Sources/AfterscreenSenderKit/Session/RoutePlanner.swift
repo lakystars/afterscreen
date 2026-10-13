@@ -68,6 +68,14 @@ public enum RoutePlanner {
         routes.reduce(into: []) { if !$0.contains($1.kind) { $0.append($1.kind) } }
     }
 
+    /// Automatic link mid-session: the faster link to move to
+    /// nil: the current link is already the fastest
+    public static func upgrade(from current: LinkKind?, available: [LinkKind]) -> LinkKind? {
+        guard let current = current, let now = priority.firstIndex(of: current),
+              let fastest = available.first, let rank = priority.firstIndex(of: fastest), rank < now else { return nil }
+        return fastest
+    }
+
     /// Routes over the chosen link
     /// nil or link gone: all routes, fastest first
     public static func select(_ routes: [Route], prefer: LinkKind?) -> (routes: [Route], fellBack: Bool) {

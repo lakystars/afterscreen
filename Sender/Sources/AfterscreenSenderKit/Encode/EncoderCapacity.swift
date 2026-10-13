@@ -25,6 +25,18 @@ enum EncoderCapacity {
         sizes.first { framesPerSecond($0, codec: codec, tenBit: tenBit, bitrate: bitrate, wanted: fps) >= fps * margin } ?? sizes.last
     }
 
+    /// As `largest`, kept results only; nil if one is missing
+    /// For a busy encoder, whose measure would read short
+    static func knownLargest(of sizes: [PixelSize], codec: VideoCodec, tenBit: Bool, fps: Double) -> PixelSize? {
+        lock.lock()
+        defer { lock.unlock() }
+        for size in sizes {
+            guard let kept = measured[key(size, codec, tenBit)] else { return nil }
+            if kept.fps >= fps * margin { return size }
+        }
+        return sizes.last
+    }
+
     private static func framesPerSecond(_ size: PixelSize, codec: VideoCodec, tenBit: Bool, bitrate: Int, wanted: Double) -> Double {
         let k = key(size, codec, tenBit), now = ProcessInfo.processInfo.systemUptime
         lock.lock()

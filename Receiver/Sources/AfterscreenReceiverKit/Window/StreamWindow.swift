@@ -184,7 +184,11 @@ final class StreamWindow {
     private let root = CALayer()
     private let cursorLayer = CALayer()
     private let hud = HUDHostView(rootView: HUDView(content: .empty, collapsed: false))
-    private let hintLayer = CATextLayer()
+    /// Box and its text: text layers draw from the top
+    /// The text is sized to itself, centred in the box
+    private let hintLayer = CALayer()
+    private let hintText = CATextLayer()
+    private static let hintFont = NSFont.systemFont(ofSize: 15, weight: .medium)
     /// Congestion notice: a box of one or two centred lines
     private let noticeBox = CALayer()
     private let noticeText = CATextLayer()
@@ -240,12 +244,14 @@ final class StreamWindow {
 
         hintLayer.opacity = 0
         hintLayer.backgroundColor = CGColor(gray: 0.08, alpha: 0.8)
-        hintLayer.foregroundColor = CGColor(gray: 0.95, alpha: 1)
         hintLayer.cornerRadius = 10
-        hintLayer.font = NSFont.systemFont(ofSize: 15, weight: .medium)
-        hintLayer.fontSize = 15
-        hintLayer.alignmentMode = .center
-        hintLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        hintLayer.actions = ["bounds": NSNull(), "position": NSNull()]
+        hintText.foregroundColor = CGColor(gray: 0.95, alpha: 1)
+        hintText.font = StreamWindow.hintFont
+        hintText.fontSize = StreamWindow.hintFont.pointSize
+        hintText.alignmentMode = .center
+        hintText.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        hintLayer.addSublayer(hintText)
         root.addSublayer(hintLayer)
         noticeBox.opacity = 0
         noticeBox.backgroundColor = CGColor(gray: 0.08, alpha: 0.85)
@@ -281,7 +287,7 @@ final class StreamWindow {
         view.onLayout = { [weak self, weak renderer] bounds, scale in
             self?.tube.layout(bounds: bounds)
             renderer?.layout(bounds: bounds, scale: scale, topInset: self?.notchInset ?? 0)
-            self?.hintLayer.contentsScale = scale
+            self?.hintText.contentsScale = scale
             self?.noticeText.contentsScale = scale
             self?.placeCursor()
             self?.placeHUD()
@@ -619,8 +625,8 @@ final class StreamWindow {
 
     /// How to leave the stream's Space, shown briefly after opening
     private func showHint() {
-        hintLayer.string = L10n.t("Control + ← → switches to \(ComputerName.current)'s desktop · right-click for the menu",
-                                  "Control + ← →로 \(ComputerName.current) 데스크톱과 전환 · 우클릭으로 메뉴")
+        hintText.string = L10n.t("Control + ← → switches to \(ComputerName.current)'s desktop · right-click for the menu",
+                                 "Control + ← →로 \(ComputerName.current) 데스크톱과 전환 · 우클릭으로 메뉴")
         placeHint()
         let fade = CAKeyframeAnimation(keyPath: "opacity")
         fade.values = [0, 1, 1, 0]
@@ -671,8 +677,12 @@ final class StreamWindow {
     }
 
     private func placeHint() {
-        let size = CGSize(width: 620, height: 44)
-        hintLayer.frame = CGRect(x: view.bounds.midX - size.width / 2, y: 64, width: size.width, height: size.height)
+        let pad = CGSize(width: 22, height: 11)
+        let measured = ((hintText.string as? String ?? "") as NSString).size(withAttributes: [.font: StreamWindow.hintFont])
+        let text = CGSize(width: ceil(measured.width) + 2, height: ceil(measured.height))
+        let box = CGSize(width: text.width + 2 * pad.width, height: text.height + 2 * pad.height)
+        hintLayer.frame = CGRect(x: view.bounds.midX - box.width / 2, y: 64, width: box.width, height: box.height)
+        hintText.frame = CGRect(origin: CGPoint(x: pad.width, y: pad.height), size: text)
     }
 
     // MARK: - Cursor

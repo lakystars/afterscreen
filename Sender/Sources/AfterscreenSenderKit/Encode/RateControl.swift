@@ -53,6 +53,14 @@ struct RateControl {
         self.fps = fps
     }
 
+    /// Another link: the old RTT baseline and backlog mean nothing
+    mutating func newLink() {
+        rtts = []
+        rttWasHigh = false
+        draining = nil
+        clear = 0
+    }
+
     /// Once a second; the new bitrate, or nil when unchanged
     mutating func update(_ s: Sample) -> Int? {
         // Idle Wi-Fi power save raises RTT; nothing queues

@@ -16,6 +16,9 @@ final class ReceiverPairingTests: XCTestCase {
     private var proofTimeout: TimeInterval = 10
     private var inbox: [Message] = []
     private var waiter: XCTestExpectation?
+    /// Later connections join the first session, as during a session
+    private var offerToFirst = false
+    private var lastWelcome: Welcome?
 
     private let welcome = Welcome(protocolVersion: AfterscreenProtocol.version, name: "iMac", modelID: "iMac18,3",
                                   marketingName: "iMac", osVersion: "13.7", gpuNames: [],
@@ -26,11 +29,14 @@ final class ReceiverPairingTests: XCTestCase {
     override func setUpWithError() throws {
         listener = try Listener()
         listener.onAccept = { [unowned self] c in
+            if offerToFirst, let first = queue.sync(execute: { sessions.first }) { return first.offerChannel(c) }
             var auth = ReceiverAuth(receiverID: "imac", required: required, store: store, limiter: limiter) { [unowned self] code, _ in
                 codes.append(code)
             }
             auth.proofTimeout = proofTimeout
             let session = ReceiverSession(connection: c, hardware: welcome, display: display, idleTimeout: 3, auth: auth)
+            // Handovers arrive over links that need pairing
+            session.admission = { _ in .pairing }
             queue.sync { sessions.append(session) }
             session.start()
         }
@@ -89,6 +95,7 @@ final class ReceiverPairingTests: XCTestCase {
     private func challenge(_ client: Connection) throws -> (nonce: Data, challenge: AuthChallenge, shown: String) {
         let nonce = Pairing.nonce()
         let w = try JSONWire.decode(Welcome.self, from: try reply(client, try hello(paired: false, nonce: nonce)).payload)
+        lastWelcome = w
         let challenge = try XCTUnwrap(w.auth)
         XCTAssertEqual(challenge.mode, .pair)
         XCTAssertEqual(w.receiverID, "imac")
@@ -129,6 +136,33 @@ final class ReceiverPairingTests: XCTestCase {
         XCTAssertEqual(store.pairs.map(\.name), ["MBP"])
         XCTAssertTrue(streams(client))
         XCTAssertNil(codes.last ?? "shown", "the code is hidden once paired")
+    }
+
+    /// The usual upgrade: a paired Wi-Fi session onto Ethernet
+    func testAPairedSessionHandsOverWithItsKeyOnly() throws {
+        let client = try connect()
+        let paired = try pair(client)
+        XCTAssertTrue(streams(client))
+        let token = try XCTUnwrap(lastWelcome?.handoverToken)
+        offerToFirst = true
+        func attempt(key: Data?) throws -> Message {
+            let next = try connect()
+            let nonce = Pairing.nonce()
+            let challenge = try reply(next, try JSONWire.message(.handover, HandoverNonce(nonce: nonce)))
+            XCTAssertEqual(challenge.type, .handoverChallenge)
+            let theirs = try JSONWire.decode(HandoverNonce.self, from: challenge.payload).nonce
+            let secret = Handover.secret(key: key, token: token)
+            let answer = try reply(next, try JSONWire.message(.handoverProof, AuthProof(mac: Handover.proof(secret, role: .sender,
+                                                                                                             senderNonce: nonce, receiverNonce: theirs))))
+            if answer.type == .handoverOK {
+                let proof = try JSONWire.decode(AuthProof.self, from: answer.payload)
+                XCTAssertTrue(Pairing.matches(proof.mac, Handover.proof(secret, role: .receiver, senderNonce: nonce, receiverNonce: theirs)))
+            }
+            next.close(reason: "test end")
+            return answer
+        }
+        XCTAssertEqual(try attempt(key: nil).type, .bye, "the token alone opens nothing on a paired session")
+        XCTAssertEqual(try attempt(key: paired.key).type, .handoverOK)
     }
 
     func testAWrongCodeKeepsTheSameCodeForAnotherTry() throws {

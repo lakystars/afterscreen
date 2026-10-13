@@ -73,7 +73,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 
 **Links**
 - Thunderbolt Bridge, USB networking (a Mac-to-Mac USB-C cable), Ethernet (a direct cable or a shared switch) and Wi-Fi.
-- Automatic link choice, or pin one in the menu. The menu lists only links that reach the iMac right now; a pinned link that stops answering stays listed as "not reachable now" while the fastest link takes over.
+- Automatic link choice, or pin one in the menu. The menu lists only links that reach the iMac right now; a pinned link that stops answering stays listed as "not reachable now" while the fastest link takes over. On automatic, a faster link that comes up during a session, such as a cable plugged in while on Wi-Fi, takes the session over; if it fails to connect, it is tried once more 10 seconds later. Choosing a link in the menu moves the session the same way. With a receiver of this version the stream moves between two frames without a reconnect: the iMac's window, the Mac's windows on the extended display and the sound carry on. The new link is measured first, and the path, video layer and bitrate follow it; the transfer resolution stays until the next connection. The new link proves the session's pairing key, or its session token on a link that needs no pairing. An older receiver reconnects briefly instead.
 - A hint when a Thunderbolt cable has come up as USB, and a hint to raise the MTU to 9000 on Thunderbolt and USB.
 
 **Picture quality**

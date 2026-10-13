@@ -206,6 +206,24 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self.codeWindow.show(code: code, sender: sender, on: display?.screen)
         }
         let session = ReceiverSession(connection: connection, hardware: welcome(for: display), display: screen, auth: auth)
+        // A handover's link, judged as a new session's would be
+        // Settings as this session started: read off main
+        let acceptsWiFi = settings.accepts(.wifi), pairedOnly = settings.pairedOnly
+        session.admission = { c in
+            let local = c.localInterfaceName
+            let link = local.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
+            guard link != .wifi || acceptsWiFi else {
+                return .refused(L10n.t("This receiver accepts Thunderbolt, USB and Ethernet only", "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다"))
+            }
+            let onCable = (link == .thunderbolt || link == .usb) && local != nil && c.peerInterfaceName == local
+            return onCable || link == .loopback || !pairedOnly ? .open : .pairing
+        }
+        session.onHandover = { [weak self, weak session] c in
+            let link = c.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
+            session?.linkChanged(to: link)
+            self?.showStatus(link: link)
+            FileHandle.standardError.write(Data("[receiver] Handed over to \(LinkLabel.name(link))\n".utf8))
+        }
         session.onPeer = { [weak self] hello in
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
             self?.showStatus(link: link)

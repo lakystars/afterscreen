@@ -44,7 +44,10 @@ final class FrameStreamer {
     let drops = RateCounter(window: 60)
     let gpuMeter = GPUTimeMeter()
 
-    private let connection: Connection
+    /// Queue-only; a handover replaces it between frames
+    private var connection: Connection
+    /// Handing over: nothing goes out until the receiver reads here
+    private var switching: Connection?
     // Per-item autorelease: a busy queue would retain Metal objects
     private let queue = DispatchQueue(label: "afterscreen.frames", qos: .userInteractive, autoreleaseFrequency: .workItem)
     /// Paced to the stream's rate, 2 ms early for jitter
@@ -59,6 +62,8 @@ final class FrameStreamer {
     /// nil on the tile path or after failure (BC1 fallback)
     private var video: VideoEncoder?
     private var videoCodec = VideoCodec.hevc
+    /// Bumped when the encoder goes: its late outputs are dropped
+    private var videoGeneration = 0
     private var videoKeyframe = true
     /// Frames leave in capture order
     /// A frame awaiting its video holds back later ones
@@ -98,24 +103,93 @@ final class FrameStreamer {
             throw FrameStreamerError.tileEncoder
         }
         tile = (encoder, textureCache, TilePacker())
-        encoder.bc7MotionLimit = PathPolicy.bc7MotionTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: config.frameRate)
-        if let layer = config.video, let video = VideoEncoder(layer: layer, fps: config.frameRate) {
-            videoCodec = layer.codec
-            encoder.motion = .video
-            settleBase = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: config.frameRate)
-            encoder.settleLimit = settleBase
-            self.video = video
-            rate = RateControl(start: layer.bitrate, fps: config.frameRate)
-            bitrates = (layer.bitrate, layer.bitrate)
-        }
-        // Written frame frees the link: retry held frame, no polling
-        connection.onFrameWritten = { [weak self] in
-            self?.queue.async { self?.wake() }
-        }
+        apply(config, capacityGbps: capacityGbps)
+        watchWrites(connection)
         pumpTimer = makeTimer { [weak self] in self?.pump() }
         refineTimer = makeTimer { [weak self] in self?.refine() }
-        if rate != nil {
-            rateTimer = DispatchSource.repeating(on: queue, every: 0.25, after: 0.25) { [weak self] in self?.sampleLink() }
+    }
+
+    /// What the link decides: path, video layer, rate control, limits
+    /// Init, or the queue during a handover
+    private func apply(_ config: StreamConfig, capacityGbps: Double?) {
+        guard let tile = tile else { return }
+        let geometry = tile.encoder.geometry, fps = config.frameRate
+        compression = CompressionPolicy(capacityGbps: capacityGbps, fps: fps)
+        tile.encoder.bc7MotionLimit = PathPolicy.bc7MotionTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: fps)
+        // Waits end here: the replaced encoder's outputs are dropped
+        // Old video must not reach a receiver now on tiles
+        for i in outbox.indices {
+            outbox[i].waitsForVideo = false
+            if config.video == nil { outbox[i].video = nil }
+        }
+        video = nil
+        videoGeneration += 1
+        rate = nil
+        settleBase = 0
+        tile.encoder.motion = .bc1
+        tile.encoder.settleLimit = .max
+        var rates: (now: Int, start: Int)?
+        if let layer = config.video, let video = VideoEncoder(layer: layer, fps: fps) {
+            videoCodec = layer.codec
+            tile.encoder.motion = .video
+            settleBase = PathPolicy.settleTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: fps)
+            tile.encoder.settleLimit = settleBase
+            self.video = video
+            rate = RateControl(start: layer.bitrate, fps: fps)
+            rates = (layer.bitrate, layer.bitrate)
+        }
+        lock.lock()
+        bitrates = rates
+        lock.unlock()
+        videoKeyframe = true
+        offeredFrames = 0
+        sentFullFrame = false
+        rateTimer?.cancel()
+        rateTimer = rate == nil ? nil : DispatchSource.repeating(on: queue, every: 0.25, after: 0.25) { [weak self] in self?.sampleLink() }
+    }
+
+    /// Written frame frees the link: retry held frame, no polling
+    private func watchWrites(_ c: Connection) {
+        c.onFrameWritten = { [weak self] in
+            self?.queue.async { self?.wake() }
+        }
+    }
+
+    // MARK: - Handover
+
+    /// Any queue: stops sending, then marks the old connection's end
+    /// Frames queued there go first; `finishSwitch` resumes on `next`
+    func switchConnection(to next: Connection) {
+        queue.async { [self] in
+            guard switching == nil else { return }
+            switching = next
+            connection.send(Message(type: .switchover))
+        }
+    }
+
+    /// Any queue: the receiver reads `next` now
+    /// `config`: the new link's, sent there before any frame
+    func finishSwitch(config: StreamConfig? = nil, capacityGbps: Double? = nil) {
+        queue.async { [self] in
+            guard let next = switching else { return }
+            switching = nil
+            connection.onFrameWritten = nil
+            connection = next
+            watchWrites(next)
+            // The old socket's counters say nothing of this one
+            lastSent = nil
+            leastBuffered = nil
+            leastWindow = nil
+            queueWasFull = false
+            if let config = config {
+                next.send(.reconfigure, json: config)
+                apply(config, capacityGbps: capacityGbps)
+            } else {
+                rate?.newLink()
+            }
+            // Frames held while switching: out before the next capture
+            drain()
+            wake()
         }
     }
 
@@ -242,7 +316,7 @@ final class FrameStreamer {
     /// Busy link or encoder: woken when a frame leaves
     /// No timer runs while nothing is held
     private func pump() {
-        guard !connection.isClosed, gate.pending != nil else { return }
+        guard !connection.isClosed, gate.pending != nil, switching == nil else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if connection.queuedFrames >= 2 { queueWasFull = true }
         guard inFlight < 2 else { return }
@@ -275,8 +349,9 @@ final class FrameStreamer {
         out.changedTiles = tile.encoder.changedTiles
         gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
         if let video = video, tile.encoder.lossyTiles > 0 {
+            let generation = videoGeneration
             out.waitsForVideo = video.encode(pixelBuffer, time: out.created, forceKeyframe: videoKeyframe) { [weak self] output in
-                self?.queue.async { self?.videoDone(output) }
+                self?.queue.async { self?.videoDone(output, generation: generation) }
             }
             if out.waitsForVideo { videoKeyframe = false } else { fallBackToBC1() }
         }
@@ -286,8 +361,9 @@ final class FrameStreamer {
     }
 
     /// Encoder outputs arrive in submission order
-    private func videoDone(_ output: VideoEncoder.Output) {
-        guard tile != nil, let i = outbox.firstIndex(where: { $0.waitsForVideo }) else { return }
+    /// A replaced encoder's late outputs fit no queued frame
+    private func videoDone(_ output: VideoEncoder.Output, generation: Int) {
+        guard tile != nil, generation == videoGeneration, let i = outbox.firstIndex(where: { $0.waitsForVideo }) else { return }
         outbox[i].waitsForVideo = false
         outbox[i].video = output
         if case .failed = output { fallBackToBC1() }
@@ -302,6 +378,7 @@ final class FrameStreamer {
         tile?.encoder.motion = .bc1
         tile?.encoder.settleLimit = settleBase
         video = nil
+        videoGeneration += 1
         rateTimer?.cancel()
         rateTimer = nil
         lock.lock()
@@ -314,7 +391,7 @@ final class FrameStreamer {
     /// Sends ready frames in order
     /// Video picture first, then the tile frame presenting it
     private func drain() {
-        guard let tile = tile else { return }
+        guard let tile = tile, switching == nil else { return }
         while let first = outbox.first, !first.waitsForVideo {
             outbox.removeFirst()
             var videoBytes = 0
@@ -331,7 +408,8 @@ final class FrameStreamer {
 
     private func refine() {
         guard let tile = tile, !connection.isClosed else { return }
-        refinePending = inFlight >= 2
+        // Handing over: `wake` refines once the switch is done
+        refinePending = inFlight >= 2 || switching != nil
         guard !refinePending else { return }
         if let frame = tile.encoder.refine() {
             gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
