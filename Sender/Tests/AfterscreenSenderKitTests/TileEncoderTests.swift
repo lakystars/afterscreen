@@ -399,6 +399,7 @@ extension MotionTests {
 
         XCTAssertNil(encoder.encode(texture: texture(device, scene(w, h, phase: 3), w, h), forceAll: false, dirty: nil, now: 1.032),
                      "tiles already on the video layer send nothing")
+        XCTAssertEqual(encoder.changedTiles, 2, "yet they changed: the changed area counts them")
         XCTAssertNil(encoder.encode(texture: texture(device, scene(w, h, phase: 4), w, h), forceAll: false, dirty: nil, now: 1.112),
                      "a slower change before the tile settles keeps it on the video layer")
         XCTAssertEqual(encoder.lossyTiles, 2)

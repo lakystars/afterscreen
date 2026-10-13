@@ -67,6 +67,63 @@ final class VideoEncoderTests: XCTestCase {
         return (w, h, y)
     }
 
+    /// Receiver's hybrid shader assumes this placement
+    /// Plane texel i sits on source pixel i × ratio
+    /// True for BGRA sources; ARGB2101010 scales from texel centres
+    func testScalingPutsEachTexelOnItsTopLeftSourcePixel() throws {
+        let format = Capture.configuration(size: PixelSize(width: 1024, height: 576)).pixelFormat
+        for tenBit in [false, true] {
+            let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 512, height: 288), bitrate: 20_000_000, tenBit: tenBit)
+            let encoder = try XCTUnwrap(VideoEncoder(layer: layer, fps: 60))
+            // 0…1 per channel, in the session's capture format
+            func scaled(column: Int, rgb: (Double, Double, Double), over: (Double, Double, Double)) throws -> (luma: [Double], cb: [Double]) {
+                var pb: CVPixelBuffer?
+                let attrs = [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()] as CFDictionary
+                XCTAssertEqual(CVPixelBufferCreate(nil, 1024, 576, format, attrs, &pb), kCVReturnSuccess)
+                let source = try XCTUnwrap(pb)
+                CVPixelBufferLockBaseAddress(source, [])
+                let base = try XCTUnwrap(CVPixelBufferGetBaseAddress(source)), stride = CVPixelBufferGetBytesPerRow(source)
+                for y in 0..<576 {
+                    let row = (base + y * stride).assumingMemoryBound(to: UInt32.self)
+                    for x in 0..<1024 {
+                        let c = x == column ? rgb : over
+                        if format == kCVPixelFormatType_ARGB2101010LEPacked {
+                            let q = { (v: Double) in UInt32((v * 1023).rounded()) }
+                            row[x] = 3 << 30 | q(c.0) << 20 | q(c.1) << 10 | q(c.2)
+                        } else {
+                            let q = { (v: Double) in UInt32((v * 255).rounded()) }
+                            row[x] = 255 << 24 | q(c.0) << 16 | q(c.1) << 8 | q(c.2)
+                        }
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(source, [])
+                let out = try XCTUnwrap(encoder.scaled(source))
+                CVPixelBufferLockBaseAddress(out, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(out, .readOnly) }
+                // Video range codes to 0…1; 10-bit in high bits
+                func plane(_ i: Int, row: Int, _ texels: Range<Int>, step: Int) throws -> [Double] {
+                    let p = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(out, i)) + row * CVPixelBufferGetBytesPerRowOfPlane(out, i)
+                    return texels.map { t in
+                        let code = tenBit ? Double(p.assumingMemoryBound(to: UInt16.self)[t * step] >> 6) / 4 : Double(p.assumingMemoryBound(to: UInt8.self)[t * step])
+                        return i == 0 ? (code - 16) / 219 : (code - 128) / 224
+                    }
+                }
+                return (try plane(0, row: 100, 148..<154, step: 1), try plane(1, row: 50, 72..<79, step: 2))
+            }
+            // White column on black: luma texels 148…153
+            let even = try scaled(column: 300, rgb: (1, 1, 1), over: (0, 0, 0)).luma
+            XCTAssertGreaterThan(even[2], 0.64, "tenBit \(tenBit): pixel 300 belongs to texel 150 \(even)")
+            XCTAssertEqual(even[1], even[3], accuracy: 0.01)
+            let odd = try scaled(column: 301, rgb: (1, 1, 1), over: (0, 0, 0)).luma
+            XCTAssertEqual(odd[2], odd[3], accuracy: 0.01, "tenBit \(tenBit): pixel 301 between texels 150 and 151 \(odd)")
+            XCTAssertGreaterThan(odd[2], 0.09)
+            // Blue column on grey: chroma texels 72…78, every fourth pixel
+            let cb = try scaled(column: 300, rgb: (0, 0, 1), over: (0.5, 0.5, 0.5)).cb
+            XCTAssertEqual(cb.firstIndex(of: cb.max()!), 3, "tenBit \(tenBit): pixel 300 belongs to chroma texel 75 \(cb)")
+            XCTAssertEqual(cb[2], cb[4], accuracy: 0.01)
+        }
+    }
+
     func testPipelinedFramesComeBackInOrderScaledToTheLayerInBT709VideoRange() throws {
         let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 3840, height: 2160), bitrate: 100_000_000)
         let encoder = try XCTUnwrap(VideoEncoder(layer: layer, fps: 60))

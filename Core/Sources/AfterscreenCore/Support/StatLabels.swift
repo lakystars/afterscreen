@@ -48,14 +48,30 @@ public enum LinkLabel {
 /// How moving areas are sent
 /// Tile path: tile encoding; hybrid path: video layer
 public enum MotionLabel {
-    public static func text(path: StreamPath, lossyTiles: Int) -> String? {
-        guard path == .tile else { return nil }
+    /// `videoBitrate` nil with a video layer: encoder failed, BC1 instead
+    public static func text(_ config: StreamConfig, videoBitrate: Int?, lossyTiles: Int) -> String {
+        if let v = config.video, videoBitrate != nil { return video(v) }
         return lossyTiles == 0 ? L10n.t("BC7, sharp", "BC7 (선명)") : L10n.t("BC1 on \(lossyTiles) tiles", "BC1 · 타일 \(lossyTiles)개")
     }
 
-    /// `bitrate`: the encoder's now; the layer's from the probe
-    public static func video(_ v: VideoLayer, bitrate: Int? = nil) -> String {
-        "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") \(v.pixels.width)×\(v.pixels.height) · \((bitrate ?? v.bitrate) / 1_000_000) Mbps"
+    /// Encoder's target now; nil without a running video layer
+    public static func target(_ config: StreamConfig, videoBitrate: Int?) -> String? {
+        guard config.video != nil, let bitrate = videoBitrate else { return nil }
+        return "\(bitrate / 1_000_000) Mbps"
+    }
+
+    public static func video(_ v: VideoLayer) -> String {
+        "\(v.codec.rawValue.uppercased())\(v.tenBit ? L10n.t(" 10-bit", " 10비트") : "") · \(v.pixels.width)×\(v.pixels.height)"
+    }
+}
+
+/// Receiver's hardware video decoders
+/// BC7 is a texture format, not a decoder: left out
+public enum HardwareDecodeLabel {
+    public static func text(_ w: Welcome) -> String {
+        let mark = { (on: Bool) in on ? "✓" : "✗" }
+        let hevc = w.hevcDecode ? "✓ (" + L10n.t("10-bit", "10비트") + " \(mark(w.hevcMain10Decode)))" : "✗"
+        return "HEVC \(hevc) · H.264 \(mark(w.h264Decode))"
     }
 }
 
@@ -85,13 +101,14 @@ public enum StatName {
     public static var retransmits: String { L10n.t("Retransmits", "재전송") }
     public static var quality: String { L10n.t("Link quality", "링크 품질") }
     public static var frames: String { L10n.t("Frames: captured · sent · shown", "프레임: 캡처 · 전송 · 표시") }
-    public static var dropped: String { L10n.t("Dropped / min", "버린 프레임/분") }
-    public static var resolution: String { L10n.t("Resolution", "해상도") }
-    public static var motion: String { L10n.t("Moving areas", "움직이는 영역") }
+    public static var dropped: String { L10n.t("Skipped / min", "건너뛴 프레임/분") }
+    public static var resolution: String { L10n.t("Transfer resolution", "전송 해상도") }
+    public static var motion: String { L10n.t("Motion sent as", "움직임 전송") }
+    public static var videoTarget: String { L10n.t("Video target bitrate", "영상 목표 비트레이트") }
     public static var changed: String { L10n.t("Changed area", "바뀐 영역") }
-    public static var compression: String { L10n.t("Compression", "압축률") }
+    public static var compression: String { L10n.t("Tile LZ4 ratio", "타일 LZ4 압축률") }
     public static var deband: String { L10n.t("Smooth gradients", "계단 완화") }
-    public static var encode: String { L10n.t("Encode time", "인코딩 시간") }
+    public static var encode: String { L10n.t("Frame processing", "프레임 처리 시간") }
     /// Receiver's texture upload and decompression
     public static func upload(_ receiver: String) -> String { L10n.t("\(receiver): upload · decompress", "\(receiver): 업로드 · 압축 해제") }
 }
@@ -100,7 +117,15 @@ public enum StatName {
 public enum StatValue {
     public static let dash = "—"
 
-    public static func capacity(_ gbps: Double?) -> String { gbps.map { String(format: "%.2f Gbps", $0) } ?? dash }
+    /// Same units as throughput, which sits beside it
+    public static func capacity(_ gbps: Double?) -> String { gbps.map { Format.gbps(bytesPerSecond: $0 * 1e9 / 8) } ?? dash }
+    /// Kernel RTT comes in whole milliseconds
+    public static func latency(_ ms: Double?) -> String {
+        guard let ms = ms else { return dash }
+        return ms < 1 ? "<1 ms" : String(format: "%.0f ms", ms)
+    }
+    /// 0: no new frame in the last second
+    public static func encode(_ ms: Double) -> String { ms > 0 ? Format.ms(ms) : dash }
     public static func retransmits(_ percent: Double) -> String { String(format: "%.2f%%", percent) }
     public static func quality(_ score: Int?) -> String { score.map { "\($0) / 100" } ?? dash }
     public static func changed(_ percent: Double) -> String { String(format: "%.0f%%", percent) }

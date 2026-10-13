@@ -7,18 +7,50 @@ final class StatLabelsTests: XCTestCase {
     override func setUp() { saved = L10n.language; L10n.language = .english }
     override func tearDown() { L10n.language = saved }
 
-    func testMotionFormatShowsOnTheTilePathOnly() {
-        XCTAssertEqual(MotionLabel.text(path: .tile, lossyTiles: 0), "BC7, sharp")
-        XCTAssertEqual(MotionLabel.text(path: .tile, lossyTiles: 12), "BC1 on 12 tiles")
-        XCTAssertNil(MotionLabel.text(path: .hybrid, lossyTiles: 3))
+    func testMotionShowsHowMovingAreasGoOut() {
+        let size = PixelSize(width: 3024, height: 1964)
+        let tiles = StreamConfig(path: .tile, streamPixels: size, video: nil, linkKind: .thunderbolt)
+        XCTAssertEqual(MotionLabel.text(tiles, videoBitrate: nil, lossyTiles: 0), "BC7, sharp")
+        XCTAssertEqual(MotionLabel.text(tiles, videoBitrate: nil, lossyTiles: 12), "BC1 on 12 tiles")
+        let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 2560, height: 1440), bitrate: 80_000_000)
+        let hybrid = StreamConfig(path: .hybrid, streamPixels: size, video: layer, linkKind: .wifi)
+        XCTAssertEqual(MotionLabel.text(hybrid, videoBitrate: 40_000_000, lossyTiles: 3), "HEVC · 2560×1440")
+        XCTAssertEqual(MotionLabel.target(hybrid, videoBitrate: 40_000_000), "40 Mbps", "the encoder's target now")
+        XCTAssertEqual(MotionLabel.text(hybrid, videoBitrate: nil, lossyTiles: 3), "BC1 on 3 tiles", "the encoder failed")
+        XCTAssertNil(MotionLabel.target(hybrid, videoBitrate: nil))
+        XCTAssertNil(MotionLabel.target(tiles, videoBitrate: nil))
     }
 
-    func testVideoLayerNamesCodecDepthSizeAndRate() {
+    func testVideoLayerNamesCodecDepthAndSize() {
         let hevc = VideoLayer(codec: .hevc, pixels: PixelSize(width: 2560, height: 1440), bitrate: 160_000_000, tenBit: true)
-        XCTAssertEqual(MotionLabel.video(hevc), "HEVC 10-bit 2560×1440 · 160 Mbps")
-        XCTAssertEqual(MotionLabel.video(hevc, bitrate: 48_000_000), "HEVC 10-bit 2560×1440 · 48 Mbps", "the encoder's rate now")
+        XCTAssertEqual(MotionLabel.video(hevc), "HEVC 10-bit · 2560×1440")
         let h264 = VideoLayer(codec: .h264, pixels: PixelSize(width: 1920, height: 1080), bitrate: 40_000_000, tenBit: false)
-        XCTAssertEqual(MotionLabel.video(h264), "H264 1920×1080 · 40 Mbps")
+        XCTAssertEqual(MotionLabel.video(h264), "H264 · 1920×1080")
+        L10n.language = .korean
+        XCTAssertEqual(MotionLabel.video(hevc), "HEVC 10비트 · 2560×1440")
+    }
+
+    func testValuesKeepTheirSourcesPrecision() {
+        XCTAssertEqual(StatValue.latency(0.4), "<1 ms")
+        XCTAssertEqual(StatValue.latency(9), "9 ms")
+        XCTAssertEqual(StatValue.latency(nil), "—")
+        XCTAssertEqual(StatValue.capacity(0.2), "200 Mbps", "as throughput beside it")
+        XCTAssertEqual(StatValue.capacity(11.5), "11.50 Gbps")
+        XCTAssertEqual(StatValue.encode(0), "—", "no frame in the last second")
+        XCTAssertEqual(StatValue.encode(4.3), "4.3 ms")
+    }
+
+    func testHardwareDecodeListsVideoDecodersOnly() {
+        func welcome(hevc: Bool, main10: Bool, h264: Bool) -> Welcome {
+            Welcome(protocolVersion: 1, name: "iMac", modelID: "iMac18,3", marketingName: "iMac", osVersion: "13.7.8", gpuNames: [],
+                    panelPixels: PixelSize(width: 5120, height: 2880), panelPoints: PixelSize(width: 2560, height: 1440),
+                    hevcDecode: hevc, h264Decode: h264, bc7: true, hevcMain10Decode: main10)
+        }
+        XCTAssertEqual(HardwareDecodeLabel.text(welcome(hevc: true, main10: true, h264: true)), "HEVC ✓ (10-bit ✓) · H.264 ✓")
+        XCTAssertEqual(HardwareDecodeLabel.text(welcome(hevc: true, main10: false, h264: true)), "HEVC ✓ (10-bit ✗) · H.264 ✓")
+        XCTAssertEqual(HardwareDecodeLabel.text(welcome(hevc: false, main10: false, h264: true)), "HEVC ✗ · H.264 ✓")
+        L10n.language = .korean
+        XCTAssertEqual(HardwareDecodeLabel.text(welcome(hevc: true, main10: true, h264: true)), "HEVC ✓ (10비트 ✓) · H.264 ✓")
     }
 
     func testDebandLevelsHaveNames() {

@@ -316,10 +316,11 @@ final class StreamRenderer {
     }
 
     // Masked tiles show video (NV12, BT.709 video range); others BC7
+    // range: black, luma scale, chroma mid, chroma scale
     fragment float4 hybridFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                                    texture2d<float> luma [[texture(1)]], texture2d<float> chroma [[texture(2)]],
                                    device const uchar *mask [[buffer(0)]], constant uint4 &grid [[buffer(1)]],
-                                   constant Wave &w [[buffer(2)]]) {
+                                   constant Wave &w [[buffer(2)]], constant float4 &range [[buffer(3)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         bool up = scalingUp(tex, in.uv), videoUp = scalingUp(luma, in.uv);
         float k;
@@ -331,10 +332,15 @@ final class StreamRenderer {
             if (up) bc7Bounds(mask, grid, p, uv, lo, hi);
             return float4(picture(tex, uv, up, lo, hi) * k, 1.0);
         }
+        // VideoToolbox scales from each texel's top-left source pixel
+        // Shift: half a plane texel less half a stream pixel
+        float2 stream = float2(grid.zw);
+        float2 luv = uv + 0.5 / float2(luma.get_width(), luma.get_height()) - 0.5 / stream;
+        float2 cuv = uv + 0.5 / float2(chroma.get_width(), chroma.get_height()) - 0.5 / stream;
         // Luma carries the detail: Catmull-Rom when scaled up
         // Half-resolution chroma stays bilinear
-        float y = ((videoUp ? catmullRom(luma, uv).r : luma.sample(s, uv).r) - 16.0 / 255.0) * (255.0 / 219.0);
-        float2 c = (chroma.sample(s, uv).rg - 128.0 / 255.0) * (255.0 / 224.0);
+        float y = ((videoUp ? catmullRom(luma, luv).r : luma.sample(s, luv).r) - range.x) * range.y;
+        float2 c = (chroma.sample(s, cuv).rg - range.z) * range.w;
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
         return float4(saturate(rgb) * k, 1.0);
     }
@@ -525,6 +531,14 @@ final class StreamRenderer {
         return true
     }
 
+    /// Video range for the hybrid shader
+    /// black, luma scale, chroma mid, chroma scale
+    /// 10-bit codes sit in the high bits of 16
+    static func videoRange(tenBit: Bool) -> SIMD4<Float> {
+        tenBit ? SIMD4(Float(64 << 6) / 65535, 65535 / Float(876 << 6), Float(512 << 6) / 65535, 65535 / Float(896 << 6))
+            : SIMD4(16 / 255, 255 / 219, 128 / 255, 255 / 224)
+    }
+
     /// Draws the tile picture plus masked video; commits `cb`
     private func encodePicture(_ cb: MTLCommandBuffer, geometry g: TileGeometry) {
         guard let bind = pictureBind(cb, geometry: g) else { return cb.commit() }
@@ -543,14 +557,16 @@ final class StreamRenderer {
            let chroma = CVMetalTextureGetTexture(picture.chroma), let maskBuffer = nextMaskBuffer() {
             cb.addCompletedHandler { _ in _ = picture }
             let grid = [UInt32(g.tilesX), UInt32(g.tilePixels), UInt32(g.width), UInt32(g.height)]
+            let range = StreamRenderer.videoRange(tenBit: tenBit)
             return { [hybridPipeline = gpu.hybridPipeline] enc in
-                var grid = grid
+                var grid = grid, range = range
                 enc.setRenderPipelineState(hybridPipeline)
                 enc.setFragmentTexture(image, index: 0)
                 enc.setFragmentTexture(luma, index: 1)
                 enc.setFragmentTexture(chroma, index: 2)
                 enc.setFragmentBuffer(maskBuffer, offset: 0, index: 0)
                 enc.setFragmentBytes(&grid, length: 16, index: 1)
+                enc.setFragmentBytes(&range, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
             }
         }
         return { [tilePipeline = gpu.tilePipeline] enc in
@@ -617,7 +633,7 @@ final class StreamRenderer {
         }
         guard status == noErr, let pixelBuffer = image, let cache = gpu.textureCache else { return false }
         var luma: CVMetalTexture?, chroma: CVMetalTexture?
-        // 10-bit samples sit in the high bits: same normalized math
+        // 10-bit samples sit in the high bits: see `videoRange`
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, tenBit ? .r16Unorm : .r8Unorm,
                                                   CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), CVPixelBufferGetHeightOfPlane(pixelBuffer, 0), 0, &luma)
         CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, tenBit ? .rg16Unorm : .rg8Unorm,

@@ -87,7 +87,7 @@ final class VideoEncoder {
     /// Always via the transfer session
     /// sRGB-tagged RGB input makes the encoder apply the BT.709 curve
     /// The receiver does not undo that curve
-    private func scaled(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+    func scaled(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         if transfer == nil {
             var t: VTPixelTransferSession?
             guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &t) == noErr, let created = t else { return nil }

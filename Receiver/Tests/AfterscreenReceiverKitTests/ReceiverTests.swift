@@ -860,8 +860,9 @@ final class StreamRendererTests: XCTestCase {
         return t
     }
 
-    func testHybridFragmentShowsVideoOnlyInMaskedTiles() throws {
-        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+    /// 128 × 64 stream through `hybridFragment`; RGB rows
+    private func hybrid(luma: MTLTexture, chroma: MTLTexture, mask: [UInt8], tiles: [UInt8] = [255, 0, 0, 255],
+                        tenBit: Bool = false, device: MTLDevice) throws -> (Int, Int) -> [UInt8] {
         let library = try device.makeLibrary(source: StreamRenderer.shaders, options: nil)
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = library.makeFunction(name: "screenQuad")
@@ -869,12 +870,10 @@ final class StreamRendererTests: XCTestCase {
         desc.colorAttachments[0].pixelFormat = .rgba8Unorm
         let pipeline = try device.makeRenderPipelineState(descriptor: desc)
         let target = texture(device, .rgba8Unorm, 128, 64, [0, 0, 0, 0])
-        let tiles = texture(device, .rgba8Unorm, 128, 64, [255, 0, 0, 255])
-        // Video layer at half size: white (Y 235, Cb = Cr = 128)
-        let luma = texture(device, .r8Unorm, 64, 32, [235])
-        let chroma = texture(device, .rg8Unorm, 32, 16, [128, 128])
-        let mask = try XCTUnwrap(device.makeBuffer(bytes: [UInt8(1), 0], length: 2, options: .storageModeShared))
+        let picture = texture(device, .rgba8Unorm, 128, 64, tiles)
+        let maskBuffer = try XCTUnwrap(device.makeBuffer(bytes: mask, length: mask.count, options: .storageModeShared))
         var grid: [UInt32] = [2, 64, 128, 64]
+        var range = StreamRenderer.videoRange(tenBit: tenBit)
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
@@ -884,24 +883,68 @@ final class StreamRendererTests: XCTestCase {
         let cb = try XCTUnwrap(queue.makeCommandBuffer())
         let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
         enc.setRenderPipelineState(pipeline)
-        enc.setFragmentTexture(tiles, index: 0)
+        enc.setFragmentTexture(picture, index: 0)
         enc.setFragmentTexture(luma, index: 1)
         enc.setFragmentTexture(chroma, index: 2)
-        enc.setFragmentBuffer(mask, offset: 0, index: 0)
+        enc.setFragmentBuffer(maskBuffer, offset: 0, index: 0)
         enc.setFragmentBytes(&grid, length: 16, index: 1)
         var still = StreamRenderer.Wave.still
         enc.setFragmentBytes(&still, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
+        enc.setFragmentBytes(&range, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
         var pixels = [UInt8](repeating: 0, count: 128 * 64 * 4)
         target.getBytes(&pixels, bytesPerRow: 128 * 4, from: MTLRegionMake2D(0, 0, 128, 64), mipmapLevel: 0)
-        func pixel(_ x: Int, _ y: Int) -> [UInt8] { Array(pixels[(y * 128 + x) * 4..<(y * 128 + x) * 4 + 3]) }
+        return { x, y in Array(pixels[(y * 128 + x) * 4..<(y * 128 + x) * 4 + 3]) }
+    }
+
+    func testHybridFragmentShowsVideoOnlyInMaskedTiles() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        // Video layer at half size: white (Y 235, Cb = Cr = 128)
+        let pixel = try hybrid(luma: texture(device, .r8Unorm, 64, 32, [235]), chroma: texture(device, .rg8Unorm, 32, 16, [128, 128]),
+                               mask: [1, 0], device: device)
         XCTAssertEqual(pixel(10, 30), [255, 255, 255], "masked tile shows the video")
         XCTAssertEqual(pixel(63, 63), [255, 255, 255])
         XCTAssertEqual(pixel(64, 0), [255, 0, 0], "unmasked tile shows the tiles")
         XCTAssertEqual(pixel(127, 63), [255, 0, 0])
+    }
+
+    /// VideoToolbox: plane texel i on stream pixel i × ratio
+    /// Tiles beside the video then line up with it
+    func testVideoTexelsLandOnTheirSourcePixels() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        // One white luma texel at (20, 10); grey chroma
+        let luma = texture(device, .r8Unorm, 64, 32, [16])
+        luma.replace(region: MTLRegionMake2D(20, 10, 1, 1), mipmapLevel: 0, withBytes: [UInt8(235)], bytesPerRow: 1)
+        var pixel = try hybrid(luma: luma, chroma: texture(device, .rg8Unorm, 32, 16, [128, 128]), mask: [1, 1], device: device)
+        XCTAssertGreaterThan(pixel(40, 20)[1], pixel(41, 20)[1], "peak on pixel 40, not between 40 and 41")
+        XCTAssertEqual(Int(pixel(39, 20)[1]), Int(pixel(41, 20)[1]), accuracy: 1)
+        XCTAssertGreaterThan(pixel(40, 20)[1], pixel(40, 21)[1])
+        XCTAssertEqual(Int(pixel(40, 19)[1]), Int(pixel(40, 21)[1]), accuracy: 1)
+
+        // Blue chroma texel (8, 4) on grey: pixel (32, 16)
+        let chroma = texture(device, .rg8Unorm, 32, 16, [128, 128])
+        chroma.replace(region: MTLRegionMake2D(8, 4, 1, 1), mipmapLevel: 0, withBytes: [UInt8(200), 128], bytesPerRow: 2)
+        pixel = try hybrid(luma: texture(device, .r8Unorm, 64, 32, [126]), chroma: chroma, mask: [1, 1], device: device)
+        XCTAssertGreaterThan(pixel(32, 16)[2], pixel(33, 16)[2])
+        XCTAssertEqual(Int(pixel(31, 16)[2]), Int(pixel(33, 16)[2]), accuracy: 1)
+        XCTAssertGreaterThan(pixel(32, 16)[2], pixel(32, 17)[2])
+        XCTAssertEqual(Int(pixel(32, 15)[2]), Int(pixel(32, 17)[2]), accuracy: 1)
+    }
+
+    func testTenBitVideoReachesFullWhite() throws {
+        // x420: code 940 and neutral 512, high bits of 16
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let white = UInt16(940 << 6), mid = UInt16(512 << 6)
+        let luma = texture(device, .r16Unorm, 64, 32, [UInt8(white & 0xff), UInt8(white >> 8)])
+        let chroma = texture(device, .rg16Unorm, 32, 16, [UInt8(mid & 0xff), UInt8(mid >> 8), UInt8(mid & 0xff), UInt8(mid >> 8)])
+        let pixel = try hybrid(luma: luma, chroma: chroma, mask: [1, 1], tenBit: true, device: device)
+        XCTAssertEqual(pixel(40, 20), [255, 255, 255], "8-bit constants would give 254")
+        let r = StreamRenderer.videoRange(tenBit: true)
+        XCTAssertEqual((Float(64 << 6) / 65535 - r.x) * r.y, 0, accuracy: 1e-5)
+        XCTAssertEqual((Float(960 << 6) / 65535 - r.z) * r.w, 0.5, accuracy: 1e-5)
     }
 }
 
@@ -977,6 +1020,7 @@ final class UpscaleTests: XCTestCase {
         let out = try XCTUnwrap(device.makeTexture(descriptor: td))
         let maskBuffer = try XCTUnwrap(device.makeBuffer(bytes: mask, length: mask.count, options: .storageModeShared))
         var grid: [UInt32] = [UInt32((stream.w + tileEdge - 1) / tileEdge), UInt32(tileEdge), UInt32(stream.w), UInt32(stream.h)]
+        var range = StreamRenderer.videoRange(tenBit: false)
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = out
         pass.colorAttachments[0].loadAction = .clear
@@ -991,6 +1035,7 @@ final class UpscaleTests: XCTestCase {
         enc.setFragmentBytes(&grid, length: 16, index: 1)
         var still = StreamRenderer.Wave.still
         enc.setFragmentBytes(&still, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
+        enc.setFragmentBytes(&range, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()
@@ -1001,13 +1046,15 @@ final class UpscaleTests: XCTestCase {
     }
 
     func testVideoEdgesStaySharperThanBilinearWhenScaledUp() throws {
-        // Video luma black (16) to white (235) at texel 32 of 64, drawn 2× into masked tiles (bilinear: 63.75 → 191.25)
-        let row = try hybrid(tiles: [UInt8](repeating: 0, count: 128 * 64 * 4), stream: (128, 64),
+        // Luma 16 to 235 at texel 32, drawn 1.5×
+        // Texel 32 on pixel 48; pixel 47 at 31⅓: bilinear 85
+        let row = try hybrid(tiles: [UInt8](repeating: 0, count: 96 * 48 * 4), stream: (96, 48),
                              luma: (0..<(64 * 32)).map { $0 % 64 < 32 ? 16 : 235 }, video: (64, 32),
-                             mask: [1, 1], tileEdge: 64, target: (128, 64))
-        XCTAssertGreaterThan(row[64] - row[63], 140)
+                             mask: [1, 1], tileEdge: 64, target: (96, 48))
+        XCTAssertLessThan(row[47], 80)
+        XCTAssertEqual(row[48], 255, accuracy: 0.5)
         XCTAssertEqual(row[10], 0, accuracy: 0.5)
-        XCTAssertEqual(row[110], 255, accuracy: 0.5)
+        XCTAssertEqual(row[90], 255, accuracy: 0.5)
     }
 
     func testAVideoNeighboursStaleTexelsStayOutOfAScaledBC7Tile() throws {

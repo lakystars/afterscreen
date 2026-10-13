@@ -33,6 +33,7 @@ public struct SenderSnapshot {
     public var gpuPercent = 0.0
     public var receiver: ReceiverStats?
     /// Video bitrate now; nil on the tile path
+    /// Or after a video encoder failure: BC1 carries motion
     public var videoBitrate: Int?
     /// Video bitrate from the link probe
     public var videoStartBitrate: Int?
@@ -710,6 +711,8 @@ public final class SenderSession {
     private func beginStreaming(_ config: StreamConfig, welcome: Welcome) {
         update {
             $0.config = config
+            // Before the first sample; nil later means BC1 fallback
+            $0.videoBitrate = config.video?.bitrate
             $0.state = L10n.t("Starting the display", "디스플레이 준비 중")
         }
         // Mirror captures the main display; extend adds a display
@@ -879,8 +882,9 @@ public final class SenderSession {
             $0.sentFPS = streamer?.sent.ratePerSecond() ?? 0
             $0.droppedPerMinute = Int((streamer?.drops.ratePerSecond() ?? 0) * 60)
             $0.dirtyPercent = c.totalTiles > 0 ? Double(c.dirtyTiles) / Double(c.totalTiles) * 100 : 0
-            $0.compressionRatio = c.bytes > 0 && c.rawTileBytes > 0 ? Double(c.rawTileBytes) / Double(c.bytes) : 0
-            $0.encodeMs = c.encodeMs
+            $0.compressionRatio = c.tileWireBytes > 0 && c.rawTileBytes > 0 ? Double(c.rawTileBytes) / Double(c.tileWireBytes) : 0
+            // 0: no new frame this second
+            $0.encodeMs = c.encodedFrames > 0 ? c.encodeMs / Double(c.encodedFrames) : 0
             $0.lossyTiles = c.lossyTiles
             $0.cpuPercent = m.cpuPercent
             $0.memoryBytes = m.memoryBytes

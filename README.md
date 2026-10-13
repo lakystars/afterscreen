@@ -210,31 +210,35 @@ The iMac shows the pattern with its heads-up display, and the menu lists the fra
 
 ### Menu fields
 
+Connection, Picture, Resources and the iMac's hardware fold at their titles. Folded, Connection keeps a chart of the last 60 seconds of throughput and latency, with the link, its picker and the link quality score over it; Picture keeps its controls and the frame counts.
+
 | Field | Meaning |
 |---|---|
 | Link | Link type and local interface: ϟ Thunderbolt, ⌁ USB, ⇄ Ethernet, ≋ Wi-Fi |
-| Throughput | Data sent to the iMac per second, with a trend line |
-| Measured link speed | Data actually sent in 0.3 s at the start of the session; not the cable's rated speed |
-| Latency, Jitter | The kernel's TCP round-trip time on the stream connection, and how much it varies |
-| Retransmits | Packets sent again after a loss |
+| Throughput | Screen data sent to the iMac per second, without sound and cursor |
+| Measured link speed | Data actually sent in 0.3 s, once when the session starts; not the cable's rated speed |
+| Latency, Jitter | The kernel's TCP round-trip time on the stream connection, in whole milliseconds, and how much it varies |
+| Retransmits | Packets sent again after a loss in the last second |
 | Link quality | 100, minus penalties for retransmits, jitter and a link slower than the stream needs |
 | MTU | Packet size; 9000 is recommended on Thunderbolt and USB |
 | Use as | Extend: the iMac is a display of its own. Mirror: it shows the Mac's main display |
 | Optimize for | While mirroring. This Mac: it keeps its resolution. iMac: the desktop takes the iMac's resolution |
-| Frames: captured · sent · shown | Frames per second the Mac drew, sent, and the iMac showed |
-| Dropped / min | Frames replaced by a newer one before they could be sent |
-| Resolution | Size of the stream |
-| Moving areas | Tile path: BC7, or BC1 and how many tiles. Hybrid path: video codec, layer size and bitrate |
-| Changed area | Share of the screen sent again in the last second |
-| Compression | Data before and after LZ4; 1.0× when the link carries frames uncompressed |
-| Encode time | From capture to send, per frame |
-| CPU · RAM · GPU | Afterscreen's own use, on each Mac |
-| iMac upload · decompress | The iMac's texture upload and LZ4 time per frame |
-| iMac hardware | Model, panel, GPU, macOS and hardware decoders |
+| Frames: captured · sent · shown | Frames per second the Mac drew, sent, and the iMac showed; shown counts redraws, so it can pass sent |
+| Skipped / min | Captures skipped while the link or encoder was busy; their changes go out with the next frame |
+| Transfer resolution | Size the screen is drawn and sent at; still areas arrive at it as BC7 |
+| Motion sent as | Tile path: BC7, or BC1 and how many tiles. Hybrid path: video codec and the size the whole screen is scaled to |
+| Video target bitrate | Hybrid path: what the video encoder aims for; lowered while the network is busy |
+| Changed area | Average share of the screen that changed per frame in the last second, video areas included |
+| Tile LZ4 ratio | Tile data before and after LZ4, video not included; 1.0× when the link has room and LZ4 is skipped |
+| Smooth gradients | Fills 8-bit steps in dark gradients on the iMac, in tile areas only |
+| Frame processing | Average per frame in the last second, from processing start until queued to send, video encoding included |
+| CPU · RAM · GPU | Afterscreen's own use, on each Mac; one core is 100% CPU, and GPU leaves out video encoding and decoding |
+| iMac upload · decompress | The iMac's upload preparation and LZ4 time for the latest tile frame; video decoding not included |
+| iMac hardware | Model, model identifier, panel, GPU, macOS and hardware video decoders |
 
 ## Limitations
 
-- Extended display only: no mirroring, and the iMac's keyboard and mouse are not relayed to the Mac.
+- The iMac's keyboard and mouse are not relayed to the Mac.
 - Wi-Fi depends on the network. Latency spikes in the Wi-Fi itself show as brief pauses; a cable avoids them.
 - Full-screen video in Chrome on a virtual display alternates between about 45 and 60 fps; Safari holds 60 fps. This happens before Afterscreen receives the frames and also affects other virtual display apps.
 

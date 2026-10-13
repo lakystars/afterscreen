@@ -52,9 +52,9 @@ struct HUDContent: Equatable {
             Row(label: StatName.throughput, value: s.map { Format.gbps(bytesPerSecond: $0.throughputBitsPerSecond / 8) } ?? dash,
                 graph: s == nil ? nil : t.throughput.values, graphColor: .green),
             Row(label: StatName.capacity, value: StatValue.capacity(s?.capacityGbps)),
-            Row(label: StatName.latency, value: s?.latencyMs.map(Format.ms) ?? dash,
+            Row(label: StatName.latency, value: StatValue.latency(s?.latencyMs),
                 graph: s == nil ? nil : t.latency.values, graphColor: .blue),
-            Row(label: StatName.jitter, value: s.map { Format.ms($0.jitterMs) } ?? dash),
+            Row(label: StatName.jitter, value: s.map { StatValue.latency($0.jitterMs) } ?? dash),
             Row(label: StatName.retransmits, value: s.map { StatValue.retransmits($0.retransmitPercent) } ?? dash),
             Row(label: StatName.quality, value: StatValue.quality(s?.cableScore), tone: s?.cableScore.map { tone(ScoreBand($0)) } ?? .plain),
         ]
@@ -63,17 +63,24 @@ struct HUDContent: Equatable {
             connection.append(Row(label: "MTU", value: m.text, tone: m.advised ? .warn : .plain))
         }
 
-        let motion = config.video.map { MotionLabel.video($0, bitrate: s?.videoBitrate) } ?? MotionLabel.text(path: config.path, lossyTiles: s?.lossyTiles ?? 0) ?? dash
-        let picture = [
+        // No stats yet: the layer's bitrate stands in
+        let bitrate = s == nil ? config.video?.bitrate : s?.videoBitrate
+        let motion = MotionLabel.text(config, videoBitrate: bitrate, lossyTiles: s?.lossyTiles ?? 0)
+        var picture = [
             Row(label: StatName.frames, value: "\(fps(s?.captureFPS)) · \(fps(s?.sentFPS)) · \(fps(r?.displayedFPS))",
                 graph: t.shownFPS.values, graphColor: .purple),
             Row(label: StatName.dropped, value: s.map { "\($0.droppedPerMinute)" } ?? dash),
             Row(label: StatName.resolution, value: StatValue.resolution(config.streamPixels)),
             Row(label: StatName.motion, value: motion),
+        ]
+        if let target = MotionLabel.target(config, videoBitrate: bitrate) {
+            picture.append(Row(label: StatName.videoTarget, value: target))
+        }
+        picture += [
             Row(label: StatName.changed, value: s.map { StatValue.changed($0.dirtyPercent) } ?? dash),
             Row(label: StatName.compression, value: s.map { StatValue.compression($0.compressionRatio) } ?? dash),
             Row(label: StatName.deband, value: t.deband.map(DebandLabel.name) ?? dash),
-            Row(label: StatName.encode, value: s.map { Format.ms($0.encodeMs) } ?? dash),
+            Row(label: StatName.encode, value: s.map { StatValue.encode($0.encodeMs) } ?? dash),
         ]
 
         let resources = [
@@ -86,7 +93,7 @@ struct HUDContent: Equatable {
         var summary = ["\(fps(r?.displayedFPS)) fps"]
         if let s = s {
             summary.append(Format.gbps(bytesPerSecond: s.throughputBitsPerSecond / 8))
-            if let ms = s.latencyMs { summary.append(Format.ms(ms)) }
+            if let ms = s.latencyMs { summary.append(StatValue.latency(ms)) }
             if let score = s.cableScore { summary.append(L10n.t("quality \(score)", "품질 \(score)")) }
         }
 

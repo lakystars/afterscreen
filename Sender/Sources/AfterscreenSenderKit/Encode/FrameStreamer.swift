@@ -5,11 +5,17 @@ import AfterscreenCore
 
 /// Bytes and tiles sent since the previous read
 struct FrameCounters {
+    /// Everything on the wire: tiles, refinements, video
     var bytes = 0
+    /// Tile frames and refinements, before and after LZ4
     var rawTileBytes = 0
+    var tileWireBytes = 0
+    /// New frames: tiles that changed, tiles in the screen
     var dirtyTiles = 0
     var totalTiles = 0
+    /// New frames: processing start to send, summed
     var encodeMs = 0.0
+    var encodedFrames = 0
     /// Tiles the receiver shows lossy after the latest frame
     var lossyTiles = 0
 }
@@ -29,7 +35,8 @@ final class FrameStreamer {
         var refinement = false
         var waitsForVideo = false
         var video: VideoEncoder.Output?
-        var gpuMs = 0.0
+        var changedTiles = 0
+        /// Processing start: encode time, and the video timestamp
         var created = ProcessInfo.processInfo.systemUptime
     }
 
@@ -247,6 +254,7 @@ final class FrameStreamer {
     }
 
     private func process(_ captured: CapturedFrame) {
+        let started = ProcessInfo.processInfo.systemUptime
         lock.lock()
         let forceKey = keyframeRequested
         keyframeRequested = false
@@ -263,7 +271,8 @@ final class FrameStreamer {
                                                   CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), 0, &cvTexture)
         guard let cvt = cvTexture, let texture = CVMetalTextureGetTexture(cvt) else { return }
         var out = Outgoing(frame: tile.encoder.encode(texture: texture, forceAll: forceKey, dirty: captured.dirty, congested: queueWasFull))
-        out.gpuMs = tile.encoder.lastGPUSeconds * 1000
+        out.created = started
+        out.changedTiles = tile.encoder.changedTiles
         gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
         if let video = video, tile.encoder.lossyTiles > 0 {
             out.waitsForVideo = video.encode(pixelBuffer, time: out.created, forceKeyframe: videoKeyframe) { [weak self] output in
@@ -326,7 +335,7 @@ final class FrameStreamer {
         guard !refinePending else { return }
         if let frame = tile.encoder.refine() {
             gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
-            outbox.append(Outgoing(frame: frame, refinement: true, gpuMs: tile.encoder.lastGPUSeconds * 1000))
+            outbox.append(Outgoing(frame: frame, refinement: true))
             drain()
         }
         scheduleRefine()
@@ -338,30 +347,35 @@ final class FrameStreamer {
     }
 
     /// Refinements re-send settled tiles; count as bytes, not frames
-    /// Encode time: GPU time, or capture to send with video
     private func send(_ frame: EncodedFrame, _ encoder: TileEncoder, _ packer: TilePacker, _ out: Outgoing, videoBytes: Int) {
         let g = encoder.geometry
         let packed = packer.pack(frame, geometry: g, compression: compression.next(rawBytes: frame.data.count, queueWasFull: queueWasFull))
         compression.record(rawBytes: packed.lz4In, wireBytes: packed.lz4Out)
         queueWasFull = false
         connection.send(.tileFrame, parts: packed.parts)
-        let encodeMs = out.video == nil ? out.gpuMs : (ProcessInfo.processInfo.systemUptime - out.created) * 1000
         if out.refinement {
-            count(FrameCounters(bytes: packed.wireBytes, encodeMs: encodeMs, lossyTiles: encoder.lossyTiles))
+            count(FrameCounters(bytes: packed.wireBytes, rawTileBytes: frame.data.count, tileWireBytes: packed.wireBytes,
+                                lossyTiles: encoder.lossyTiles))
             return
         }
         sent.tick()
-        count(FrameCounters(bytes: packed.wireBytes + videoBytes, rawTileBytes: frame.data.count, dirtyTiles: frame.tileCount,
-                            totalTiles: g.tileCount, encodeMs: encodeMs, lossyTiles: encoder.lossyTiles))
+        // Video-only frame: its tile header alone would skew the ratio
+        count(FrameCounters(bytes: packed.wireBytes + videoBytes, rawTileBytes: frame.data.count,
+                            tileWireBytes: frame.data.isEmpty ? 0 : packed.wireBytes,
+                            dirtyTiles: out.changedTiles, totalTiles: g.tileCount,
+                            encodeMs: (ProcessInfo.processInfo.systemUptime - out.created) * 1000, encodedFrames: 1,
+                            lossyTiles: encoder.lossyTiles))
     }
 
     private func count(_ c: FrameCounters) {
         lock.lock()
         counters.bytes += c.bytes
         counters.rawTileBytes += c.rawTileBytes
+        counters.tileWireBytes += c.tileWireBytes
         counters.dirtyTiles += c.dirtyTiles
         counters.totalTiles += c.totalTiles
-        if c.totalTiles > 0 || c.encodeMs > 0 { counters.encodeMs = c.encodeMs }
+        counters.encodeMs += c.encodeMs
+        counters.encodedFrames += c.encodedFrames
         counters.lossyTiles = c.lossyTiles
         lock.unlock()
     }

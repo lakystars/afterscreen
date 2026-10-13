@@ -43,8 +43,8 @@ final class HUDContentTests: XCTestCase {
         XCTAssertEqual(row(c, "MTU")?.value, "1500 · 9000 recommended")
         XCTAssertEqual(row(c, "MTU")?.tone, .warn)
         XCTAssertEqual(row(c, "Frames: captured · sent · shown")?.value, "60 · 59 · 58")
-        XCTAssertEqual(row(c, "Resolution")?.value, "5120×2880")
-        XCTAssertEqual(row(c, "Moving areas")?.value, "BC7, sharp")
+        XCTAssertEqual(row(c, "Transfer resolution")?.value, "5120×2880")
+        XCTAssertEqual(row(c, "Motion sent as")?.value, "BC7, sharp")
         // Rows named for each Mac
         XCTAssertEqual(row(c, "MacBook Pro")?.value, "13% · 196 MB · 16%")
         XCTAssertEqual(row(c, ComputerName.current)?.value, "8% · 70 MB · 22%")
@@ -58,10 +58,19 @@ final class HUDContentTests: XCTestCase {
     func testHybridPathNamesTheVideoLayer() {
         let layer = VideoLayer(codec: .hevc, pixels: PixelSize(width: 2560, height: 1440), bitrate: 160_000_000, tenBit: true)
         let hybrid = StreamConfig(path: .hybrid, streamPixels: PixelSize(width: 4096, height: 2304), video: layer, linkKind: .wifi)
-        let c = HUDContent.make(peer: nil, config: hybrid, telemetry: telemetry())
-        XCTAssertEqual(row(c, "Moving areas")?.value, "HEVC 10-bit 2560×1440 · 160 Mbps")
+        var t = telemetry()
+        t.sender?.videoBitrate = 48_000_000
+        let c = HUDContent.make(peer: nil, config: hybrid, telemetry: t)
+        XCTAssertEqual(row(c, "Motion sent as")?.value, "HEVC 10-bit · 2560×1440")
+        XCTAssertEqual(row(c, "Video target bitrate")?.value, "48 Mbps")
         XCTAssertEqual(row(c, "Link")?.value, "Wi-Fi · bridge0")
         XCTAssertEqual(row(c, "Link")?.link, .wifi)
+        let early = HUDContent.make(peer: nil, config: hybrid, telemetry: telemetry(sender: false))
+        XCTAssertEqual(row(early, "Video target bitrate")?.value, "160 Mbps", "no stats yet: the layer's")
+        t.sender?.videoBitrate = nil
+        let failed = HUDContent.make(peer: nil, config: hybrid, telemetry: t)
+        XCTAssertEqual(row(failed, "Motion sent as")?.value, "BC7, sharp", "encoder failed: tiles carry motion")
+        XCTAssertNil(row(failed, "Video target bitrate"))
     }
 
     func testWithoutSenderStatsTheReceiverNumbersStillShow() {
@@ -79,7 +88,7 @@ final class HUDContentTests: XCTestCase {
     func testCollapsedSummary() {
         let c = HUDContent.make(peer: nil, config: tiles, telemetry: telemetry())
         XCTAssertEqual(c.status, "Streaming")
-        XCTAssertEqual(c.summary, "58 fps · 754 Mbps · 1.0 ms · quality 97")
+        XCTAssertEqual(c.summary, "58 fps · 754 Mbps · 1 ms · quality 97")
     }
 }
 

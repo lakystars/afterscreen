@@ -42,6 +42,9 @@ public final class TileEncoder {
     public var bc7MotionLimit = 0
     /// Tiles the receiver shows lossy: BC1, or the video layer
     public private(set) var lossyTiles = 0
+    /// Tiles that differ from the reference in the last frame
+    /// Video-carried tiles too, unlike the frame's runs
+    public private(set) var changedTiles = 0
 
     private let queue: MTLCommandQueue
     private let encodePipeline: MTLComputePipelineState
@@ -166,6 +169,7 @@ public final class TileEncoder {
     /// or no upload buffer frees up within 1 s
     public func encode(texture: MTLTexture, forceAll: Bool, dirty: [CGRect]?,
                        now: TimeInterval = ProcessInfo.processInfo.systemUptime, congested: Bool = false) -> EncodedFrame? {
+        changedTiles = 0
         let list = candidateList.contents().assumingMemoryBound(to: UInt32.self)
         var count = 0
         if forceAll || dirty == nil {
@@ -215,8 +219,10 @@ public final class TileEncoder {
         lastEncode = now
         lastCongested = congested || forceAll
         var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = [], moving: [Int] = []
+        var changed = 0
         for t in 0..<geometry.tileCount {
             if flags[t] != 0 {
+                changed += 1
                 let since = now - lastChange[t]
                 // Lossy tile counts as moving until still for `settleDelay`
                 let inMotion = !forceAll && (since < TileEncoder.motionWindow || (lossy[t] && since < TileEncoder.settleDelay)
@@ -255,6 +261,7 @@ public final class TileEncoder {
         }
         let frame = gather(texture: texture, referenceOnly: referenceOnly)
         if frame != nil { entering.forEach { lossy[$0] = true } }
+        changedTiles = changed
         return settle(settling, frame)
     }
 
