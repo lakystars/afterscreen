@@ -93,10 +93,10 @@ public enum RoutePlanner {
 
     /// Routes to a receiver over every currently answering link
     /// Runs off the calling thread
-    public static func routes(to receiver: DiscoveredReceiver, completion: @escaping ([Route]) -> Void) {
+    public static func routes(to receiver: DiscoveredReceiver, wait: TimeInterval = 0.5, completion: @escaping ([Route]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let local = currentInterfaces().filter { $0.kind != .unsupported }
-            lookup(host: receiver.host, on: local.map(\.name)) { found in
+            lookup(host: receiver.host, on: local.map(\.name), wait: wait) { found in
                 completion(plan(local: local, remote: found + receiver.addresses.map { RemoteAddress($0) }))
             }
         }

@@ -381,6 +381,19 @@ extension MotionTests {
         }
     }
 
+    func testAResyncSendsEveryTileAgain() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let g = TileGeometry(width: w, height: h)
+        let encoder = try TileEncoder(device: device, geometry: g, uploadBuffers: 4)
+        _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0)
+        XCTAssertNil(encoder.refine(now: 1), "all settled")
+        encoder.resyncAll()
+        let all = try XCTUnwrap(encoder.refine(now: 1))
+        XCTAssertEqual(all.tileCount, g.tileCount)
+        XCTAssertEqual(encoder.lossyTiles, 0)
+    }
+
     /// Handover from tiles to video: BC1 tiles not on video
     func testABC1TileMovesOntoTheVideoLayerAfterAModeChange() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())

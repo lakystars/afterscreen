@@ -204,6 +204,8 @@ final class StreamWindow {
     private var generation = 0
     /// The window closing once its power-off has played
     private var closing: (window: KeyWindow, work: DispatchWorkItem)?
+    /// Sender's power-off end, media time; an end waits for it
+    private var poweredOffAt: CFTimeInterval = 0
     /// Power-off due if a link-switching sender does not return
     private var held: DispatchWorkItem?
     /// How long a sender switching links has to reconnect
@@ -300,6 +302,9 @@ final class StreamWindow {
     func show(config: StreamConfig) {
         held?.cancel()
         held = nil
+        poweredOffAt = 0
+        // A sender back on a held picture: colour returns
+        endWaiting()
         contentPixels = CGSize(width: config.streamPixels.width, height: config.streamPixels.height)
         if config.test && hud.isHidden {
             hud.isHidden = false
@@ -422,6 +427,7 @@ final class StreamWindow {
         cursorSuppressed = true
         cursorLayer.isHidden = true
         noticeBox.removeAllAnimations()
+        noticeBox.opacity = 0
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             hud.animator().alphaValue = 0
@@ -435,6 +441,7 @@ final class StreamWindow {
         case .tiles: wave.powerOff(live: true)
         case .none: break
         }
+        poweredOffAt = CACurrentMediaTime() + duration(on: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: false), execute: done)
     }
 
@@ -456,6 +463,7 @@ final class StreamWindow {
         hintLayer.removeAllAnimations()
         hintLayer.opacity = 0
         noticeBox.removeAllAnimations()
+        noticeBox.opacity = 0
         pendingNotice = nil
         if cursorHidden { NSCursor.unhide() }
         cursorHidden = false
@@ -476,16 +484,23 @@ final class StreamWindow {
         }
         let animate = power.powerOff(effect: shownEffect)
         reportShown()
-        guard animate else { return close(window) }
-        view.layoutSubtreeIfNeeded()
-        switch shownEffect {
-        case .crt: tube.powerOff()
-        case .tiles: wave.powerOff()
-        case .none: break
+        // Sender's power-off cut short by its end: plays out
+        let playing = poweredOffAt - CACurrentMediaTime()
+        guard animate || playing > 0 else { return close(window) }
+        if animate {
+            view.layoutSubtreeIfNeeded()
+            switch shownEffect {
+            case .crt: tube.powerOff()
+            case .tiles: wave.powerOff()
+            case .none: break
+            }
+        } else if shownEffect == .tiles {
+            // Live redraws stop with the session's resources
+            wave.closeOverFarewell(for: playing)
         }
         let work = DispatchWorkItem { [weak self] in self?.close(window) }
         closing = (window, work)
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: false), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (animate ? duration(on: false) : playing), execute: work)
     }
 
     private func duration(on: Bool) -> CFTimeInterval {
@@ -526,7 +541,8 @@ final class StreamWindow {
 
     private func close(_ window: KeyWindow) {
         if closing?.window === window { closing = nil }
-        if shownEffect == .tiles { wave.finish() }
+        // Any effect: a waiting picture's redraws stop too
+        wave.finish()
         // Closing a full-screen window exits its Space via system transition
         // Closed either way: a window mid-slide must not come back
         let fullScreen = window.styleMask.contains(.fullScreen)
@@ -643,6 +659,41 @@ final class StreamWindow {
             pendingNotice = (title, detail)
             return
         }
+        setNotice(title, detail: detail)
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [0, 1, 1, 0]
+        fade.keyTimes = [0, 0.06, 0.88, 1]
+        fade.duration = 4.5
+        noticeBox.add(fade, forKey: "notice")
+    }
+
+    /// Link lost: grey breathing picture and a lasting notice
+    /// The picture stays readable; this is no freeze
+    func showWaiting(detail: String?) {
+        guard power.on, !wave.isWaiting else { return }
+        wave.wait(motion: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        setNotice(L10n.t("Reconnecting", "다시 연결하는 중"), detail: detail)
+        fadeNotice(to: 1)
+    }
+
+    /// Link back: colour returns centre-out; the notice goes
+    func endWaiting() {
+        guard wave.isWaiting else { return }
+        wave.revive(motion: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        fadeNotice(to: 0)
+    }
+
+    private func fadeNotice(to opacity: Float) {
+        noticeBox.removeAllAnimations()
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = noticeBox.presentation()?.opacity ?? noticeBox.opacity
+        fade.toValue = opacity
+        fade.duration = 0.25
+        noticeBox.opacity = opacity
+        noticeBox.add(fade, forKey: "notice")
+    }
+
+    private func setNotice(_ title: String, detail: String?) {
         let centred = NSMutableParagraphStyle()
         centred.alignment = .center
         let text = NSMutableAttributedString(string: title, attributes: [
@@ -658,11 +709,6 @@ final class StreamWindow {
         noticeText.string = text
         noticeSize = text.boundingRect(with: CGSize(width: 640, height: 200), options: [.usesLineFragmentOrigin]).size
         placeNotice()
-        let fade = CAKeyframeAnimation(keyPath: "opacity")
-        fade.values = [0, 1, 1, 0]
-        fade.keyTimes = [0, 0.06, 0.88, 1]
-        fade.duration = 4.5
-        noticeBox.add(fade, forKey: "notice")
     }
 
     private var noticeSize = CGSize.zero

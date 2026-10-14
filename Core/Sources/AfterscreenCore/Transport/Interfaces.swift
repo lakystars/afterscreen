@@ -43,6 +43,22 @@ public enum Interfaces {
 
     public static func isLoopback(_ name: String) -> Bool { (link(name)?.flags ?? 0) & UInt32(IFF_LOOPBACK) != 0 }
 
+    /// Media status, as ifconfig's "status:" line
+    /// false: cable out; nil: no media status, as on loopback
+    public static func isActive(_ name: String) -> Bool? {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var req = ifmediareq()
+        withUnsafeMutableBytes(of: &req.ifm_name) { buf in
+            name.utf8CString.withUnsafeBytes { buf.copyMemory(from: UnsafeRawBufferPointer(rebasing: $0.prefix(buf.count - 1))) }
+        }
+        // _IOWR('i', 56, struct ifmediareq): a macro Swift cannot import
+        let request = UInt(0xC000_0000) | UInt(MemoryLayout<ifmediareq>.size & 0x1fff) << 16 | UInt(UInt8(ascii: "i")) << 8 | 56
+        guard ioctl(fd, request, &req) == 0, req.ifm_status & IFM_AVALID != 0 else { return nil }
+        return req.ifm_status & IFM_ACTIVE != 0
+    }
+
     static func string(_ storage: sockaddr_storage) -> String? {
         var copy = storage
         var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))

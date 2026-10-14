@@ -38,6 +38,8 @@ public final class AppModel: ObservableObject {
     private var retry: DispatchWorkItem?
     /// Reconnect target once the replaced session ends
     private var reconnect: DiscoveredReceiver?
+    /// Uptime of the last receiver request to connect again
+    private var askedBackAt = -TimeInterval.infinity
     /// Faster link relinks went for: kind, last try, tries
     /// Cleared when that link leaves the list
     private var fasterLink: (kind: LinkKind, at: TimeInterval, tries: Int)?
@@ -45,6 +47,11 @@ public final class AppModel: ObservableObject {
     /// Relinking for a faster link: its outcome replaces the message
     private var awaitingFasterLink: LinkKind?
     private var quitDone: (() -> Void)?
+    private let systemSleep = SystemSleep()
+    /// Lets a waiting sleep proceed
+    private var sleepReady: (() -> Void)?
+    /// Sleep or a dark wake: no display to stream
+    private var screensAsleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
     private let paths = NWPathMonitor()
     private var volumeWatcher: OutputWatcher?
     private var cancellables: Set<AnyCancellable> = []
@@ -94,10 +101,52 @@ public final class AppModel: ObservableObject {
         // Published fires before the new value is stored
         settings.$autoConnect.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.considerAutoConnect() }
             .store(in: &cancellables)
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            // The link takes a moment to come back after wake
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.considerAutoConnect() }
+        systemSleep.onSleep = { [weak self] ready in
+            guard let self = self else { return ready() }
+            self.willSleep(ready)
         }
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.screensAsleep = true
+        }
+        // Not posted in a dark wake
+        workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.screensWoke()
+        }
+        // A wake without screensDidWake must not leave connecting off
+        workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
+            self?.screensWoke()
+        }
+    }
+
+    /// A relink held while screens slept, else auto connect
+    private func screensWoke() {
+        screensAsleep = false
+        // The link takes a moment to come back after wake
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self = self, self.session == nil, !self.screensAsleep else { return }
+            guard let receiver = self.reconnect else { return self.considerAutoConnect() }
+            self.reconnect = nil
+            self.start(receiver, manual: true)
+        }
+    }
+
+    /// Lid closed or Sleep chosen: the iMac powers off first
+    /// Sleep waits for the session's end, at most 2 s
+    private func willSleep(_ ready: @escaping () -> Void) {
+        screensAsleep = true
+        retry?.cancel()
+        reconnect = nil
+        guard let session = session else { return ready() }
+        sleepReady = ready
+        session.close(reason: L10n.t("\(macName) went to sleep", "\(macName)이(가) 잠자기에 들어갔습니다"))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.readyToSleep() }
+    }
+
+    private func readyToSleep() {
+        sleepReady?()
+        sleepReady = nil
     }
 
     public var isActive: Bool { session != nil }
@@ -173,6 +222,9 @@ public final class AppModel: ObservableObject {
         switch outcome {
         case .switched:
             lastMessage = faster ? AppModel.fasterLinkOutcome(wanted: kind, got: kind) : L10n.t("Switched to \(name)", "\(name)(으)로 바꿨습니다")
+        case .stayed where session?.isHandingOver == true:
+            // A lost link's resume took over from it
+            break
         case .stayed where faster:
             let current = LinkLabel.name(snapshot.link)
             lastMessage = L10n.t("\(name) did not take over; staying on \(current)", "\(name)(으)로 넘기지 못해 \(current)(으)로 계속 보냅니다")
@@ -247,6 +299,16 @@ public final class AppModel: ObservableObject {
                 self.considerFasterLink()
             }
         }
+        session.onResume = { [weak self, weak session] resumed, from, to in
+            guard let self = self else { return }
+            guard resumed else {
+                // Ends next: a new session over what still answers
+                self.reconnect = self.receivers.first { $0.name == self.activeReceiver } ?? session?.target
+                return
+            }
+            self.lastMessage = L10n.t("\(LinkLabel.name(from)) dropped; continuing over \(LinkLabel.name(to))",
+                                      "\(LinkLabel.name(from)) 연결이 끊겨 \(LinkLabel.name(to))(으)로 이어서 보냅니다")
+        }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
             // A stop on the iMac counts as a Disconnect here
@@ -254,16 +316,24 @@ public final class AppModel: ObservableObject {
                 self.auto.userDisconnected()
                 self.reconnect = nil
             }
+            // Receiver gave way: at once, at most every 5 s
+            let now = ProcessInfo.processInfo.systemUptime
+            if session?.askedBack == true, self.reconnect == nil, now - self.askedBackAt > 5 {
+                self.askedBackAt = now
+                self.reconnect = self.receivers.first { $0.name == self.activeReceiver } ?? session?.target
+            }
             self.session = nil
             self.activeReceiver = nil
             self.lastMessage = reason
             self.follow(pairing: nil)
             self.pairedIDs = Set(self.pairings.pairs.map(\.id))
+            self.readyToSleep()
             if let done = self.quitDone {
                 self.quitDone = nil
                 return done()
             }
-            if let receiver = self.reconnect {
+            // Screens off: held for their wake
+            if let receiver = self.reconnect, !self.screensAsleep {
                 self.reconnect = nil
                 self.start(receiver, manual: true)
                 // Shown until the new session streams
@@ -333,7 +403,7 @@ public final class AppModel: ObservableObject {
     /// Only where no code is needed: paired, or a cable
     /// Else each retry puts a code on that iMac's screen
     private func considerAutoConnect() {
-        guard session == nil, CGPreflightScreenCaptureAccess(),
+        guard session == nil, !screensAsleep, CGPreflightScreenCaptureAccess(),
               let receiver = auto.target(in: receivers, last: settings.lastReceiver, enabled: settings.autoConnect),
               AppModel.connectsWithoutCode(paired: isPaired(receiver),
                                            route: AppModel.route(pinned: settings.link, answering: links[receiver.name])) else { return }
@@ -410,6 +480,7 @@ public final class AppModel: ObservableObject {
             self?.isTesting = false
             self?.follow(pairing: nil)
             self?.lastMessage = reason
+            self?.readyToSleep()
             self?.quitDone?()
             self?.quitDone = nil
         }

@@ -194,4 +194,26 @@ final class StreamHandoverTests: XCTestCase {
         XCTAssertEqual(types.first, .reconfigure)
         XCTAssertLessThan(try XCTUnwrap(types.firstIndex(of: .videoParams)), try XCTUnwrap(types.firstIndex(of: .videoFrame)))
     }
+
+    /// Link lost: held, then all tiles on the new link
+    func testAResumedStreamResendsEveryTileOnTheNewConnection() throws {
+        try XCTSkipUnless(MTLCreateSystemDefaultDevice() != nil, "needs Metal")
+        let p = try pair()
+        defer { p.close() }
+        let size = PixelSize(width: 256, height: 128)
+        let streamer = try FrameStreamer(config: StreamConfig(path: .tile, streamPixels: size, video: nil, linkKind: .ethernet),
+                                         capacityGbps: 0.95, connection: p.old)
+        defer { streamer.stop() }
+        streamer.offer(try frame(size, 0))
+        XCTAssertTrue(until { p.arrivals.types(on: 0).contains(.tileFrame) })
+        streamer.hold()
+        let sent = p.arrivals.types(on: 0).count
+        // Unchanged picture: only the resync can send tiles now
+        streamer.offer(try frame(size, 0))
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(p.arrivals.types(on: 0).count, sent, "held: nothing more on the dead link")
+        streamer.resume(on: p.next, config: StreamConfig(path: .tile, streamPixels: size, video: nil, linkKind: .wifi), capacityGbps: 0.2)
+        XCTAssertTrue(until { p.arrivals.types(on: 1).contains(.tileFrame) }, "every tile again, though nothing changed")
+        XCTAssertEqual(p.arrivals.types(on: 1).first, .reconfigure)
+    }
 }

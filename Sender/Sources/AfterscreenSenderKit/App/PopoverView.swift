@@ -206,13 +206,12 @@ private struct LinkChart<Picker: View>: View {
                         .foregroundStyle(scoreColor)
                     Text(StatName.quality).font(.system(size: 10)).foregroundStyle(.primary)
                 }
-                .halo()
                 .help(L10n.t("100 minus penalties for retransmits, jitter and a capacity below what the stream needs",
                              "100점에서 재전송, 지연 변동, 부족한 링크 속도만큼 깎은 점수"))
                 Spacer()
                 VStack(alignment: .trailing, spacing: 3) {
                     HStack(spacing: 6) {
-                        LinkName(kind: s.link).font(.system(size: 12)).lineLimit(1).halo()
+                        LinkName(kind: s.link).font(.system(size: 12)).lineLimit(1)
                         picker()
                     }
                     .help(L10n.t("The link carrying the stream", "스트림이 지나는 링크"))
@@ -237,15 +236,6 @@ private struct LinkChart<Picker: View>: View {
             Text(name).font(.system(size: 10)).foregroundStyle(.primary)
             Text(text).font(.system(size: 12, design: .monospaced)).foregroundStyle(color)
         }
-        .halo()
-    }
-}
-
-private extension View {
-    /// Background-colored glow: text stays legible over the chart
-    func halo() -> some View {
-        let glow = Color(nsColor: .windowBackgroundColor)
-        return shadow(color: glow, radius: 1.5).shadow(color: glow, radius: 1.5)
     }
 }
 

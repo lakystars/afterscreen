@@ -288,6 +288,16 @@ public final class TileEncoder {
         return frame
     }
 
+    /// The receiver may have missed frames: every tile goes again
+    /// As BC7 references, over the next refinements
+    public func resyncAll() {
+        for t in 0..<geometry.tileCount {
+            lossy[t] = true
+            onVideo[t] = false
+        }
+        lossyTiles = geometry.tileCount
+    }
+
     /// BC7 reference of settled lossy tiles; nil when none
     public func refine(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> EncodedFrame? {
         let flags = UnsafeMutableBufferPointer(start: dirtyFlags.contents().assumingMemoryBound(to: UInt32.self), count: geometry.tileCount)

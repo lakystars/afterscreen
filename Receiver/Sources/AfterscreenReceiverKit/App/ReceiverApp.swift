@@ -178,6 +178,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     }
 
     private func accept(_ connection: Connection) {
+        // Resume, side channel or successor: its first message decides
         if let session = session { return session.offerChannel(connection) }
         guard let screen = screen else { return refuse(connection, L10n.t("Receiver display is unavailable", "수신기 화면을 쓸 수 없습니다")) }
         let local = connection.localInterfaceName
@@ -228,20 +229,22 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
             self?.showStatus(link: link)
         }
-        session.onEnd = { [weak self] reason in
+        session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
+            FileHandle.standardError.write(Data("[receiver] Session ended: \(reason)\n".utf8))
+            // Only the current session's end resets the app
+            guard self.session === session else { return }
             let duration = self.startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
-            let peer = self.session?.peer?.name ?? L10n.t("sender", "송신기")
+            let peer = session?.peer?.name ?? L10n.t("sender", "송신기")
             self.lastSummary = L10n.t("Last session: \(peer), \(duration / 60)m \(duration % 60)s — \(reason)",
                                       "마지막 연결: \(peer), \(duration / 60)분 \(duration % 60)초 — \(reason)")
             // Only after a session that showed a stream
             // Else early failures sleep the display on every retry
-            if let config = self.session?.config, !config.test, self.session?.relinking == false, !self.stoppedHere {
+            if let config = session?.config, !config.test, session?.relinking == false, !self.stoppedHere {
                 self.sleepDisplayIfIdle()
             }
             self.stoppedHere = false
             self.session = nil
-            FileHandle.standardError.write(Data("[receiver] Session ended: \(reason)\n".utf8))
             self.state("Waiting for a sender", "송신기를 기다리는 중")
             self.showStatus(link: nil)
         }

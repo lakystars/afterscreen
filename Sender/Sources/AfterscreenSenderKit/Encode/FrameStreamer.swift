@@ -48,6 +48,9 @@ final class FrameStreamer {
     private var connection: Connection
     /// Handing over: nothing goes out until the receiver reads here
     private var switching: Connection?
+    /// Link lost: nothing goes out until `resume`
+    private var held = false
+    private var sending: Bool { switching == nil && !held }
     // Per-item autorelease: a busy queue would retain Metal objects
     private let queue = DispatchQueue(label: "afterscreen.frames", qos: .userInteractive, autoreleaseFrequency: .workItem)
     /// Paced to the stream's rate, 2 ms early for jitter
@@ -114,6 +117,8 @@ final class FrameStreamer {
     private func apply(_ config: StreamConfig, capacityGbps: Double?) {
         guard let tile = tile else { return }
         let geometry = tile.encoder.geometry, fps = config.frameRate
+        // A resume off Thunderbolt drops 120 fps
+        if abs(gate.interval - (1 / fps - 0.002)) > 1e-6 { gate = FrameGate(interval: 1 / fps - 0.002) }
         compression = CompressionPolicy(capacityGbps: capacityGbps, fps: fps)
         tile.encoder.bc7MotionLimit = PathPolicy.bc7MotionTiles(capacityGbps: capacityGbps, tileBytes: geometry.tileBytes, fps: fps)
         // Waits end here: the replaced encoder's outputs are dropped
@@ -164,6 +169,34 @@ final class FrameStreamer {
             guard switching == nil else { return }
             switching = next
             connection.send(Message(type: .switchover))
+        }
+    }
+
+    /// Any queue: link died; the gate keeps the newest frame
+    func hold() {
+        queue.async { [self] in held = true }
+    }
+
+    /// Any queue: a lost link replaced by `next`
+    /// Frames on the dead link may be lost: all again
+    func resume(on next: Connection, config: StreamConfig, capacityGbps: Double?) {
+        queue.async { [self] in
+            held = false
+            switching = nil
+            connection.onFrameWritten = nil
+            connection = next
+            watchWrites(next)
+            lastSent = nil
+            leastBuffered = nil
+            leastWindow = nil
+            queueWasFull = false
+            // Deltas against a picture the receiver may lack
+            outbox.removeAll()
+            next.send(.reconfigure, json: config)
+            apply(config, capacityGbps: capacityGbps)
+            tile?.encoder.resyncAll()
+            refinePending = true
+            wake()
         }
     }
 
@@ -316,7 +349,7 @@ final class FrameStreamer {
     /// Busy link or encoder: woken when a frame leaves
     /// No timer runs while nothing is held
     private func pump() {
-        guard !connection.isClosed, gate.pending != nil, switching == nil else { return }
+        guard !connection.isClosed, gate.pending != nil, sending else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if connection.queuedFrames >= 2 { queueWasFull = true }
         guard inFlight < 2 else { return }
@@ -391,7 +424,7 @@ final class FrameStreamer {
     /// Sends ready frames in order
     /// Video picture first, then the tile frame presenting it
     private func drain() {
-        guard let tile = tile, switching == nil else { return }
+        guard let tile = tile, sending else { return }
         while let first = outbox.first, !first.waitsForVideo {
             outbox.removeFirst()
             var videoBytes = 0
@@ -409,7 +442,7 @@ final class FrameStreamer {
     private func refine() {
         guard let tile = tile, !connection.isClosed else { return }
         // Handing over: `wake` refines once the switch is done
-        refinePending = inFlight >= 2 || switching != nil
+        refinePending = inFlight >= 2 || !sending
         guard !refinePending else { return }
         if let frame = tile.encoder.refine() {
             gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)

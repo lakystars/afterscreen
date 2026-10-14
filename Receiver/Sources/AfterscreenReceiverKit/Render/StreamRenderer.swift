@@ -101,40 +101,75 @@ final class StreamRenderer {
     enum Wave: Equatable {
         case hidden
         case opening(start: CFTimeInterval, duration: CFTimeInterval)
-        case closing(start: CFTimeInterval, duration: CFTimeInterval)
+        /// `grey`: closing over a picture waiting for its link
+        case closing(start: CFTimeInterval, duration: CFTimeInterval, grey: Bool = false)
+        /// Link lost: grey, each tile breathing; `motion` false is still
+        case waiting(since: CFTimeInterval, motion: Bool)
+        /// Link back: colour returns centre-out
+        case reviving(start: CFTimeInterval, duration: CFTimeInterval, motion: Bool)
 
         /// `Wave` in the shaders
-        struct Parameters {
+        struct Parameters: Equatable {
             var progress: Float
             var active: Float
             var closing: Float
             var tilePixels: Float
             var size: SIMD2<Float>
+            /// 0 colour, 1 grey
+            var grey: Float = 0
+            /// Brightness swing of each tile, 0…1
+            var breathing: Float = 0
+            /// Seconds, wrapped: float precision stays fine
+            var time: Float = 0
+            /// 1 while colour returns; `progress` drives it
+            var reviving: Float = 0
+            /// 0 under Reduce Motion: no tile movement
+            var motion: Float = 1
         }
 
         /// The picture as sent
         static let still = Parameters(progress: 0, active: 0, closing: 0, tilePixels: 64, size: SIMD2(1, 1))
+        /// Grey reached over this long
+        static let fadeToGrey: CFTimeInterval = 0.3
 
         /// 0…1 through the wave; nil once an opening is over
         /// Closing holds at 1 until the window goes
         func progress(at now: CFTimeInterval) -> Float? {
             switch self {
-            case .hidden:
+            case .hidden, .waiting:
                 return 0
-            case let .opening(start, duration):
+            case let .opening(start, duration), let .reviving(start, duration, _):
                 let p = (now - start) / max(duration, 0.001)
                 return p >= 1 ? nil : Float(max(0, p))
-            case let .closing(start, duration):
+            case let .closing(start, duration, _):
                 return Float(min(1, max(0, (now - start) / max(duration, 0.001))))
             }
         }
 
         func parameters(at now: CFTimeInterval, tilePixels: Int, size: CGSize) -> Parameters {
             guard let p = progress(at: now) else { return Wave.still }
-            var closing: Float = 0
-            if case .closing = self { closing = 1 }
-            return Parameters(progress: p, active: 1, closing: closing, tilePixels: Float(tilePixels),
-                              size: SIMD2(Float(size.width), Float(size.height)))
+            var params = Parameters(progress: p, active: 1, closing: 0, tilePixels: Float(tilePixels),
+                                    size: SIMD2(Float(size.width), Float(size.height)), time: Float(now.truncatingRemainder(dividingBy: 3600)))
+            switch self {
+            case .hidden, .opening:
+                break
+            case let .closing(_, _, grey):
+                params.closing = 1
+                params.grey = grey ? 1 : 0
+                params.breathing = params.grey
+            case let .waiting(since, motion):
+                params.active = 0
+                params.grey = Float(min(1, max(0, (now - since) / Wave.fadeToGrey)))
+                params.breathing = motion ? params.grey : 0
+                params.motion = motion ? 1 : 0
+            case let .reviving(_, _, motion):
+                params.active = 0
+                params.reviving = 1
+                params.grey = 1
+                params.breathing = motion ? 1 : 0
+                params.motion = motion ? 1 : 0
+            }
+            return params
         }
     }
 
@@ -252,21 +287,42 @@ final class StreamRenderer {
     // Tiles grow from 60% with overshoot, brightening from black
     // Closing runs corners-in and shrinks tiles to black
     // active 0: the picture as sent
-    struct Wave { float progress; float active; float closing; float tilePixels; float2 size; };
+    struct Wave {
+        float progress; float active; float closing; float tilePixels; float2 size;
+        float grey; float breathing; float time; float reviving; float motion;
+    };
     // Share of the wave one tile takes
     // Remainder: start spread from first tile to last
     constant float kWaveTile = 0.32;
 
-    // Returns the uv to sample; `k`: pixel brightness
-    static float2 waveUV(float2 uv, constant Wave &w, thread float &k) {
-        k = 1.0;
-        if (w.active == 0.0) return uv;
-        float2 px = uv * w.size;
-        float2 t = floor(px / w.tilePixels);
+    // Tile `t`'s place in the wave: 0 centre, 1 corners
+    static float waveDistance(float2 t, constant Wave &w) {
         float2 c = (t + 0.5) / ceil(w.size / w.tilePixels) - 0.5;
         float aspect = w.size.x / w.size.y;
         float d = length(float2(c.x * aspect, c.y)) / length(float2(0.5 * aspect, 0.5));
-        d = saturate(d * 0.92 + hash01(uint2(t), 7u) * 0.08);
+        return saturate(d * 0.92 + hash01(uint2(t), 7u) * 0.08);
+    }
+
+    // Colour returning: each tile dips and springs back
+    static float revived(float2 t, constant Wave &w) {
+        return saturate((w.progress - waveDistance(t, w) * (1.0 - kWaveTile)) / kWaveTile);
+    }
+
+    // Returns the uv to sample; `k`: pixel brightness
+    static float2 waveUV(float2 uv, constant Wave &w, thread float &k) {
+        k = 1.0;
+        if (w.reviving > 0.0 && w.motion > 0.0) {
+            float2 px = uv * w.size;
+            float2 t = floor(px / w.tilePixels);
+            float scale = 1.0 - 0.08 * sin(3.14159265 * revived(t, w));
+            float2 s = (px / w.tilePixels - t - 0.5) / scale + 0.5;
+            if (any(s < 0.0) || any(s > 1.0)) { k = 0.0; return uv; }
+            return (t + s) * w.tilePixels / w.size;
+        }
+        if (w.active == 0.0) return uv;
+        float2 px = uv * w.size;
+        float2 t = floor(px / w.tilePixels);
+        float d = waveDistance(t, w);
         if (w.closing > 0.0) d = 1.0 - d;
         float local = saturate((w.progress - d * (1.0 - kWaveTile)) / kWaveTile);
         float open = w.closing > 0.0 ? 1.0 - local : local;
@@ -280,13 +336,25 @@ final class StreamRenderer {
         return (t + s) * w.tilePixels / w.size;
     }
 
+    // Waiting for a link: grey, each tile breathing
+    // Reviving: per tile, back to colour as the wave passes
+    static float3 waitTint(float3 rgb, float2 uv, constant Wave &w) {
+        if (w.grey <= 0.0) return rgb;
+        float2 t = floor(uv * w.size / w.tilePixels);
+        float left = w.reviving > 0.0 ? 1.0 - revived(t, w) : 1.0;
+        float period = 2.0 + 2.0 * hash01(uint2(t), 3u), phase = hash01(uint2(t), 5u);
+        float breath = 1.0 + w.breathing * left * 0.04 * sin(6.2831853 * (w.time / period + phase));
+        float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+        return mix(rgb, float3(luma), w.grey * left) * breath;
+    }
+
     // BC7 picture or its debanded copy; alpha not streamed
     fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Wave &w [[buffer(2)]]) {
         bool up = scalingUp(tex, in.uv);
         float k;
         float2 uv = waveUV(in.uv, w, k);
         if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
-        return float4(picture(tex, uv, up) * k, 1.0);
+        return float4(waitTint(picture(tex, uv, up), in.uv, w) * k, 1.0);
     }
 
     // grid: tiles per row, tile edge px, stream width, height
@@ -330,7 +398,7 @@ final class StreamRenderer {
         if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) {
             float2 lo = 0.0, hi = 1.0;
             if (up) bc7Bounds(mask, grid, p, uv, lo, hi);
-            return float4(picture(tex, uv, up, lo, hi) * k, 1.0);
+            return float4(waitTint(picture(tex, uv, up, lo, hi), in.uv, w) * k, 1.0);
         }
         // VideoToolbox scales from each texel's top-left source pixel
         // Shift: half a plane texel less half a stream pixel
@@ -342,7 +410,7 @@ final class StreamRenderer {
         float y = ((videoUp ? catmullRom(luma, luv).r : luma.sample(s, luv).r) - range.x) * range.y;
         float2 c = (chroma.sample(s, cuv).rg - range.z) * range.w;
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
-        return float4(saturate(rgb) * k, 1.0);
+        return float4(waitTint(saturate(rgb), in.uv, w) * k, 1.0);
     }
     """
 
@@ -665,8 +733,10 @@ final class StreamRenderer {
         let size = drawableSize, inset = insetPixels
         let current = wave
         sizeLock.unlock()
-        var params = current?.parameters(at: CACurrentMediaTime(), tilePixels: tilePixels, size: content) ?? Wave.still
-        if case .opening? = current, params.active == 0 {
+        let now = CACurrentMediaTime()
+        var params = current?.parameters(at: now, tilePixels: tilePixels, size: content) ?? Wave.still
+        // An opening or revival run out: the picture as sent
+        if let current = current, current.progress(at: now) == nil {
             sizeLock.lock()
             if wave == current { wave = nil }
             sizeLock.unlock()

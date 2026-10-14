@@ -88,6 +88,8 @@ final class FakeDisplay: StreamDisplay {
     var audioUnderruns: Int { 0 }
     func cursor(x: Float, y: Float, visible: Bool) { record { cursors.append(x) } }
     func cursorImage(_ image: CursorImage) {}
+    var waits: [Bool] = []
+    func linkWaiting(_ waiting: Bool, detail: String?) { record { waits.append(waiting) } }
 }
 
 /// Stored tileFrame payload covering `runs` with `fill`
@@ -120,7 +122,7 @@ final class ReceiverSessionTests: XCTestCase {
         listener.onAccept = { [unowned self] c in
             // As the app does: a connection during a session may be its cursor channel
             if let session = session { return session.offerChannel(c) }
-            session = ReceiverSession(connection: c, hardware: welcome, display: display, idleTimeout: 1.5)
+            session = ReceiverSession(connection: c, hardware: welcome, display: display, idleTimeout: 1.5, resumeWait: 1, staleAfter: 0.3)
             session.admission = { [unowned self] _ in linkAdmission }
             session.start()
             accepted.fulfill()
@@ -627,6 +629,170 @@ final class ReceiverSessionTests: XCTestCase {
         let bye = mail.next([.bye], in: self) { next.send(.videoFrame, parts: VideoWire.frame(keyframe: false, avcc: Data([0, 0, 0, 1, 9]))) }
         XCTAssertNotNil(bye, "video on the tile path is refused again")
         XCTAssertEqual(display.read { display.videoFrames }, 1)
+    }
+
+    /// Cable pulled: the sender comes back over another link
+    func testALostLinkHoldsTheSessionUntilTheSenderResumes() throws {
+        let welcome = try welcomed()
+        let g = TileGeometry(width: 256, height: 128)
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload
+        client.send(try! JSONWire.message(.config, tileConfig))
+        client.send(Message(type: .tileFrame, payload: frame))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        // No bye: the link died
+        client.close(reason: "cable out")
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertTrue(display.read { display.ended.isEmpty }, "the picture waits for the sender")
+        let (next, mail, ok) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(ok?.type, .handoverOK)
+        // The old link cannot carry it: the switchover comes here
+        XCTAssertNotNil(mail.next([.switchover], in: self) { next.send(Message(type: .switchover)) })
+        next.send(Message(type: .tileFrame, payload: frame))
+        waitForDisplay { [display] in display.tiles.count == 2 }
+        Thread.sleep(forTimeInterval: 1.2)
+        XCTAssertTrue(display.read { display.ended.isEmpty }, "resumed: the wait ended nothing")
+    }
+
+    /// Ended here, by user or error: no resume wait
+    func testTheReceiversOwnEndDoesNotWaitForAResume() throws {
+        _ = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        let start = Date()
+        session.stop(reason: "Stopped on the iMac")
+        waitForDisplay { [display] in display.ended.count == 1 }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.8, "under the 1 s resume wait")
+        XCTAssertEqual(display.read { display.ended.first?.relink }, false)
+    }
+
+    func testAnErrorHereDoesNotWaitForAResume() throws {
+        _ = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        let start = Date()
+        client.send(Message(type: .tileFrame, payload: Data([1, 2, 3])))
+        waitForDisplay { [display] in display.ended.count == 1 }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.8)
+    }
+
+    /// A new connection's first message, and the answer to it
+    private func greet(_ m: Message) throws -> (connection: Connection, answer: Message?) {
+        var c: Connection?
+        let connected = expectation(description: "second connection")
+        Connection.connect(host: "127.0.0.1", port: listener.port, interfaceName: nil, timeout: 2) { c = try? $0.get(); connected.fulfill() }
+        wait(for: [connected], timeout: 3)
+        let next = try XCTUnwrap(c), mail = Mailbox()
+        next.onMessage = { mail.put($0) }
+        next.start(queue: queue)
+        return (next, mail.next([.bye, .welcome], in: self) { next.send(m) })
+    }
+
+    private var hello: Message {
+        try! JSONWire.message(.hello, Hello(protocolVersion: AfterscreenProtocol.version, name: "MBP", model: "Mac17,1", osVersion: "27"))
+    }
+
+    /// Receiver restarted or done waiting: nothing to resume
+    func testAResumeWithoutASessionIsRefusedAtOnce() throws {
+        let replies = expectReply { client.send(try! JSONWire.message(.handover, HandoverNonce(nonce: Pairing.nonce()))) }
+        XCTAssertEqual(replies.first?.type, .bye)
+    }
+
+    func testABusySessionRefusesAnotherSender() throws {
+        _ = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        // Heard just now: not stale
+        _ = expectReply { client.send(Message(type: .ping, payload: PingWire.encode(1))) }
+        let (next, answer) = try greet(hello)
+        defer { next.close(reason: "test end") }
+        let bye = try JSONWire.decode(Bye.self, from: try XCTUnwrap(answer).payload)
+        XCTAssertFalse(bye.relink, "not asked back")
+        XCTAssertTrue(display.read { display.ended.isEmpty })
+    }
+
+    /// A silent session gives way to a sender connecting afresh
+    func testASilentSessionGivesWayToAHelloHoldingThePicture() throws {
+        _ = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        Thread.sleep(forTimeInterval: 0.5)
+        let (next, answer) = try greet(hello)
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(answer?.type, .bye)
+        XCTAssertEqual(try JSONWire.decode(Bye.self, from: try XCTUnwrap(answer).payload).relink, true, "asked to connect again at once")
+        waitForDisplay { [display] in display.ended.count == 1 }
+        XCTAssertEqual(display.read { display.ended.first?.relink }, true, "the picture waits for the new session")
+    }
+
+    /// A resume under way keeps another sender out
+    func testAResumeUnderWayKeepsTheSessionFromAHello() throws {
+        let welcome = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        Thread.sleep(forTimeInterval: 0.5)
+        let (resume, _, ok) = try handOver(welcome)
+        defer { resume.close(reason: "test end") }
+        XCTAssertEqual(ok?.type, .handoverOK)
+        let (next, answer) = try greet(hello)
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(try JSONWire.decode(Bye.self, from: try XCTUnwrap(answer).payload).relink, false, "busy, not giving way")
+        XCTAssertTrue(display.read { display.ended.isEmpty })
+    }
+
+    /// A quiet earlier try does not block the next
+    func testALaterProvenHandoverReplacesAnEarlierOne() throws {
+        let welcome = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        let (first, _, firstOK) = try handOver(welcome)
+        defer { first.close(reason: "test end") }
+        XCTAssertEqual(firstOK?.type, .handoverOK)
+        let (second, mail, secondOK) = try handOver(welcome)
+        defer { second.close(reason: "test end") }
+        XCTAssertEqual(secondOK?.type, .handoverOK)
+        XCTAssertNotNil(mail.next([.switchover], in: self) { client.send(Message(type: .switchover)) }, "the later one takes over")
+    }
+
+    /// Its sender resumes after the silence that ended the link
+    func testASilentSessionStillTakesItsSendersResume() throws {
+        let welcome = try welcomed()
+        let g = TileGeometry(width: 256, height: 128)
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)]).payload
+        client.send(try! JSONWire.message(.config, tileConfig))
+        client.send(Message(type: .tileFrame, payload: frame))
+        waitForDisplay { [display] in display.tiles.count == 1 }
+        Thread.sleep(forTimeInterval: 0.5)
+        let (next, mail, ok) = try handOver(welcome)
+        defer { next.close(reason: "test end") }
+        XCTAssertEqual(ok?.type, .handoverOK)
+        XCTAssertNotNil(mail.next([.switchover], in: self) { next.send(Message(type: .switchover)) })
+        next.send(Message(type: .tileFrame, payload: frame))
+        waitForDisplay { [display] in display.tiles.count == 2 }
+        XCTAssertTrue(display.read { display.ended.isEmpty })
+    }
+
+    /// Pings come twice a second: a quiet second is news
+    func testAQuietStreamTellsTheScreenAndRecovers() throws {
+        _ = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        XCTAssertTrue(display.read { display.waits.isEmpty })
+        waitForDisplay { [display] in display.waits == [true] }
+        client.send(Message(type: .ping, payload: PingWire.encode(1)))
+        waitForDisplay { [display] in display.waits == [true, false] }
+        XCTAssertTrue(display.read { display.ended.isEmpty })
+    }
+
+    func testALostLinkThatNeverComesBackEndsTheSession() throws {
+        _ = try welcomed()
+        client.send(try! JSONWire.message(.config, tileConfig))
+        waitForDisplay { [display] in display.begun.count == 1 }
+        client.close(reason: "cable out")
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertTrue(display.read { display.ended.isEmpty })
+        waitForDisplay { [display] in display.ended.count == 1 }
+        XCTAssertEqual(display.read { display.ended.first?.relink }, false, "closes in, no hold")
+        XCTAssertEqual(display.read { display.waits.first }, true, "the screen showed the wait first")
     }
 
     func testATakeoverGoneBeforeTheSwitchoverLeavesTheSessionWhereItWas() throws {

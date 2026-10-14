@@ -50,6 +50,9 @@ public protocol StreamDisplay: AnyObject {
     func followOutput(_ level: OutputLevel?)
     /// Any queue: smoothing of one-level steps, from the next draw
     func setDeband(_ level: Deband)
+    /// Main queue: the stream went quiet, or came back
+    /// `detail`: why, when known
+    func linkWaiting(_ waiting: Bool, detail: String?)
     /// Sound buffered for playback in seconds; nil while none plays
     var audioBuffered: Double? { get }
     var audioUnderruns: Int { get }
@@ -180,6 +183,24 @@ public final class ReceiverSession {
     private var takeover: Connection?
     /// After a switchover: the sender reopens its cursor channel
     private var cursorReplaceable = false
+    /// Main connection lost without a bye: held for a resume
+    private var suspended: String?
+    /// Ended on this side: its own close is no loss
+    private var leaving = false
+    /// How long a lost link may take to come back
+    private let resumeWait: TimeInterval
+    /// Silent this long: a new sender's hello replaces it
+    private let staleAfter: TimeInterval
+    /// Last message on the main connection; under `configLock`
+    private var lastHeard = ProcessInfo.processInfo.systemUptime
+    /// Quiet past `quietAfter`, or link down: the screen shows it
+    private var waiting = false
+    static let quietAfter: TimeInterval = 1
+    /// Media checks in a row finding this side's link down
+    private var downChecks = 0
+    private var watchTimer: DispatchSourceTimer?
+    /// As long as the window holds a relinking picture
+    public static let resumeWait = StreamWindow.relinkWait
     /// What a new connection's link needs; nil refuses handovers
     public var admission: ((Connection) -> LinkAdmission)?
     /// Main queue, after a handover: the new main connection
@@ -228,8 +249,11 @@ public final class ReceiverSession {
     }
 
     /// `auth`: nil or not required streams without pairing
-    public init(connection: Connection, hardware: Welcome, display: StreamDisplay, idleTimeout: TimeInterval = 4, auth: ReceiverAuth? = nil) {
+    public init(connection: Connection, hardware: Welcome, display: StreamDisplay, idleTimeout: TimeInterval = 4, auth: ReceiverAuth? = nil,
+                resumeWait: TimeInterval = ReceiverSession.resumeWait, staleAfter: TimeInterval = 3) {
         self.connection = connection
+        self.resumeWait = resumeWait
+        self.staleAfter = staleAfter
         self.hardware = hardware
         self.auth = auth
         self.display = display
@@ -273,6 +297,25 @@ public final class ReceiverSession {
         bind(connection)
         connection.start(queue: queue, idleTimeout: idleTimeout)
         statsTimer = DispatchSource.repeating(on: queue, every: 1, after: 1) { [weak self] in self?.sendStats() }
+        watchTimer = DispatchSource.repeating(on: queue, every: 0.25, after: 0.25) { [weak self] in self?.watchLink() }
+    }
+
+    /// Session queue: tells the screen a link went quiet
+    /// The sender pings twice a second, even when still
+    private func watchLink() {
+        guard !ended, currentPeer != nil, let config = config, !config.test else { return }
+        configLock.lock()
+        let quiet = ProcessInfo.processInfo.systemUptime - lastHeard
+        configLock.unlock()
+        let down = connection.localInterfaceName.map { Interfaces.isActive($0) == false } ?? false
+        downChecks = down ? downChecks + 1 : 0
+        let unplugged = downChecks >= 2
+        let lost = suspended != nil || unplugged || quiet > ReceiverSession.quietAfter
+        guard lost != waiting else { return }
+        waiting = lost
+        let detail = unplugged ? L10n.t("\(LinkLabel.name(config.linkKind)) disconnected; finding another link",
+                                        "\(LinkLabel.name(config.linkKind)) 연결이 끊겨 다른 링크를 찾는 중") : nil
+        DispatchQueue.main.async { [weak self] in self?.display?.linkWaiting(lost, detail: detail) }
     }
 
     /// A replaced connection's close ends nothing
@@ -280,7 +323,7 @@ public final class ReceiverSession {
         c.onMessage = { [weak self] m in self?.handle(m) }
         c.onClose = { [weak self, weak c] reason in
             guard let self = self, self.connection === c else { return }
-            self.finish(reason: reason)
+            self.connectionLost(reason)
         }
         c.readGate = { [weak self, weak c] m in
             guard let c = c else { return }
@@ -288,15 +331,62 @@ public final class ReceiverSession {
         }
     }
 
+    /// A streaming sender gone without a bye may come back
+    /// Over another link, within `resumeWait`; else the session ends
+    private func connectionLost(_ reason: String) {
+        guard peerBye == nil, !leaving, currentPeer != nil, let config = config, !config.test, !ended else { return finish(reason: reason) }
+        guard suspended == nil else { return }
+        suspended = reason
+        queue.asyncAfter(deadline: .now() + resumeWait) { [weak self] in
+            // No link came back: black tiles close in
+            guard let self = self, let reason = self.suspended else { return }
+            self.finish(reason: reason)
+        }
+    }
+
+    /// Streaming, but nothing heard for `staleAfter`
+    private var isStale: Bool {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return currentPeer != nil && currentConfig != nil && ProcessInfo.processInfo.systemUptime - lastHeard > staleAfter
+    }
+
+    /// The sender ends its resume and starts anew
+    private func noSession(_ c: Connection) {
+        c.send(.bye, json: Bye(reason: L10n.t("No session to resume", "이어 갈 세션이 없습니다")))
+        c.closeAfterFlush(reason: "no session to resume")
+    }
+
+    /// Session queue: ends for the sender's next connection
+    /// Picture held; the bye asks it back at once
+    private func giveWay(to c: Connection) {
+        let reason = L10n.t("The sender connected again", "송신기가 다시 연결했습니다")
+        c.send(.bye, json: Bye(reason: reason, relink: true))
+        c.closeAfterFlush(reason: reason)
+        guard !ended else { return }
+        if peerBye == nil { peerBye = Bye(reason: reason, relink: true) }
+        leaving = true
+        connection.close(reason: reason)
+        finish(reason: reason)
+    }
+
     /// User-initiated stop; `pause` asks the sender not to auto-reconnect
     public func stop(reason: String, pause: Bool = false) {
         queue.async { [self] in
+            leaving = true
+            // Waiting for a lost sender: no connection to close
+            if suspended != nil { return finish(reason: reason) }
             connection.send(.bye, json: Bye(reason: reason, pause: pause))
             connection.closeAfterFlush(reason: reason)
         }
     }
 
     private func handle(_ m: Message) {
+        configLock.lock()
+        lastHeard = ProcessInfo.processInfo.systemUptime
+        configLock.unlock()
+        // Resume of a session gone here: start anew
+        if m.type == .handover, currentPeer == nil { return noSession(connection) }
         // Challenged or pairing link: only the handshake until accepted
         guard !gated || [.hello, .auth, .pair, .ping, .bye].contains(m.type) else {
             if m.type == .tileFrame || m.type == .videoFrame { frameSlots.signal() }
@@ -490,6 +580,7 @@ public final class ReceiverSession {
         next.watchIdle(idleTimeout)
         next.send(Message(type: .switchover))
         cursorReplaceable = true
+        suspended = nil
         old.closeAfterFlush(reason: "handed over")
         DispatchQueue.main.async { [weak self] in self?.onHandover?(next) }
     }
@@ -551,9 +642,11 @@ public final class ReceiverSession {
                 return
             }
             if let pending = self.handovers[ObjectIdentifier(c)] { return self.proveHandover(m, pending) }
-            // Proven: only its link is measured before the switch
+            // Proven: its link is measured before the switch
+            // A switchover here: the old link is gone
             if self.takeover === c {
                 if m.type == .probe { self.probe(m, on: c) }
+                if m.type == .switchover { self.switchOver() }
                 return
             }
             // No side channel before the peer is accepted
@@ -579,8 +672,11 @@ public final class ReceiverSession {
         }
     }
 
+    /// A silent session still takes its sender's resume
+    /// One under way keeps it from another sender
     private func adopt(_ c: Connection, first m: Message) {
-        guard !ended else { return c.close(reason: "session ended") }
+        if ended, m.type == .handover { return noSession(c) }
+        if ended || m.type == .hello && isStale && handovers.isEmpty && takeover == nil { return giveWay(to: c) }
         if m.type == .handover { return askHandover(c, m) }
         // A second channel only right after a handover
         guard m.type == .cursorChannel, (try? ChannelWire.decode(m.payload)) == channelToken, cursorChannel == nil || cursorReplaceable else {
@@ -600,7 +696,7 @@ public final class ReceiverSession {
             c.send(.bye, json: Bye(reason: reason))
             c.closeAfterFlush(reason: reason)
         }
-        guard takeover == nil, handovers.count < 4, let request = try? JSONWire.decode(HandoverNonce.self, from: m.payload),
+        guard handovers.count < 4, let request = try? JSONWire.decode(HandoverNonce.self, from: m.payload),
               request.nonce.count == 16 else {
             return refuse("handover refused")
         }
@@ -621,11 +717,12 @@ public final class ReceiverSession {
         guard m.type == .handoverProof else { return }
         handovers[ObjectIdentifier(h.connection)] = nil
         let expected = Handover.proof(h.secret, role: .sender, senderNonce: h.senderNonce, receiverNonce: h.receiverNonce)
-        // One takeover at a time
-        guard takeover == nil, let proof = try? JSONWire.decode(AuthProof.self, from: m.payload), Pairing.matches(proof.mac, expected) else {
+        guard let proof = try? JSONWire.decode(AuthProof.self, from: m.payload), Pairing.matches(proof.mac, expected) else {
             h.connection.send(.bye, json: Bye(reason: "handover proof did not match"))
             return h.connection.closeAfterFlush(reason: "bad handover proof")
         }
+        // One takeover at a time: a dead earlier one goes
+        takeover?.close(reason: "replaced")
         takeover = h.connection
         // A takeover lost mid-probe leaves no count behind
         probeBytes = 0
@@ -696,6 +793,8 @@ public final class ReceiverSession {
     }
 
     private func fail(_ reason: String, repair: Bool? = nil) {
+        leaving = true
+        if suspended != nil { return finish(reason: reason) }
         connection.send(.bye, json: Bye(reason: reason, repair: repair))
         connection.closeAfterFlush(reason: reason)
     }
@@ -703,10 +802,13 @@ public final class ReceiverSession {
     private func finish(reason: String) {
         guard !ended else { return }
         ended = true
+        suspended = nil
         let reason = peerBye?.reason ?? reason
         let relink = relinking
         statsTimer?.cancel()
         statsTimer = nil
+        watchTimer?.cancel()
+        watchTimer = nil
         // A code still showing closes with the connection
         if pairing != nil, let auth = auth { DispatchQueue.main.async { auth.onCode(nil, "") } }
         cursorChannel?.close(reason: reason)

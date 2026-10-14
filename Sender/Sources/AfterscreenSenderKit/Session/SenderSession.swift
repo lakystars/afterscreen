@@ -93,6 +93,8 @@ public final class SenderSession {
     public private(set) var snapshot = SenderSnapshot()
     /// The receiver's user stopped the stream
     public private(set) var pausedByReceiver = false
+    /// Receiver gave way to this session: connect again
+    public private(set) var askedBack = false
 
     let target: DiscoveredReceiver
     /// This Mac's identity and kept keys, for pairing
@@ -141,6 +143,13 @@ public final class SenderSession {
     private var testRun: QualityTestRun?
     private var connection: Connection? { didSet { routeSound() } }
     private var handoff: Handoff?
+    /// This Mac ends the session: its close is no loss
+    private var stopping = false
+    /// Media checks in a row finding the link down
+    private var inactiveChecks = 0
+    /// Main queue: a lost link came back, or did not
+    /// `true`: resumed over `to`; `false`: the session ends next
+    public var onResume: ((_ resumed: Bool, _ from: LinkKind?, _ to: LinkKind) -> Void)?
     private var display: VirtualDisplay?
     private var capture: Capture?
     private var cursor: CursorTracker?
@@ -345,7 +354,7 @@ public final class SenderSession {
         let simulated = SenderSession.simulatedLinkMbps
         c.paceBitsPerSecond = simulated.map { $0 * 1e6 }
         c.onMessage = { [weak self] m in self?.handle(m) }
-        c.onClose = { [weak self] reason in self?.end(reason) }
+        c.onClose = { [weak self] reason in self?.connectionClosed(reason) }
         c.start(queue: .main, idleTimeout: SenderSession.idleTimeout)
         startPing()
         update {
@@ -366,7 +375,9 @@ public final class SenderSession {
 
     /// `relink`: new session follows at once; receiver keeps its picture
     public func stop(reason: String = SenderSession.stoppedHere, relink: Bool = false) {
-        guard let c = connection, !ended else { return end(reason) }
+        stopping = true
+        // Resuming: nothing to say bye on
+        guard let c = connection, !ended, !c.isClosed else { return end(reason) }
         // A closing session already powered the iMac off
         c.send(.bye, json: Bye(reason: reason, relink: relink && closing == nil))
         c.closeAfterFlush(reason: reason)
@@ -379,7 +390,7 @@ public final class SenderSession {
     /// Ends at its bye, as the screen turns black
     public func close(reason: String = SenderSession.stoppedHere) {
         guard closing == nil else { return }
-        guard snapshot.isStreaming, purpose == .display, let c = connection else { return stop(reason: reason) }
+        guard snapshot.isStreaming, purpose == .display, let c = connection, !c.isClosed else { return stop(reason: reason) }
         closing = reason
         c.send(.powerOff, json: Bye(reason: reason))
         // Longest power-off is 0.85 s; a silent receiver ends anyway
@@ -401,10 +412,13 @@ public final class SenderSession {
     }
 
     private struct Handoff {
-        let kind: LinkKind
+        /// Resuming: the route found decides it
+        var kind: LinkKind
         let secret: SymmetricKey
         let nonce = Pairing.nonce()
         let done: (HandoverOutcome) -> Void
+        /// Old link gone: switchover on the new; all tiles again
+        var resume = false
         var connection: Connection?
         var route: Route?
         var receiverNonce: Data?
@@ -416,12 +430,45 @@ public final class SenderSession {
         var videoCap: PixelSize?
         /// `switchover` sent: the receiver may read the new connection
         var switching = false
+        /// Resume: the lost interface
+        var lost: String?
+        /// Resume: no new try after this uptime
+        var triesUntil: TimeInterval = 0
+        /// Resume: routes after the connected one, this round
+        var untried: [Route] = []
+        /// Resume: tells stale callbacks from the current try
+        var attempt = 0
+        /// Last connect error, for the log
+        var lastError: String?
+
+        /// Resume: the next try starts clean
+        mutating func reset() {
+            connection = nil
+            route = nil
+            receiverNonce = nil
+            proven = false
+            gbps = nil
+            config = nil
+            videoCap = nil
+            untried = []
+            attempt += 1
+        }
     }
 
     public var isHandingOver: Bool { handoff != nil }
 
     /// Handshake, measure, encoder check and switch
     static let handoverTimeout: TimeInterval = 6
+    /// Receiver holds 8 s; it may notice 1 s sooner
+    static let resumeTimeout: TimeInterval = 7
+    /// No try after this: 1.5 s to connect, then handshake
+    static let resumeTries: TimeInterval = 4.5
+    /// A try unproven this long after connecting: next route
+    /// Once proven, probe and encoder check may take seconds
+    static let resumeTryLimit: TimeInterval = 3
+    static var resumeFailed: String {
+        L10n.t("The link dropped and no other link took over", "링크가 끊겨 다른 링크로 잇지 못했습니다")
+    }
 
     /// Moves the stream to `kind` within this session
     /// false: this receiver or session cannot; relink instead
@@ -436,7 +483,11 @@ public final class SenderSession {
         let h = Handoff(kind: kind, secret: Handover.secret(key: key, token: token), done: done)
         handoff = h
         RoutePlanner.routes(to: target) { [weak self] routes in
-            DispatchQueue.main.async { self?.connectHandoff(routes.filter { $0.kind == kind }) }
+            DispatchQueue.main.async {
+                // A resume may have replaced it meanwhile
+                guard let self = self, self.handoff?.nonce == h.nonce else { return }
+                self.connectHandoff(routes.filter { $0.kind == kind })
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + SenderSession.handoverTimeout) { [weak self] in
             guard let self = self, self.handoff?.nonce == h.nonce else { return }
@@ -445,20 +496,41 @@ public final class SenderSession {
         return true
     }
 
-    private func connectHandoff(_ routes: [Route]) {
-        guard let nonce = handoff?.nonce, !ended else { return }
-        guard let route = routes.first else { return handoffFailed("no route") }
+    /// `refused`: every route so far refused the port
+    private func connectHandoff(_ routes: [Route], refused: Bool? = nil) {
+        guard let h = handoff, !ended else { return }
+        let nonce = h.nonce, attempt = h.attempt
+        // Port closed everywhere: receiver restarted, session gone
+        guard let route = routes.first else { return handoffFailed(h.lastError ?? "no route", retry: refused != true) }
         Connection.connect(host: route.address, port: target.port,
                            interfaceName: route.kind == .loopback ? nil : route.interface, timeout: 2) { [weak self] result in
             DispatchQueue.main.async {
-                // A later handover's result is not this one's
-                guard let self = self, var h = self.handoff, h.nonce == nonce, h.connection == nil, !self.ended else {
+                // A later handover's or try's result is not this one's
+                guard let self = self, var h = self.handoff, h.nonce == nonce, h.attempt == attempt, h.connection == nil, !self.ended else {
                     if case let .success(c) = result { c.close(reason: "Cancelled") }
                     return
                 }
-                guard case let .success(c) = result else { return self.connectHandoff(Array(routes.dropFirst())) }
+                let c: Connection
+                switch result {
+                case let .success(connection):
+                    c = connection
+                case let .failure(error):
+                    self.handoff?.lastError = "\(route.interface) \(route.address): \(error)"
+                    var closed = false
+                    if case let TransportError.system(_, code) = error { closed = code == ECONNREFUSED }
+                    return self.connectHandoff(Array(routes.dropFirst()), refused: (refused ?? true) && closed)
+                }
                 h.connection = c
                 h.route = route
+                if h.resume {
+                    h.kind = route.kind
+                    h.untried = Array(routes.dropFirst())
+                    DispatchQueue.main.asyncAfter(deadline: .now() + SenderSession.resumeTryLimit) { [weak self] in
+                        guard let self = self, let h = self.handoff, h.nonce == nonce, h.attempt == attempt, !h.proven,
+                              !h.untried.isEmpty || ProcessInfo.processInfo.systemUptime < h.triesUntil else { return }
+                        self.handoffFailed("\(route.interface) stalled")
+                    }
+                }
                 self.handoff = h
                 c.onMessage = { [weak self, weak c] m in
                     guard let self = self, self.handoff?.connection === c else { return }
@@ -479,7 +551,7 @@ public final class SenderSession {
         switch m.type {
         case .handoverChallenge:
             guard let challenge = try? JSONWire.decode(HandoverNonce.self, from: m.payload), challenge.nonce.count == 16 else {
-                return handoffFailed("bad handover challenge")
+                return handoffFailed("bad handover challenge", retry: false)
             }
             h.receiverNonce = challenge.nonce
             handoff = h
@@ -488,7 +560,7 @@ public final class SenderSession {
             // Proven both ways before any frame goes there
             guard let theirs = h.receiverNonce, let proof = try? JSONWire.decode(AuthProof.self, from: m.payload),
                   Pairing.matches(proof.mac, Handover.proof(h.secret, role: .receiver, senderNonce: h.nonce, receiverNonce: theirs)) else {
-                return handoffFailed(L10n.t("The receiver's handover proof did not match", "수신기의 링크 전환 증명이 맞지 않습니다"))
+                return handoffFailed(L10n.t("The receiver's handover proof did not match", "수신기의 링크 전환 증명이 맞지 않습니다"), retry: false)
             }
             h.proven = true
             handoff = h
@@ -503,7 +575,7 @@ public final class SenderSession {
             guard h.switching, let route = h.route else { return }
             switched(to: c, route: route, kind: h.kind)
         case .bye:
-            handoffFailed((try? JSONWire.decode(Bye.self, from: m.payload))?.reason ?? "handover refused")
+            handoffFailed((try? JSONWire.decode(Bye.self, from: m.payload))?.reason ?? "handover refused", retry: false, told: true)
         default:
             break
         }
@@ -512,7 +584,9 @@ public final class SenderSession {
     /// Size and rate stay; path and video follow the link
     /// A larger video layer is checked against the encoder first
     private func chooseHandoff(gbps: Double) {
-        guard let h = handoff, let welcome = snapshot.peer, let current = snapshot.config else { return handoffFailed("no stream to move") }
+        guard let h = handoff, let welcome = snapshot.peer, var current = snapshot.config else { return handoffFailed("no stream to move", retry: false) }
+        // 120 fps is Thunderbolt only
+        if h.kind != .thunderbolt { current.frameRate = min(current.frameRate, HighRefresh.base) }
         let first = PathPolicy.relink(current, link: h.kind, capacityGbps: gbps, welcome: welcome, largestVideo: videoCap)
         guard let layer = first.video else { return beginSwitch(first, videoCap: videoCap) }
         let boxes = PathPolicy.videoBoxes(bitrate: layer.bitrate, codec: layer.codec, fps: first.frameRate)
@@ -524,7 +598,7 @@ public final class SenderSession {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let largest = EncoderCapacity.largest(of: boxes, codec: layer.codec, tenBit: layer.tenBit, bitrate: layer.bitrate, fps: first.frameRate)
             DispatchQueue.main.async {
-                guard let self = self, self.handoff?.nonce == h.nonce else { return }
+                guard let self = self, self.handoff?.nonce == h.nonce, self.handoff?.attempt == h.attempt else { return }
                 self.beginSwitch(PathPolicy.relink(current, link: h.kind, capacityGbps: gbps, welcome: welcome, largestVideo: largest), videoCap: largest)
             }
         }
@@ -536,6 +610,8 @@ public final class SenderSession {
         h.videoCap = videoCap
         h.switching = true
         handoff = h
+        // Old link gone: the switchover goes on the new one
+        if h.resume { return c.send(Message(type: .switchover)) }
         // The receiver closes the old one on reading the new
         // That close may beat the echo: not an end
         connection?.onClose = { [weak self] reason in
@@ -553,10 +629,14 @@ public final class SenderSession {
         connection = c
         self.route = route
         c.onMessage = { [weak self] m in self?.handle(m) }
-        c.onClose = { [weak self] reason in self?.end(reason) }
+        c.onClose = { [weak self] reason in self?.connectionClosed(reason) }
         c.paceBitsPerSecond = SenderSession.simulatedLinkMbps.map { $0 * 1e6 }
         c.watchIdle(SenderSession.idleTimeout)
-        streamer?.finishSwitch(config: h.config, capacityGbps: h.gbps)
+        if h.resume, let config = h.config ?? snapshot.config {
+            streamer?.resume(on: c, config: config, capacityGbps: h.gbps)
+        } else {
+            streamer?.finishSwitch(config: h.config, capacityGbps: h.gbps)
+        }
         if let cap = h.videoCap { videoCap = cap }
         // The new link starts its own congestion record
         qualityNotice = QualityNotice()
@@ -576,6 +656,7 @@ public final class SenderSession {
             $0.videoBitrate = h.config?.video?.bitrate
             $0.videoStartBitrate = h.config?.video?.bitrate
             $0.qualityLowered = false
+            $0.state = L10n.t("Streaming", "스트리밍 중")
         }
         // Cursor and sound follow over the new route
         cursorConnection?.close(reason: "handed over")
@@ -583,26 +664,129 @@ public final class SenderSession {
         if let token = snapshot.peer?.channelToken { openCursorChannel(token: token) }
         if SenderSession.logStats {
             let video = h.config?.video.map { "\($0.pixels.width)x\($0.pixels.height) at \($0.bitrate / 1_000_000) Mbps" } ?? "none"
-            let line = String(format: "[sender] handed over to %@ via %@, %.2f Gbps measured, %@ path, video %@\n", kind.rawValue, route.interface,
-                              h.gbps ?? 0, h.config?.path.rawValue ?? "same", video)
+            let line = String(format: "[sender] %@ to %@ via %@, %.2f Gbps measured, %@ path, video %@\n", h.resume ? "resumed" : "handed over",
+                              kind.rawValue, route.interface, h.gbps ?? 0, h.config?.path.rawValue ?? "same", video)
             FileHandle.standardError.write(Data(line.utf8))
         }
         h.done(.switched)
     }
 
-    private func handoffFailed(_ reason: String) {
-        guard let h = handoff else { return }
-        handoff = nil
+    /// `retry`: a resume goes on while time is left
+    /// The round's other routes, then a new lookup
+    /// `told`: the receiver's reason, shown as the end
+    private func handoffFailed(_ reason: String, retry: Bool = true, told: Bool = false) {
+        guard var h = handoff else { return }
         if let c = h.connection {
             c.onClose = nil
             c.onMessage = nil
             c.close(reason: reason)
         }
         if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] handover to \(h.kind.rawValue) failed: \(reason)\n".utf8)) }
+        let rest = h.untried
+        if h.resume, retry, !h.switching, !rest.isEmpty || ProcessInfo.processInfo.systemUptime < h.triesUntil {
+            h.reset()
+            handoff = h
+            // The round's first route connected: not a closed port
+            if !rest.isEmpty { return connectHandoff(rest, refused: false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self, self.handoff?.nonce == h.nonce, self.handoff?.attempt == h.attempt else { return }
+                self.seekResume(wait: 1)
+            }
+            return
+        }
+        handoff = nil
+        // The lost link did not come back: session ends
+        if h.resume {
+            h.done(.lost)
+            return end(told ? reason : SenderSession.resumeFailed)
+        }
         guard h.switching else { return h.done(.stayed) }
         // Receiver may read the new one: relink, or end if cut
         h.done(.lost)
         connection?.isClosed == false ? stop(reason: reason, relink: true) : end(reason)
+    }
+
+    /// A close without a bye: maybe the cable
+    private func connectionClosed(_ reason: String) {
+        guard !ended else { return }
+        canResume ? linkLost(reason) : end(reason)
+    }
+
+    /// Streaming, not ended here, and the receiver resumes
+    private var canResume: Bool {
+        purpose == .display && snapshot.isStreaming && closing == nil && !stopping && !ended && streamer != nil
+            && snapshot.peer?.handoverToken != nil && handoff?.resume != true
+    }
+
+    /// The session's link is gone: resume over another
+    /// Display, capture and encoder stay; the receiver holds its picture
+    private func linkLost(_ reason: String) {
+        guard canResume, let welcome = snapshot.peer, let token = welcome.handoverToken else { return end(reason) }
+        let key = welcome.auth == nil ? nil : welcome.receiverID.flatMap { pairings.key(for: $0) }
+        guard welcome.auth == nil || key != nil else { return end(reason) }
+        let lost = route
+        connection?.onClose = nil
+        connection?.close(reason: reason)
+        // Switching already, its new link proven: resume there
+        if var other = handoff, other.switching, let next = other.connection {
+            other.resume = true
+            handoff = other
+            streamer?.hold()
+            return next.send(Message(type: .switchover))
+        }
+        // A handover not yet switching gives way, told after
+        let cancelled = handoff
+        if let other = cancelled {
+            other.connection?.onClose = nil
+            other.connection?.close(reason: reason)
+        }
+        streamer?.hold()
+        var h = Handoff(kind: lost?.kind ?? .wifi, secret: Handover.secret(key: key, token: token), done: { [weak self] outcome in
+            guard let self = self else { return }
+            self.onResume?(outcome == .switched, lost?.kind, self.snapshot.link ?? .wifi)
+        }, resume: true)
+        h.lost = lost?.interface
+        h.triesUntil = ProcessInfo.processInfo.systemUptime + SenderSession.resumeTries
+        handoff = h
+        cancelled?.done(.stayed)
+        update { $0.state = L10n.t("Link lost; continuing over another", "링크가 끊겨 다른 링크로 잇는 중") }
+        if SenderSession.logStats { FileHandle.standardError.write(Data("[sender] link lost (\(reason)), resuming\n".utf8)) }
+        seekResume(wait: 0.5)
+        DispatchQueue.main.asyncAfter(deadline: .now() + SenderSession.resumeTimeout) { [weak self] in
+            guard let self = self, self.handoff?.nonce == h.nonce else { return }
+            // Switching: the receiver may already read it
+            guard self.handoff?.switching == true else { return self.handoffFailed("no other link took over", retry: false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self = self, self.handoff?.nonce == h.nonce else { return }
+                self.handoffFailed("switchover unanswered", retry: false)
+            }
+        }
+    }
+
+    /// Live links; the lost one first if up again
+    /// Resumed on a slower link, it stays until links change
+    /// Later tries wait longer for mDNS answers
+    private func seekResume(wait: TimeInterval) {
+        guard let h = handoff, h.resume, h.connection == nil, !ended else { return }
+        RoutePlanner.routes(to: target, wait: wait) { [weak self] routes in
+            // Links still down would only time out
+            let alive = routes.filter { Interfaces.isActive($0.interface) != false }
+            let ordered = alive.filter { $0.interface == h.lost } + alive.filter { $0.interface != h.lost }
+            DispatchQueue.main.async {
+                guard let self = self, self.handoff?.nonce == h.nonce, self.handoff?.attempt == h.attempt else { return }
+                self.connectHandoff(ordered)
+            }
+        }
+    }
+
+    /// Cable out: resume now, not after the idle timeout
+    /// Down in a row: 1 s cables, 2 s Wi-Fi
+    private func checkRoute() {
+        guard let route = route, route.kind != .loopback, canResume else { return inactiveChecks = 0 }
+        inactiveChecks = Interfaces.isActive(route.interface) == false ? inactiveChecks + 1 : 0
+        guard inactiveChecks >= (route.kind == .wifi ? 4 : 2) else { return }
+        inactiveChecks = 0
+        linkLost(L10n.t("\(LinkLabel.name(route.kind)) disconnected", "\(LinkLabel.name(route.kind)) 연결이 끊겼습니다"))
     }
 
     private func end(_ reason: String) {
@@ -727,6 +911,8 @@ public final class SenderSession {
         case .bye:
             let bye = try? JSONWire.decode(Bye.self, from: m.payload)
             pausedByReceiver = bye?.pause ?? false
+            // Not after a disconnect from this Mac
+            askedBack = bye?.relink == true && !stopping && closing == nil
             SenderSession.disowned.formUnion(SenderSession.disownedBy(bye, receiverID: pendingWelcome?.receiverID))
             end(bye?.reason ?? "Receiver stopped")
         default:
@@ -874,7 +1060,6 @@ public final class SenderSession {
 
     private func start(_ config: StreamConfig, typical: StreamConfig?, welcome: Welcome) {
         if purpose == .qualityTest { return startQualityTest(config, typical: typical) }
-        connection?.send(.config, json: config)
         beginStreaming(config, welcome: welcome)
     }
 
@@ -891,7 +1076,7 @@ public final class SenderSession {
             if SenderSession.logStats {
                 FileHandle.standardError.write(Data("[sender] mirroring refused: \(DisplayMirror.lastError ?? "no source display")\n".utf8))
             }
-            return end(L10n.t("macOS did not mirror \(ComputerName.current)'s display", "macOS가 \(ComputerName.current) 디스플레이를 미러링하지 않았습니다"))
+            return stop(reason: L10n.t("macOS did not mirror \(ComputerName.current)'s display", "macOS가 \(ComputerName.current) 디스플레이를 미러링하지 않았습니다"))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak display] in
             guard let display = display else { return }
@@ -963,9 +1148,11 @@ public final class SenderSession {
                                              modes: modes.all, initial: modes.initial, millimeters: PathPolicy.millimeters(welcome),
                                              refresh: config.frameRate)
             } catch {
-                return end("\(error)")
+                return stop(reason: "\(error)")
             }
         }
+        // After the display: a refused one opens no window there
+        connection?.send(.config, json: config)
         if purpose == .display, let display = display {
             role == .mirror ? mirror(into: display) : keepExtended(display)
         }
@@ -974,7 +1161,7 @@ public final class SenderSession {
         do {
             streamer = try FrameStreamer(config: config, capacityGbps: snapshot.capacityGbps, connection: connection)
         } catch {
-            return end("\(error)")
+            return stop(reason: "\(error)")
         }
         self.streamer = streamer
         if SenderSession.logStats {
@@ -1005,15 +1192,22 @@ public final class SenderSession {
 
         let capture = Capture(displayID: displayID, size: config.streamPixels, crop: crop)
         capture.onFrame = { [weak streamer] frame in streamer?.offer(frame) }
-        capture.onStop = { [weak self] reason in DispatchQueue.main.async { self?.end(L10n.t("Screen capture stopped: \(reason)", "화면 캡처가 멈췄습니다: \(reason)")) } }
+        capture.onStop = { [weak self] reason in
+            DispatchQueue.main.async {
+                // Display off under a power-off: the receiver's bye ends it
+                guard let self = self, self.closing == nil else { return }
+                // Failed here, not the link: the receiver need not wait
+                self.stop(reason: L10n.t("Screen capture stopped: \(reason)", "화면 캡처가 멈췄습니다: \(reason)"))
+            }
+        }
         self.capture = capture
         capture.start { [weak self] error in
             DispatchQueue.main.async {
                 // App drops ended sessions; nil self means ended too
                 guard let self = self, !self.ended else { return capture.stop() }
                 if let error = error {
-                    return self.end(L10n.t("Screen capture failed (\(error.localizedDescription)). Check Screen Recording permission.",
-                                           "화면 캡처에 실패했습니다(\(error.localizedDescription)). 화면 기록 권한을 확인하세요."))
+                    return self.stop(reason: L10n.t("Screen capture failed (\(error.localizedDescription)). Check Screen Recording permission.",
+                                                    "화면 캡처에 실패했습니다(\(error.localizedDescription)). 화면 기록 권한을 확인하세요."))
                 }
                 self.activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
                                                                       reason: "Streaming a display")
@@ -1077,6 +1271,7 @@ public final class SenderSession {
     private func startPing() {
         timers.append(DispatchSource.repeating(on: .main, every: 0.5) { [weak self] in
             self?.connection?.send(Message(type: .ping, payload: PingWire.encode(DispatchTime.now().uptimeNanoseconds)))
+            self?.checkRoute()
         })
     }
 

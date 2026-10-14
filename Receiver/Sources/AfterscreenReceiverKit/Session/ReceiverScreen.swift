@@ -221,6 +221,10 @@ public final class ReceiverScreen: StreamDisplay {
         window.powerOff(done: done)
     }
 
+    public func linkWaiting(_ waiting: Bool, detail: String?) {
+        waiting ? window.showWaiting(detail: detail) : window.endWaiting()
+    }
+
     private func releaseAwake() {
         if let a = awake { ProcessInfo.processInfo.endActivity(a) }
         awake = nil
