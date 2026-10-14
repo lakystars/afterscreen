@@ -270,6 +270,8 @@ public struct SenderStats: Codable, Equatable {
     public var videoBitrate: Int?
     /// This second only: the receiver shows the congestion notice
     public var congestionNotice: Bool?
+    /// Debug: the receiver tints the blocks each frame updates
+    public var flashBlocks: Bool?
 
     public init(interface: String?, mtu: Int?, capacityGbps: Double?, throughputBitsPerSecond: Double,
                 latencyMs: Double?, jitterMs: Double, retransmitPercent: Double, cableScore: Int?,
@@ -545,6 +547,11 @@ public enum OutputLevelWire {
 public enum ProbeFlags {
     /// Last probe message; the receiver answers with probeResult
     public static let end: UInt8 = 1
+}
+
+public enum TileFlags {
+    /// Settled tiles sent again in BC7, no screen change
+    public static let refinement: UInt8 = 1
 }
 
 /// videoParams: u8 codec (0 HEVC, 1 H.264), u8 count

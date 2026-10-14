@@ -463,7 +463,7 @@ final class FrameStreamer {
         let packed = packer.pack(frame, geometry: g, compression: compression.next(rawBytes: frame.data.count, queueWasFull: queueWasFull))
         compression.record(rawBytes: packed.lz4In, wireBytes: packed.lz4Out)
         queueWasFull = false
-        connection.send(.tileFrame, parts: packed.parts)
+        connection.send(.tileFrame, flags: out.refinement ? TileFlags.refinement : 0, parts: packed.parts)
         if out.refinement {
             count(FrameCounters(bytes: packed.wireBytes, rawTileBytes: frame.data.count, tileWireBytes: packed.wireBytes,
                                 lossyTiles: encoder.lossyTiles))

@@ -77,7 +77,7 @@ struct HUDContent: Equatable {
             picture.append(Row(label: StatName.videoTarget, value: target))
         }
         picture += [
-            Row(label: StatName.changed, value: s.map { StatValue.changed($0.dirtyPercent) } ?? dash),
+            Row(label: StatName.blocks, value: s.map { StatValue.blocks(percent: $0.dirtyPercent, in: config.streamPixels) } ?? dash),
             Row(label: StatName.compression, value: s.map { StatValue.compression($0.compressionRatio) } ?? dash),
             Row(label: StatName.deband, value: t.deband.map(DebandLabel.name) ?? dash),
             Row(label: StatName.encode, value: s.map { StatValue.encode($0.encodeMs) } ?? dash),

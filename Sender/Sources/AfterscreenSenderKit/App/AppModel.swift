@@ -40,6 +40,10 @@ public final class AppModel: ObservableObject {
     private var reconnect: DiscoveredReceiver?
     /// Uptime of the last receiver request to connect again
     private var askedBackAt = -TimeInterval.infinity
+    /// Debug: the receiver tints sent blocks; off at launch
+    @Published public var flashBlocks = false {
+        didSet { session?.flashBlocks = flashBlocks }
+    }
     /// Faster link relinks went for: kind, last try, tries
     /// Cleared when that link leaves the list
     private var fasterLink: (kind: LinkKind, at: TimeInterval, tries: Int)?
@@ -343,6 +347,7 @@ public final class AppModel: ObservableObject {
             self.scheduleRetry()
             self.refreshLinks()
         }
+        session.flashBlocks = flashBlocks
         self.session = session
         activeReceiver = receiver.name
         lastMessage = nil

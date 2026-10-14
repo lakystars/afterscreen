@@ -220,6 +220,9 @@ private struct LinkChart<Picker: View>: View {
                                      "지금 \(receiver)에 보내는 초당 화면 데이터입니다. 소리와 커서는 빠집니다. 화면이 많이 바뀔수록 커집니다"))
                     value(StatName.latency, StatValue.latency(s.latencyMs), .blue)
                         .help(L10n.t("Round trip to \(receiver) and back over this link", "이 링크로 \(receiver)까지 왕복하는 시간"))
+                    value(StatName.blocks, s.config.map { StatValue.blocks(percent: s.dirtyPercent, in: $0.streamPixels) } ?? StatValue.dash, .primary)
+                        .help(L10n.t("64-pixel blocks that changed per frame, last second's average, of all on screen; video areas included. A still-looking screen with blocks here has something moving, like a spinner",
+                                     "프레임마다 바뀐 64픽셀 블록 수의 최근 1초 평균과 전체 블록 수입니다. 비디오로 보낸 영역도 들어갑니다. 멈춘 것 같은 화면에서도 숫자가 있으면 스피너처럼 움직이는 곳이 있습니다"))
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }
@@ -917,9 +920,9 @@ public struct PopoverView: View {
                                 help: L10n.t("What the video encoder aims for; lowered while the network is busy, raised again after. Data actually sent is the throughput",
                                              "비디오 인코더가 맞추려는 비트레이트입니다. 네트워크가 혼잡하면 낮추고 풀리면 다시 올립니다. 실제로 보낸 양은 전송량을 보세요"))
                         }
-                        Row(StatName.changed, StatValue.changed(s.dirtyPercent),
-                            help: L10n.t("Average share of the screen that changed per frame in the last second, video areas included",
-                                         "최근 1초 동안 프레임마다 바뀐 화면 비율의 평균입니다. 비디오로 보낸 영역도 들어갑니다"))
+                        SwitchRow(title: L10n.t("Show sent blocks on \(receiver)", "\(receiver)에 보낸 블록 표시"), isOn: $model.flashBlocks)
+                            .help(L10n.t("For checking: changed blocks flash red, blocks sent again sharper yellow, video blue. Off when Afterscreen starts again",
+                                         "확인용: 바뀐 블록은 빨강, 선명하게 다시 보낸 블록은 노랑, 비디오는 파랑으로 잠깐 칠합니다. Afterscreen을 다시 실행하면 꺼집니다"))
                         Row(StatName.compression, StatValue.compression(s.compressionRatio),
                             help: L10n.t("Tile data size before and after LZ4; 1.0× when the link has room and LZ4 is skipped. Video not included",
                                          "타일 데이터에 LZ4를 건 전후 크기 비율입니다. 링크에 여유가 있으면 LZ4를 쓰지 않아 1.0×입니다. 비디오는 빠집니다"))

@@ -105,7 +105,7 @@ public enum StatName {
     public static var resolution: String { L10n.t("Transfer resolution", "전송 해상도") }
     public static var motion: String { L10n.t("Motion sent as", "움직임 전송") }
     public static var videoTarget: String { L10n.t("Video target bitrate", "영상 목표 비트레이트") }
-    public static var changed: String { L10n.t("Changed area", "바뀐 영역") }
+    public static var blocks: String { L10n.t("Changed blocks", "바뀐 블록") }
     public static var compression: String { L10n.t("Tile LZ4 ratio", "타일 LZ4 압축률") }
     public static var deband: String { L10n.t("Smooth gradients", "계단 완화") }
     public static var encode: String { L10n.t("Frame processing", "프레임 처리 시간") }
@@ -128,7 +128,14 @@ public enum StatValue {
     public static func encode(_ ms: Double) -> String { ms > 0 ? Format.ms(ms) : dash }
     public static func retransmits(_ percent: Double) -> String { String(format: "%.2f%%", percent) }
     public static func quality(_ score: Int?) -> String { score.map { "\($0) / 100" } ?? dash }
-    public static func changed(_ percent: Double) -> String { String(format: "%.0f%%", percent) }
+    /// Per frame, of all blocks; 1 at least if any
+    public static func blocks(percent: Double, in size: PixelSize) -> String {
+        let total = TileGeometry(width: size.width, height: size.height).tileCount
+        // A peer's stray value stays in range
+        let share = percent.isFinite ? min(100, percent) : 0
+        let changed = share > 0 ? max(1, Int((share / 100 * Double(total)).rounded())) : 0
+        return "\(changed)/\(total)"
+    }
     public static func compression(_ ratio: Double) -> String { ratio > 0 ? String(format: "%.1f×", ratio) : dash }
     public static func resolution(_ p: PixelSize) -> String { "\(p.width)×\(p.height)" }
 

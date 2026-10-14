@@ -95,6 +95,9 @@ public final class SenderSession {
     public private(set) var pausedByReceiver = false
     /// Receiver gave way to this session: connect again
     public private(set) var askedBack = false
+    /// Debug: the receiver tints blocks as they arrive
+    /// Rides the stats: on screen within a second
+    public var flashBlocks = false
 
     let target: DiscoveredReceiver
     /// This Mac's identity and kept keys, for pairing
@@ -1330,6 +1333,7 @@ public final class SenderSession {
         }
         var stats = snapshot.wireStats
         stats.congestionNotice = notice ? true : nil
+        stats.flashBlocks = flashBlocks ? true : nil
         connection?.send(.senderStats, json: stats)
         if SenderSession.logStats { logLine() }
     }

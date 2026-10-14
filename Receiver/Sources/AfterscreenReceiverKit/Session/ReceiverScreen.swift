@@ -142,6 +142,8 @@ public final class ReceiverScreen: StreamDisplay {
     public func prepare(config: StreamConfig) {
         renderer.dropFarewell()
         renderer.reset()
+        // Each session's sender turns it on again
+        setFlashBlocks(false)
         streaming = true
         let id = display
         // Requested first: the panel moves while pipelines build
@@ -151,6 +153,8 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     public func releaseDecodeResources() {
+        // No ticker past the session
+        setFlashBlocks(false)
         // Tile wave closes over the last picture, after texture release
         if effect == .tiles { renderer.keepFarewell() }
         renderer.releaseResources()
@@ -232,8 +236,8 @@ public final class ReceiverScreen: StreamDisplay {
         userActivity = 0
     }
 
-    public func showTiles(_ frame: TileFrame, present: Bool) -> Bool {
-        renderer.applyTiles(frame, present: present)
+    public func showTiles(_ frame: TileFrame, present: Bool, refinement: Bool) -> Bool {
+        renderer.applyTiles(frame, present: present, refinement: refinement)
     }
 
     public func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool {
@@ -267,6 +271,28 @@ public final class ReceiverScreen: StreamDisplay {
 
     public func setDeband(_ level: Deband) {
         renderer.setDeband(level)
+    }
+
+    /// Main queue: redraws a fading tint on a still screen
+    private var flashTicker: DispatchSourceTimer?
+
+    public func setFlashBlocks(_ on: Bool) {
+        guard renderer.setFlash(on) else { return }
+        DispatchQueue.main.async { [weak self] in
+            // The latest state: calls may come from two queues
+            guard let self = self, self.renderer.isFlashOn != (self.flashTicker != nil) else { return }
+            self.flashTicker?.cancel()
+            self.flashTicker = nil
+            guard !self.renderer.isFlashOn else {
+                self.flashTicker = DispatchSource.repeating(on: .main, every: 1.0 / 30) { [weak self] in
+                    guard let self = self, self.renderer.flashNeedsRedraw else { return }
+                    self.onRedrawNeeded?()
+                }
+                return
+            }
+            // Clears the tint; a draw just before counts as recent
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.onRedrawNeeded?() }
+        }
     }
 
     public func showCongestionNotice(wifi: Bool) {

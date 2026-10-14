@@ -96,6 +96,21 @@ final class StreamRenderer {
     /// Time of the last presented picture; under `statsLock`
     /// Effect redraws skip frames the stream already drew
     private var lastDraw: CFTimeInterval = 0
+    /// Debug tint of arriving blocks; under `sizeLock`
+    private var flashOn = false
+    /// Decode queue: per block, seconds after `flashBase` it last
+    /// changed (x), came again sharper (y), showed video (z)
+    private var flashTimes: [SIMD4<Float>] = []
+    private var flashGeometry: TileGeometry?
+    /// Ring of 3, as for the mask
+    private var flashBuffers: [MTLBuffer] = []
+    private var flashRing = 0
+    /// Per session: Float seconds stay fine-grained
+    private var flashBase = CACurrentMediaTime()
+    /// Latest tint start; under `statsLock`
+    private var lastFlash = -CFTimeInterval.infinity
+    /// Tint fades out over this long
+    static let flashFade: CFTimeInterval = 0.5
 
     /// Tile wave: black, opening centre-out, or closing corners-in
     enum Wave: Equatable {
@@ -125,6 +140,10 @@ final class StreamRenderer {
             var reviving: Float = 0
             /// 0 under Reduce Motion: no tile movement
             var motion: Float = 1
+            /// 1: blocks tinted as they arrive
+            var flash: Float = 0
+            /// Seconds after the renderer's flash base
+            var flashNow: Float = 0
         }
 
         /// The picture as sent
@@ -290,6 +309,7 @@ final class StreamRenderer {
     struct Wave {
         float progress; float active; float closing; float tilePixels; float2 size;
         float grey; float breathing; float time; float reviving; float motion;
+        float flash; float flashNow;
     };
     // Share of the wave one tile takes
     // Remainder: start spread from first tile to last
@@ -308,16 +328,22 @@ final class StreamRenderer {
         return saturate((w.progress - waveDistance(t, w) * (1.0 - kWaveTile)) / kWaveTile);
     }
 
+    // Block `t` scaled about its centre; black outside it
+    // Edge blocks are partial: their own extent, as sent
+    static float2 blockUV(float2 px, float2 t, float scale, constant Wave &w, thread float &k) {
+        float2 origin = t * w.tilePixels, cell = min(float2(w.tilePixels), w.size - origin);
+        float2 s = ((px - origin) / cell - 0.5) / scale + 0.5;
+        if (any(s < 0.0) || any(s > 1.0)) { k = 0.0; return px / w.size; }
+        return (origin + s * cell) / w.size;
+    }
+
     // Returns the uv to sample; `k`: pixel brightness
     static float2 waveUV(float2 uv, constant Wave &w, thread float &k) {
         k = 1.0;
         if (w.reviving > 0.0 && w.motion > 0.0) {
             float2 px = uv * w.size;
             float2 t = floor(px / w.tilePixels);
-            float scale = 1.0 - 0.08 * sin(3.14159265 * revived(t, w));
-            float2 s = (px / w.tilePixels - t - 0.5) / scale + 0.5;
-            if (any(s < 0.0) || any(s > 1.0)) { k = 0.0; return uv; }
-            return (t + s) * w.tilePixels / w.size;
+            return blockUV(px, t, 1.0 - 0.08 * sin(3.14159265 * revived(t, w)), w, k);
         }
         if (w.active == 0.0) return uv;
         float2 px = uv * w.size;
@@ -329,11 +355,8 @@ final class StreamRenderer {
         if (open <= 0.0) { k = 0.0; return uv; }
         // Ease-out-back for the size, ease-out for the light
         float x = open - 1.0;
-        float scale = mix(0.6, 1.0, 1.0 + 2.2 * x * x * x + 1.2 * x * x);
         k = 1.0 - x * x;
-        float2 s = (px / w.tilePixels - t - 0.5) / scale + 0.5;
-        if (any(s < 0.0) || any(s > 1.0)) { k = 0.0; return uv; }
-        return (t + s) * w.tilePixels / w.size;
+        return blockUV(px, t, mix(0.6, 1.0, 1.0 + 2.2 * x * x * x + 1.2 * x * x), w, k);
     }
 
     // Waiting for a link: grey, each tile breathing
@@ -348,13 +371,27 @@ final class StreamRenderer {
         return mix(rgb, float3(luma), w.grey * left) * breath;
     }
 
+    // Debug: blocks tinted as they arrive, fading out
+    // Same block grid as the waves above
+    constant float kFlashFade = \(StreamRenderer.flashFade);
+    static float3 flashTint(float3 rgb, float2 uv, constant Wave &w, device const float4 *times) {
+        if (w.flash <= 0.0) return rgb;
+        int2 grid = int2(ceil(w.size / w.tilePixels));
+        int2 t = min(int2(floor(uv * w.size / w.tilePixels)), grid - 1);
+        float3 a = saturate(1.0 - (w.flashNow - times[t.y * grid.x + t.x].xyz) / kFlashFade) * float3(0.55, 0.45, 0.35);
+        rgb = mix(rgb, float3(0.25, 0.55, 1.0), a.z);
+        rgb = mix(rgb, float3(1.0, 0.85, 0.1), a.y);
+        return mix(rgb, float3(1.0, 0.12, 0.08), a.x);
+    }
+
     // BC7 picture or its debanded copy; alpha not streamed
-    fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Wave &w [[buffer(2)]]) {
+    fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Wave &w [[buffer(2)]],
+                                 device const float4 *flash [[buffer(4)]]) {
         bool up = scalingUp(tex, in.uv);
         float k;
         float2 uv = waveUV(in.uv, w, k);
         if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
-        return float4(waitTint(picture(tex, uv, up), in.uv, w) * k, 1.0);
+        return float4(flashTint(waitTint(picture(tex, uv, up), in.uv, w), in.uv, w, flash) * k, 1.0);
     }
 
     // grid: tiles per row, tile edge px, stream width, height
@@ -388,7 +425,8 @@ final class StreamRenderer {
     fragment float4 hybridFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                                    texture2d<float> luma [[texture(1)]], texture2d<float> chroma [[texture(2)]],
                                    device const uchar *mask [[buffer(0)]], constant uint4 &grid [[buffer(1)]],
-                                   constant Wave &w [[buffer(2)]], constant float4 &range [[buffer(3)]]) {
+                                   constant Wave &w [[buffer(2)]], constant float4 &range [[buffer(3)]],
+                                   device const float4 *flash [[buffer(4)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         bool up = scalingUp(tex, in.uv), videoUp = scalingUp(luma, in.uv);
         float k;
@@ -398,7 +436,7 @@ final class StreamRenderer {
         if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) {
             float2 lo = 0.0, hi = 1.0;
             if (up) bc7Bounds(mask, grid, p, uv, lo, hi);
-            return float4(waitTint(picture(tex, uv, up, lo, hi), in.uv, w) * k, 1.0);
+            return float4(flashTint(waitTint(picture(tex, uv, up, lo, hi), in.uv, w), in.uv, w, flash) * k, 1.0);
         }
         // VideoToolbox scales from each texel's top-left source pixel
         // Shift: half a plane texel less half a stream pixel
@@ -410,7 +448,7 @@ final class StreamRenderer {
         float y = ((videoUp ? catmullRom(luma, luv).r : luma.sample(s, luv).r) - range.x) * range.y;
         float2 c = (chroma.sample(s, cuv).rg - range.z) * range.w;
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
-        return float4(waitTint(saturate(rgb), in.uv, w) * k, 1.0);
+        return float4(flashTint(waitTint(saturate(rgb), in.uv, w), in.uv, w, flash) * k, 1.0);
     }
     """
 
@@ -490,8 +528,9 @@ final class StreamRenderer {
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return cb.commit() }
         enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(g.width), height: Double(g.height), znear: 0, zfar: 1))
         bind(enc)
-        var still = Wave.still
+        var still = Wave.still, none = SIMD4<Float>(repeating: 0)
         enc.setFragmentBytes(&still, length: MemoryLayout<Wave.Parameters>.stride, index: 2)
+        enc.setFragmentBytes(&none, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         cb.commit()
@@ -509,7 +548,8 @@ final class StreamRenderer {
         sizeLock.unlock()
         guard let kept = kept, let cb = gpu.queue.makeCommandBuffer() else { return }
         let content = CGSize(width: kept.texture.width, height: kept.texture.height)
-        encodeDraw(cb, content: content, tilePixels: kept.tilePixels) { [tilePipeline = gpu.tilePipeline] enc in
+        // Tint state lives on the decode queue: none here
+        encodeDraw(cb, content: content, tilePixels: kept.tilePixels, flash: false) { [tilePipeline = gpu.tilePipeline] enc in
             enc.setRenderPipelineState(tilePipeline)
             enc.setFragmentTexture(kept.texture, index: 0)
         }
@@ -536,6 +576,9 @@ final class StreamRenderer {
         video = nil
         mask.reset()
         lastGeometry = nil
+        flashTimes = []
+        flashGeometry = nil
+        flashBase = CACurrentMediaTime()
         statsLock.lock()
         stats = (0, 0, 0)
         statsLock.unlock()
@@ -544,6 +587,7 @@ final class StreamRenderer {
     func releaseResources() {
         reset()
         maskBuffers = []
+        flashBuffers = []
         gpu.tileTexture.release()
         gpu.debandCache?.release()
     }
@@ -570,7 +614,8 @@ final class StreamRenderer {
 
     /// false when the tile data fails to decode
     /// Without `present`, the upload commits undrawn
-    func applyTiles(_ frame: TileFrame, present: Bool = true) -> Bool {
+    /// `refinement`: settled blocks sent again sharper
+    func applyTiles(_ frame: TileFrame, present: Bool = true, refinement: Bool = false) -> Bool {
         guard let cb = gpu.queue.makeCommandBuffer() else { return false }
         let start = ProcessInfo.processInfo.systemUptime
         gpu.tileTexture.ensure(geometry: frame.geometry)
@@ -586,6 +631,7 @@ final class StreamRenderer {
         stats.uploadMs = max(0, (ProcessInfo.processInfo.systemUptime - start) * 1000 - decode)
         statsLock.unlock()
         mask.apply(frame.runs, geometry: frame.geometry)
+        markFlash(frame.geometry, runs: frame.runs, refinement: refinement)
         gpu.debandCache?.mark(frame.runs, geometry: frame.geometry)
         lastGeometry = frame.geometry
         sizeLock.lock()
@@ -708,7 +754,75 @@ final class StreamRenderer {
                                                   CVPixelBufferGetWidthOfPlane(pixelBuffer, 1), CVPixelBufferGetHeightOfPlane(pixelBuffer, 1), 1, &chroma)
         guard let l = luma, let c = chroma else { return false }
         video = (l, c)
+        if let g = lastGeometry { markFlash(g, runs: nil, refinement: false) }
         return true
+    }
+
+    // MARK: - Debug tint
+
+    /// Any queue: true when it changed
+    func setFlash(_ on: Bool) -> Bool {
+        sizeLock.lock()
+        defer { sizeLock.unlock() }
+        guard on != flashOn else { return false }
+        flashOn = on
+        return true
+    }
+
+    /// Any queue
+    var isFlashOn: Bool {
+        sizeLock.lock()
+        defer { sizeLock.unlock() }
+        return flashOn
+    }
+
+    /// Any queue: a tint fades with no stream draw lately
+    /// Frames arriving draw it already
+    var flashNeedsRedraw: Bool {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        let now = CACurrentMediaTime()
+        return now - lastFlash < StreamRenderer.flashFade + 0.05 && now - lastDraw > 1.0 / 30
+    }
+
+    /// Decode queue: stamps `runs`, or every video block for nil
+    private func markFlash(_ g: TileGeometry, runs: [TileRun]?, refinement: Bool) {
+        sizeLock.lock()
+        let on = flashOn
+        sizeLock.unlock()
+        guard on else { return }
+        if flashGeometry != g {
+            flashTimes = [SIMD4<Float>](repeating: SIMD4(repeating: -1000), count: g.tileCount)
+            flashGeometry = g
+        }
+        let now = CACurrentMediaTime(), at = Float(now - flashBase)
+        if let runs = runs {
+            for run in runs {
+                let base = run.row * g.tilesX + run.first
+                for t in base..<min(base + run.count, flashTimes.count) {
+                    if run.format == .video { flashTimes[t].z = at } else if refinement { flashTimes[t].y = at } else { flashTimes[t].x = at }
+                }
+            }
+        } else {
+            for (t, v) in mask.bytes.enumerated() where v != 0 && t < flashTimes.count { flashTimes[t].z = at }
+        }
+        statsLock.lock()
+        lastFlash = now
+        statsLock.unlock()
+    }
+
+    /// Decode queue: the stamps in the next ring buffer
+    private func nextFlashBuffer() -> MTLBuffer? {
+        guard !flashTimes.isEmpty else { return nil }
+        let length = flashTimes.count * MemoryLayout<SIMD4<Float>>.stride
+        if flashBuffers.first.map({ $0.length != length }) ?? true {
+            flashBuffers = (0..<3).compactMap { _ in gpu.device.makeBuffer(length: length, options: .storageModeShared) }
+        }
+        guard flashBuffers.count == 3 else { return nil }
+        flashRing = (flashRing + 1) % 3
+        let buffer = flashBuffers[flashRing]
+        flashTimes.withUnsafeBytes { buffer.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        return buffer
     }
 
     private func makeSample(_ avcc: Data, format: CMVideoFormatDescription) -> CMSampleBuffer? {
@@ -728,22 +842,41 @@ final class StreamRenderer {
 
     // MARK: - Draw
 
-    private func encodeDraw(_ cb: MTLCommandBuffer, content: CGSize, tilePixels: Int, bind picture: @escaping (MTLRenderCommandEncoder) -> Void) {
+    /// `flash`: decode-queue draws only, where the stamps live
+    private func encodeDraw(_ cb: MTLCommandBuffer, content: CGSize, tilePixels: Int, flash: Bool = true,
+                            bind picture: @escaping (MTLRenderCommandEncoder) -> Void) {
         sizeLock.lock()
         let size = drawableSize, inset = insetPixels
         let current = wave
+        let flashing = flash && flashOn
         sizeLock.unlock()
         let now = CACurrentMediaTime()
         var params = current?.parameters(at: now, tilePixels: tilePixels, size: content) ?? Wave.still
+        // The tint finds its block without a wave too
+        params.tilePixels = Float(tilePixels)
+        params.size = SIMD2(Float(content.width), Float(content.height))
+        // Stamps for another grid would misplace the tint
+        let sameGrid = flashGeometry.map { $0.width == Int(content.width) && $0.height == Int(content.height) && $0.tilePixels == tilePixels }
+        let stamps = flashing && sameGrid == true ? nextFlashBuffer() : nil
+        if stamps != nil {
+            params.flash = 1
+            params.flashNow = Float(now - flashBase)
+        }
         // An opening or revival run out: the picture as sent
         if let current = current, current.progress(at: now) == nil {
             sizeLock.lock()
             if wave == current { wave = nil }
             sizeLock.unlock()
         }
+        var none = SIMD4<Float>(repeating: 0)
         let bind = { (enc: MTLRenderCommandEncoder) in
             picture(enc)
             enc.setFragmentBytes(&params, length: MemoryLayout<Wave.Parameters>.stride, index: 2)
+            if let stamps = stamps {
+                enc.setFragmentBuffer(stamps, offset: 0, index: 4)
+            } else {
+                enc.setFragmentBytes(&none, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
+            }
         }
         let meter = gpuMeter
         cb.addCompletedHandler { cb in meter.add(seconds: cb.gpuEndTime - cb.gpuStartTime) }

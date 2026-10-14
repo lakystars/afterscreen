@@ -28,7 +28,8 @@ public protocol StreamDisplay: AnyObject {
     /// false when the tile data fails to decode
     /// `present`: draw to the screen; else only update the texture
     /// `present` false when frames queue behind: refresh never limits intake
-    func showTiles(_ frame: TileFrame, present: Bool) -> Bool
+    /// `refinement`: settled blocks sent again sharper
+    func showTiles(_ frame: TileFrame, present: Bool, refinement: Bool) -> Bool
     /// false when the decoder cannot be created
     /// `tenBit`: decodes Main10 to 10-bit planes
     func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool
@@ -50,6 +51,8 @@ public protocol StreamDisplay: AnyObject {
     func followOutput(_ level: OutputLevel?)
     /// Any queue: smoothing of one-level steps, from the next draw
     func setDeband(_ level: Deband)
+    /// Any queue: debug tint of arriving blocks, sender's choice
+    func setFlashBlocks(_ on: Bool)
     /// Main queue: the stream went quiet, or came back
     /// `detail`: why, when known
     func linkWaiting(_ waiting: Bool, detail: String?)
@@ -482,10 +485,10 @@ public final class ReceiverSession {
                 frameFinished()
                 return fail("tile frame before the stream config")
             }
-            let payload = m.payload
+            let payload = m.payload, refinement = m.flags & TileFlags.refinement != 0
             let geometry = TileGeometry(width: config.streamPixels.width, height: config.streamPixels.height)
             decodeQueue.async { [weak self] in
-                self?.decodeTiles(payload, expecting: geometry)
+                self?.decodeTiles(payload, expecting: geometry, refinement: refinement)
                 self?.frameFinished()
             }
         case .videoParams:
@@ -529,6 +532,7 @@ public final class ReceiverSession {
                 $0.throughput.push(stats.throughputBitsPerSecond)
                 if let ms = stats.latencyMs { $0.latency.push(ms) }
             }
+            display?.setFlashBlocks(stats.flashBlocks == true)
             if stats.congestionNotice == true {
                 let wifi = config?.linkKind == .wifi
                 DispatchQueue.main.async { [weak self] in self?.display?.showCongestionNotice(wifi: wifi) }
@@ -731,11 +735,11 @@ public final class ReceiverSession {
                                                                            receiverNonce: h.receiverNonce)))
     }
 
-    private func decodeTiles(_ payload: Data, expecting geometry: TileGeometry) {
+    private func decodeTiles(_ payload: Data, expecting geometry: TileGeometry, refinement: Bool) {
         do {
             let frame = try TileFrame(payload: payload, expecting: geometry)
             received.tick()
-            if display?.showTiles(frame, present: framesInFlight <= 1) == false {
+            if display?.showTiles(frame, present: framesInFlight <= 1, refinement: refinement) == false {
                 queue.async { [weak self] in self?.fail("tile data failed to decode") }
             }
         } catch {

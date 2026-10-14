@@ -62,7 +62,11 @@ final class FakeDisplay: StreamDisplay {
     /// Held until the test calls it: the power-off still playing
     var powerOffDone: (() -> Void)?
     func powerOff(done: @escaping () -> Void) { record { powerOffDone = done } }
-    func showTiles(_ frame: TileFrame, present: Bool) -> Bool {
+    var refinements: [Bool] = []
+    var flashSet: [Bool] = []
+    func setFlashBlocks(_ on: Bool) { record { flashSet.append(on) } }
+    func showTiles(_ frame: TileFrame, present: Bool, refinement: Bool) -> Bool {
+        record { refinements.append(refinement) }
         guard let raw = try? frame.decodeAll() else { return false }
         record { tiles.append(raw); presented.append(present); log.append("tiles") }
         tileGate?.wait()
@@ -207,6 +211,33 @@ final class ReceiverSessionTests: XCTestCase {
         client.send(Message(type: .tileFrame, payload: frame.payload))
         waitForDisplay { [display] in display.tiles.count == 1 }
         XCTAssertEqual(display.tiles.first, frame.raw)
+    }
+
+    /// Debug tint tells sharper re-sends from changes
+    func testARefinementFlagReachesTheDisplay() {
+        let g = TileGeometry(width: 256, height: 128)
+        let frame = tilePayload(g, runs: [TileRun(row: 0, first: 0, count: 1)])
+        client.send(try! JSONWire.message(.config, StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128),
+                                                                 video: nil, linkKind: .loopback)))
+        client.send(Message(type: .tileFrame, payload: frame.payload))
+        client.send(Message(type: .tileFrame, flags: TileFlags.refinement, payload: frame.payload))
+        waitForDisplay { [display] in display.tiles.count == 2 }
+        XCTAssertEqual(display.read { display.refinements }, [false, true])
+    }
+
+    /// The sender's stats carry the debug tint switch
+    func testSenderStatsTurnTheBlockTintOnAndOff() throws {
+        _ = try token()
+        var stats = SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12, throughputBitsPerSecond: 1e6,
+                                latencyMs: 1, jitterMs: 0, retransmitPercent: 0, cableScore: 100,
+                                captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 0.1, compressionRatio: 1,
+                                encodeMs: 2, lossyTiles: 0, cpuPercent: 5, memoryBytes: 1 << 20, gpuPercent: 5)
+        stats.flashBlocks = true
+        client.send(try JSONWire.message(.senderStats, stats))
+        waitForDisplay { [display] in display.flashSet == [true] }
+        stats.flashBlocks = nil
+        client.send(try JSONWire.message(.senderStats, stats))
+        waitForDisplay { [display] in display.flashSet == [true, false] }
     }
 
     func testBrightnessBeforeTheHandshakeIsIgnored() throws {
