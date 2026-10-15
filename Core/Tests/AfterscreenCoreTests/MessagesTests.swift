@@ -23,15 +23,15 @@ final class MessagesTests: XCTestCase {
                                     shown: false))
         try roundTrip(ReceiverStats(receivedFPS: 60, displayedFPS: 59.5, uploadMs: 1.2, decompressMs: 2.3, lateFrames: 1,
                                     cpuPercent: 9.5, memoryBytes: 123_456_789, gpuPercent: 18))
-        try roundTrip(SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
+        try roundTrip(SenderStats(interface: "bridge0", capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
                                   latencyMs: 1.0, jitterMs: 0.1, retransmitPercent: 0, cableScore: 100,
                                   captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 11, compressionRatio: 1,
                                   encodeMs: 2.6, lossyTiles: 0, cpuPercent: 13, memoryBytes: 196 << 20, gpuPercent: 16))
-        try roundTrip(SenderStats(interface: nil, mtu: nil, capacityGbps: nil, throughputBitsPerSecond: 0,
+        try roundTrip(SenderStats(interface: nil, capacityGbps: nil, throughputBitsPerSecond: 0,
                                   latencyMs: nil, jitterMs: 0, retransmitPercent: 0, cableScore: nil,
                                   captureFPS: 0, sentFPS: 0, droppedPerMinute: 0, dirtyPercent: 0, compressionRatio: 0,
                                   encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0))
-        var busy = SenderStats(interface: nil, mtu: nil, capacityGbps: 0.2, throughputBitsPerSecond: 0,
+        var busy = SenderStats(interface: nil, capacityGbps: 0.2, throughputBitsPerSecond: 0,
                                latencyMs: nil, jitterMs: 0, retransmitPercent: 0, cableScore: nil,
                                captureFPS: 0, sentFPS: 0, droppedPerMinute: 0, dirtyPercent: 0, compressionRatio: 0,
                                encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0)
@@ -41,6 +41,17 @@ final class MessagesTests: XCTestCase {
         try roundTrip(Bye(reason: "Stopped on the receiver", pause: true))
         try roundTrip(Bye(reason: "Switching to Ethernet", relink: true))
         try roundTrip(ProbeResult(bytes: 1 << 20, seconds: 0.3))
+    }
+
+    func testStatsFromAnOlderSenderStillRead() throws {
+        let sent = try JSONWire.encode(SenderStats(
+            interface: "bridge0", capacityGbps: 12.4, throughputBitsPerSecond: 754e6, latencyMs: 1, jitterMs: 0.1,
+            retransmitPercent: 0, cableScore: 100, captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 11,
+            compressionRatio: 1, encodeMs: 2.6, lossyTiles: 0, cpuPercent: 13, memoryBytes: 196 << 20, gpuPercent: 16))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: sent) as? [String: Any])
+        json["mtu"] = 1500
+        let stats = try JSONWire.decode(SenderStats.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(stats.interface, "bridge0")
     }
 
     func testByeWithoutRelinkReadsAsAnEnd() throws {

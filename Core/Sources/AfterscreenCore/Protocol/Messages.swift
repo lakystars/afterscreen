@@ -247,7 +247,6 @@ public struct ReceiverStats: Codable, Equatable {
 /// Receiver HUD shows the same numbers as the popover
 public struct SenderStats: Codable, Equatable {
     public var interface: String?
-    public var mtu: Int?
     /// Probe result at session start
     public var capacityGbps: Double?
     public var throughputBitsPerSecond: Double
@@ -273,12 +272,11 @@ public struct SenderStats: Codable, Equatable {
     /// Debug: the receiver tints the blocks each frame updates
     public var flashBlocks: Bool?
 
-    public init(interface: String?, mtu: Int?, capacityGbps: Double?, throughputBitsPerSecond: Double,
+    public init(interface: String?, capacityGbps: Double?, throughputBitsPerSecond: Double,
                 latencyMs: Double?, jitterMs: Double, retransmitPercent: Double, cableScore: Int?,
                 captureFPS: Double, sentFPS: Double, droppedPerMinute: Int, dirtyPercent: Double, compressionRatio: Double,
                 encodeMs: Double, lossyTiles: Int, cpuPercent: Double, memoryBytes: UInt64, gpuPercent: Double) {
         self.interface = interface
-        self.mtu = mtu
         self.capacityGbps = capacityGbps
         self.throughputBitsPerSecond = throughputBitsPerSecond
         self.latencyMs = latencyMs

@@ -61,6 +61,8 @@ final class PopoverFocusKeeper {
 public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    /// Paddings, arrow, popover frame and a bottom gap
+    private static let popoverChrome: CGFloat = 64
     /// Clicks in other apps while the popover is open
     private var outsideClicks: Any?
     private let model = AppModel()
@@ -95,7 +97,10 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
             NSApp.activate(ignoringOtherApps: true)
             self?.popover.contentViewController?.view.window?.makeKey()
         }
-        popover.contentViewController = NSHostingController(rootView: PopoverView(model: model))
+        let content = NSHostingController(rootView: PopoverView(model: model))
+        // Size known before showing; later changes keep the arrow anchored
+        content.sizingOptions = .preferredContentSize
+        popover.contentViewController = content
         // Published fires before the value is stored
         // Read the title on the next run loop turn
         model.$snapshot.map { _ in () }.merge(with: model.settings.$menuBarStats.map { _ in () })
@@ -108,6 +113,10 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
                 let length = self.model.settings.menuBarStats && self.model.snapshot.isStreaming ? self.statsWidth : NSStatusItem.variableLength
                 if self.statusItem.length != length { self.statusItem.length = length }
             }.store(in: &cancellables)
+        // Display changes while the popover stays open
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .sink { [weak self] _ in self?.fitPopover() }
+            .store(in: &cancellables)
         // Code field in front while the iMac shows the code
         model.$pairingWith.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] name in
             if name != nil { self?.showPopover() }
@@ -138,11 +147,20 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
         // Otherwise the first click activates it, dismissing its open menu
         // Transient popover needs activation to see deactivation and close
         NSApp.activate(ignoringOtherApps: true)
+        fitPopover()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
         outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.popover.performClose(nil)
         }
+    }
+
+    /// Room below the menu bar for the popover's content
+    /// Measured from the status item; visibleFrame includes auto-hidden menu bars
+    private func fitPopover() {
+        guard let screen = statusItem.button?.window?.screen ?? NSScreen.main else { return }
+        let top = statusItem.button?.window?.frame.minY ?? screen.visibleFrame.maxY
+        model.popoverHeight = top - screen.visibleFrame.minY - SenderAppDelegate.popoverChrome
     }
 
     public func popoverDidClose(_ notification: Notification) {

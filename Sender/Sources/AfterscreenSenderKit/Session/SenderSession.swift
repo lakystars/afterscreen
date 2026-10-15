@@ -21,7 +21,6 @@ public struct SenderSnapshot {
     public var peer: Welcome?
     public var link: LinkKind?
     public var interface: String?
-    public var mtu: Int?
     public var config: StreamConfig?
     public var capacityGbps: Double?
     public var throughputBitsPerSecond = 0.0
@@ -70,7 +69,7 @@ public struct SenderSnapshot {
 
     /// The numbers the receiver's HUD shows
     public var wireStats: SenderStats {
-        var s = SenderStats(interface: interface, mtu: mtu, capacityGbps: capacityGbps, throughputBitsPerSecond: throughputBitsPerSecond,
+        var s = SenderStats(interface: interface, capacityGbps: capacityGbps, throughputBitsPerSecond: throughputBitsPerSecond,
                     latencyMs: latencyMs, jitterMs: jitterMs, retransmitPercent: retransmitPercent, cableScore: cableScore,
                     captureFPS: captureFPS, sentFPS: sentFPS, droppedPerMinute: droppedPerMinute, dirtyPercent: dirtyPercent,
                     compressionRatio: compressionRatio, encodeMs: encodeMs, lossyTiles: lossyTiles, cpuPercent: cpuPercent,
@@ -363,7 +362,6 @@ public final class SenderSession {
         update {
             $0.link = simulated == nil ? route.kind : .wifi
             $0.interface = route.interface
-            $0.mtu = Interfaces.mtu(route.interface)
             $0.state = L10n.t("Handshake", "연결 확인 중")
         }
         let host = ComputerName.current
@@ -651,7 +649,6 @@ public final class SenderSession {
         update {
             $0.link = SenderSession.simulatedLinkMbps == nil ? kind : .wifi
             $0.interface = route.interface
-            $0.mtu = Interfaces.mtu(route.interface)
             $0.config = h.config ?? $0.config
             $0.config?.linkKind = kind
             $0.missingLink = nil

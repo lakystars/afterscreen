@@ -17,6 +17,8 @@ public final class AppModel: ObservableObject {
     /// Popover's second level, in place of a settings window
     /// The popover outlives closing: its delegate resets this
     @Published public var showsSettings = false
+    /// Popover content stops here; set from its screen
+    @Published public var popoverHeight: CGFloat = 800
     /// Links that reach each receiver now, fastest first
     @Published public private(set) var links: [String: [LinkKind]] = [:]
     /// Default output's volume and mute; nil when fixed, like HDMI

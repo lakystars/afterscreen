@@ -3,21 +3,6 @@ import Foundation
 
 /// Address formatting and local interface lookup for sockets
 public enum Interfaces {
-    /// MTU of interface `name`, from its link-layer address entry
-    public static func mtu(_ name: String) -> Int? {
-        var list: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&list) == 0 else { return nil }
-        defer { freeifaddrs(list) }
-        var cursor = list
-        while let ifa = cursor {
-            defer { cursor = ifa.pointee.ifa_next }
-            guard String(cString: ifa.pointee.ifa_name) == name, ifa.pointee.ifa_addr?.pointee.sa_family == UInt8(AF_LINK),
-                  let data = ifa.pointee.ifa_data else { continue }
-            return Int(data.assumingMemoryBound(to: if_data.self).pointee.ifi_mtu)
-        }
-        return nil
-    }
-
     /// Each interface's name, kernel link type (e.g. IFT_BRIDGE) and flags
     private static func links() -> [(name: String, type: UInt8, flags: UInt32)] {
         var list: UnsafeMutablePointer<ifaddrs>?

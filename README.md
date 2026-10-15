@@ -75,7 +75,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 - Thunderbolt Bridge, USB networking (a Mac-to-Mac USB-C cable), Ethernet (a direct cable or a shared switch) and Wi-Fi.
 - Automatic link choice, or pin one in the menu. The menu lists only links that reach the iMac right now; a pinned link that stops answering stays listed as "not reachable now" while the fastest link takes over. On automatic, a faster link that comes up during a session, such as a cable plugged in while on Wi-Fi, takes the session over; if it fails to connect, it is tried once more 10 seconds later. Choosing a link in the menu moves the session the same way. With a receiver of this version the stream moves between two frames without a reconnect: the iMac's window, the Mac's windows on the extended display and the sound carry on. The new link is measured first, and the path, video layer and bitrate follow it; the transfer resolution stays until the next connection. The new link proves the session's pairing key, or its session token on a link that needs no pairing. An older receiver reconnects briefly instead.
 - When the session's link drops, such as an unplugged cable, the stream continues over the next link that answers, or over the same cable once it is back, and the Mac's windows stay where they are. Meanwhile the iMac holds its picture in grey, each tile breathing slightly, with a "Reconnecting" notice; when the stream returns, colour comes back from the centre outward and every tile is sent once more. If no link answers within 8 seconds, black tiles close in from the edges and the session ends. Reduce Motion keeps the grey picture still.
-- A hint when a Thunderbolt cable has come up as USB, and a hint to raise the MTU to 9000 on Thunderbolt and USB.
+- A hint when a Thunderbolt cable has come up as USB.
 
 **Picture quality**
 - Smooth gradients (off, low, medium, high): browsers often draw dark gradients in 8-bit steps; the iMac fills the steps in on its GPU and shows the in-between values on its 10-bit panel. Edges and text stay exact.
@@ -165,12 +165,6 @@ swift test --package-path Receiver
 
 On the iMac, ⌥⌘I shows a heads-up display and pressing Esc twice stops the session.
 
-For Thunderbolt Bridge, jumbo frames cut the packets per second each Mac handles about sixfold. Set them on both Macs, then reconnect:
-
-```sh
-sudo networksetup -setMTU "Thunderbolt Bridge" 9000
-```
-
 ### Settings
 
 Sender (**Settings** in the menu opens them in place; **Back** returns):
@@ -223,7 +217,6 @@ Connection, Picture, Resources and the iMac's hardware fold at their titles. Fol
 | Latency, Jitter | The kernel's TCP round-trip time on the stream connection, in whole milliseconds, and how much it varies |
 | Retransmits | Packets sent again after a loss in the last second |
 | Link quality | 100, minus penalties for retransmits, jitter and a link slower than the stream needs |
-| MTU | Packet size; 9000 is recommended on Thunderbolt and USB |
 | Use as | Extend: the iMac is a display of its own. Mirror: it shows the Mac's main display |
 | Optimize for | While mirroring. This Mac: it keeps its resolution. iMac: the desktop takes the iMac's resolution |
 | Frames: captured · sent · shown | Frames per second the Mac drew, sent, and the iMac showed; shown counts redraws, so it can pass sent |

@@ -12,7 +12,7 @@ final class HUDContentTests: XCTestCase {
     private func telemetry(sender: Bool = true) -> HUDTelemetry {
         var t = HUDTelemetry()
         if sender {
-            t.sender = SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.98, throughputBitsPerSecond: 754e6,
+            t.sender = SenderStats(interface: "bridge0", capacityGbps: 12.98, throughputBitsPerSecond: 754e6,
                                    latencyMs: 1, jitterMs: 0, retransmitPercent: 0, cableScore: 97,
                                    captureFPS: 60, sentFPS: 59, droppedPerMinute: 2, dirtyPercent: 11, compressionRatio: 1,
                                    encodeMs: 2.6, lossyTiles: 0, cpuPercent: 13, memoryBytes: 196 << 20, gpuPercent: 16)
@@ -40,8 +40,6 @@ final class HUDContentTests: XCTestCase {
         XCTAssertEqual(row(c, "Measured link speed")?.value, "12.98 Gbps")
         XCTAssertEqual(row(c, "Link quality")?.value, "97 / 100")
         XCTAssertEqual(row(c, "Link quality")?.tone, .good)
-        XCTAssertEqual(row(c, "MTU")?.value, "1500 · 9000 recommended")
-        XCTAssertEqual(row(c, "MTU")?.tone, .warn)
         XCTAssertEqual(row(c, "Frames: captured · sent · shown")?.value, "60 · 59 · 58")
         XCTAssertEqual(row(c, "Transfer resolution")?.value, "5120×2880")
         XCTAssertEqual(row(c, "Motion sent as")?.value, "BC7, sharp")
@@ -81,7 +79,6 @@ final class HUDContentTests: XCTestCase {
         XCTAssertEqual(c.status, "Quality test")
         XCTAssertEqual(row(c, "Throughput")?.value, "—")
         XCTAssertEqual(row(c, "Frames: captured · sent · shown")?.value, "— · — · 58")
-        XCTAssertNil(row(c, "MTU"))
         XCTAssertEqual(c.summary, "58 fps")
     }
 

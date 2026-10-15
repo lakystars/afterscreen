@@ -10,6 +10,7 @@ OUT="$ROOT/build"
 VERSION="${AFTERSCREEN_VERSION:-0.1.0}"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 SDK="$(xcrun --show-sdk-path --sdk macosx)"
+SDK_VERSION="$(xcrun --show-sdk-version --sdk macosx)"
 # Current SwiftUI APIs need Swift concurrency, in macOS from 12
 # Receiver bundles the toolchain's back-deployed copy for 10.15, 11
 CONCURRENCY="$(dirname "$(dirname "$(xcrun --find swiftc)")")/lib/swift-5.5/macosx/libswift_Concurrency.dylib"
@@ -76,10 +77,14 @@ bundle() { # app-path executable-src executable-name icon plist-content [dylib..
 }
 
 print "== Sender"
+SENDER_MIN_OS=14.0
 swift build -c release --package-path "$ROOT/Sender" >/dev/null
 SENDER_BIN="$(swift build -c release --package-path "$ROOT/Sender" --show-bin-path)/AfterscreenSender"
-bundle "$OUT/Afterscreen.app" "$SENDER_BIN" Afterscreen Sender \
-    "$(plist Afterscreen io.github.lakystars.afterscreen.sender Afterscreen 14.0 '    <key>NSScreenCaptureUsageDescription</key><string>Afterscreen captures its virtual display to show it on the receiver.</string><key>NSAudioCaptureUsageDescription</key><string>Afterscreen plays the sound of this Mac on the receiver.</string>')"
+# SwiftPM's build engine records the deployment target as SDK
+# SDK below 26 turns off Liquid Glass on macOS 26+
+vtool -set-build-version macos "$SENDER_MIN_OS" "$SDK_VERSION" -replace -output "$OUT/AfterscreenSender" "$SENDER_BIN"
+bundle "$OUT/Afterscreen.app" "$OUT/AfterscreenSender" Afterscreen Sender \
+    "$(plist Afterscreen io.github.lakystars.afterscreen.sender Afterscreen "$SENDER_MIN_OS" '    <key>NSScreenCaptureUsageDescription</key><string>Afterscreen captures its virtual display to show it on the receiver.</string><key>NSAudioCaptureUsageDescription</key><string>Afterscreen plays the sound of this Mac on the receiver.</string>')"
 
 # SwiftPM in current Xcode targets macOS 12+ only
 # Receiver builds with swiftc directly

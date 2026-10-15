@@ -37,12 +37,6 @@ public enum LinkLabel {
         case nil: return nil
         }
     }
-
-    /// Jumbo frames cut Thunderbolt/USB packet rate about sixfold
-    public static func mtuAdvice(mtu: Int?, link: LinkKind?) -> String? {
-        guard let mtu = mtu, mtu < 9000, link == .thunderbolt || link == .usb else { return nil }
-        return L10n.t("9000 recommended", "9000 권장")
-    }
 }
 
 /// How moving areas are sent
@@ -145,12 +139,6 @@ public enum StatValue {
 
     public static func upload(_ uploadMs: Double, decompress decompressMs: Double) -> String {
         "\(Format.ms(uploadMs)) · \(Format.ms(decompressMs))"
-    }
-
-    /// MTU with the jumbo frame advice, where it applies
-    public static func mtu(_ mtu: Int, link: LinkKind?) -> (text: String, advised: Bool) {
-        let advice = LinkLabel.mtuAdvice(mtu: mtu, link: link)
-        return (advice.map { "\(mtu) · \($0)" } ?? "\(mtu)", advice != nil)
     }
 }
 

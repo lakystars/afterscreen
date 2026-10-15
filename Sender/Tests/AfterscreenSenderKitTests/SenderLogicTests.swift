@@ -62,7 +62,6 @@ final class PopoverLabelTests: XCTestCase {
     func testWireStatsCarryThePopoverNumbers() {
         var s = SenderSnapshot()
         s.interface = "bridge0"
-        s.mtu = 1500
         s.capacityGbps = 12.4
         s.throughputBitsPerSecond = 754e6
         s.latencyMs = 1
@@ -79,7 +78,7 @@ final class PopoverLabelTests: XCTestCase {
         s.cpuPercent = 13
         s.memoryBytes = 196 << 20
         s.gpuPercent = 16
-        XCTAssertEqual(s.wireStats, SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
+        XCTAssertEqual(s.wireStats, SenderStats(interface: "bridge0", capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
                                                 latencyMs: 1, jitterMs: 0.2, retransmitPercent: 0.5, cableScore: 97,
                                                 captureFPS: 60, sentFPS: 59, droppedPerMinute: 3, dirtyPercent: 11,
                                                 compressionRatio: 1.4, encodeMs: 2.6, lossyTiles: 4, cpuPercent: 13,

@@ -90,25 +90,84 @@ private struct SeriesShape: Shape {
     }
 }
 
+/// One line of the rows' value font
+private let textRowHeight = ceil(NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: NSFont.systemFontSize)))
+
+/// Controls in a row's value area
+enum RowControls {
+    /// Settings page: system size
+    case regular
+    /// Small pickers, mini switches; rows as tall as needed
+    case small
+    /// As `small`, hanging over text-height rows
+    case overhanging
+}
+
+private struct RowControlsKey: EnvironmentKey {
+    static let defaultValue = RowControls.regular
+}
+
+extension EnvironmentValues {
+    var rowControls: RowControls {
+        get { self[RowControlsKey.self] }
+        set { self[RowControlsKey.self] = newValue }
+    }
+}
+
+/// Sections over a pinned bottom part, within `height`
+/// Sections get their own height or what the bottom leaves
+/// A max-height frame leaves an unproposed height unclamped
+private struct PopoverColumn: Layout {
+    var height: CGFloat
+    var spacing: CGFloat
+
+    private func heights(width: CGFloat?, room: CGFloat, _ subviews: Subviews) -> (top: CGFloat, gap: CGFloat, bottom: CGFloat) {
+        let proposal = ProposedViewSize(width: width, height: nil)
+        let top = subviews.first?.sizeThatFits(proposal).height ?? 0
+        guard subviews.count > 1 else { return (min(top, room), 0, 0) }
+        let bottom = subviews[1].sizeThatFits(proposal).height
+        return (min(top, max(0, room - bottom - spacing)), spacing, bottom)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let h = heights(width: proposal.width, room: height, subviews)
+        let width = proposal.width ?? subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
+        return CGSize(width: width, height: h.top + h.gap + h.bottom)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let h = heights(width: bounds.width, room: height, subviews)
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: h.top))
+        guard subviews.count > 1 else { return }
+        subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + h.top + h.gap),
+                          proposal: ProposedViewSize(width: bounds.width, height: h.bottom))
+    }
+}
+
 /// Label, value, optional trailing view; `help` shows on hover
 private struct Row<Trailing: View>: View {
     var label: String
     var value: String
     /// SF Symbol drawn before the value
     var symbol: String?
-    var valueColor: Color = .primary
+    /// Monospaced for numbers; names read better proportional
+    var mono = true
     var help: String?
     @ViewBuilder var trailing: () -> Trailing
+    @Environment(\.rowControls) private var controls
 
     var body: some View {
+        // Label shrinks, never wraps; long values wrap
         // Wrapped values align trailing; label on the first line
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label).foregroundStyle(.secondary)
-            Spacer()
-            if let symbol = symbol { Image(systemName: symbol).foregroundStyle(valueColor) }
-            Text(value).font(.system(.body, design: .monospaced)).foregroundStyle(valueColor)
+                .lineLimit(1).minimumScaleFactor(0.8).truncationMode(.middle)
+            Spacer(minLength: 0)
+            if let symbol = symbol { Image(systemName: symbol).foregroundStyle(.primary) }
+            Text(value).font(.system(.body, design: mono ? .monospaced : .default)).foregroundStyle(.primary)
                 .multilineTextAlignment(.trailing)
-            trailing()
+            trailing().controlSize(controls == .regular ? .regular : .small)
+                .frame(height: controls == .overhanging ? textRowHeight : nil)
         }
         .font(.system(size: 12))
         .help(help ?? "")
@@ -116,8 +175,8 @@ private struct Row<Trailing: View>: View {
 }
 
 private extension Row where Trailing == EmptyView {
-    init(_ label: String, _ value: String, color: Color = .primary, help: String? = nil) {
-        self.init(label: label, value: value, valueColor: color, help: help) { EmptyView() }
+    init(_ label: String, _ value: String, mono: Bool = true, help: String? = nil) {
+        self.init(label: label, value: value, mono: mono, help: help) { EmptyView() }
     }
 }
 
@@ -434,12 +493,15 @@ private struct LevelSlider: View {
 private struct SwitchRow: View {
     var title: String
     @Binding var isOn: Bool
+    @Environment(\.rowControls) private var controls
 
     var body: some View {
         HStack {
             Text(title).font(.system(size: 12))
             Spacer()
             Toggle(title, isOn: $isOn).labelsHidden().toggleStyle(.switch)
+                .controlSize(controls == .regular ? .regular : .mini)
+                .frame(height: controls == .overhanging ? textRowHeight : nil)
         }
     }
 }
@@ -610,6 +672,7 @@ private struct RoleRows: View {
     @ObservedObject var settings: SenderSettings
     var mac: String
     var receiver: String
+    @Environment(\.rowControls) private var controls
 
     var body: some View {
         Row(label: L10n.t("Use as", "사용 방식"), value: "", help: DisplayRole.help(mac: mac, receiver: receiver)) {
@@ -630,6 +693,8 @@ private struct RoleRows: View {
                 .labelsHidden()
                 .fixedSize()
             }
+            // Under another control: hanging over would touch it
+            .environment(\.rowControls, controls == .overhanging ? .small : controls)
         }
     }
 }
@@ -728,30 +793,58 @@ public struct PopoverView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if model.showsSettings {
-                SettingsPage(model: model) { model.showsSettings = false }
-            } else {
-                if model.isTesting {
-                    testBody
-                } else if model.isActive || model.snapshot.isStreaming {
-                    streamingBody
-                } else {
-                    idleBody
-                }
-                Divider()
-                HStack {
-                    if let message = model.lastMessage {
-                        Text(message).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+        // Taller than the screen: sections scroll, buttons stay
+        PopoverColumn(height: model.popoverHeight, spacing: 10) {
+            ScrollView {
+                Group {
+                    if model.showsSettings {
+                        SettingsPage(model: model) { model.showsSettings = false }
+                    } else if model.isTesting {
+                        testBody
+                    } else if inSession {
+                        // Stat rows share one pitch
+                        streamingBody.environment(\.rowControls, .overhanging)
+                    } else {
+                        idleBody
                     }
-                    Spacer()
-                    Button(L10n.t("Settings", "설정")) { model.showsSettings = true }.keyboardShortcut(",")
-                    Button(L10n.t("Quit", "종료")) { NSApp.terminate(nil) }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Inside: focus rings and the scroller stay clear
+                .padding(.horizontal, 12)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            // A new page starts at the top
+            .id(model.showsSettings)
+            if !model.showsSettings {
+                VStack(alignment: .leading, spacing: 10) {
+                    Divider()
+                    // Session action left, app actions right
+                    if model.isTesting || inSession, let message = model.lastMessage { note(message) }
+                    HStack {
+                        if model.isTesting {
+                            Button(L10n.t("Stop", "중지")) { model.stopTest() }
+                        } else if inSession {
+                            Button(L10n.t("Disconnect", "연결 끊기")) { model.disconnect() }
+                        } else if let message = model.lastMessage {
+                            note(message)
+                        }
+                        Spacer()
+                        Button(L10n.t("Settings", "설정")) { model.showsSettings = true }.keyboardShortcut(",")
+                        Button(L10n.t("Quit", "종료")) { NSApp.terminate(nil) }
+                    }
+                }
+                .padding(.horizontal, 12)
             }
         }
-        .padding(12)
+        .padding(.vertical, 12)
         .frame(width: 380)
+    }
+
+    /// Connecting or streaming; a quality test excluded
+    private var inSession: Bool { !model.isTesting && (model.isActive || model.snapshot.isStreaming) }
+
+    private func note(_ text: String) -> some View {
+        Text(text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
     }
 
     private var idleBody: some View {
@@ -822,10 +915,6 @@ public struct PopoverView: View {
                         "\(model.testReport?.receiver ?? model.receiverName)에 크기별로 몇 초씩 전체가 움직이는 화면이 나옵니다."))
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             if let report = model.testReport { QualityCard(report: report, testing: true) }
-            HStack {
-                Spacer()
-                Button(L10n.t("Stop", "중지")) { model.stopTest() }
-            }
         }
     }
 
@@ -879,12 +968,6 @@ public struct PopoverView: View {
                         Row(StatName.retransmits, StatValue.retransmits(s.retransmitPercent),
                             help: L10n.t("Packets sent again after a loss in the last second; high values point at the cable or Wi-Fi",
                                          "최근 1초 동안 손실로 다시 보낸 패킷 비율. 높으면 케이블이나 Wi-Fi 상태를 의심하세요"))
-                        if let mtu = s.mtu {
-                            let m = StatValue.mtu(mtu, link: s.link)
-                            Row("MTU", m.text, color: m.advised ? .orange : .primary,
-                                help: L10n.t("Packet size; 9000 (jumbo frames) lowers CPU on Thunderbolt and USB",
-                                             "패킷 크기. Thunderbolt·USB에서는 9000(점보 프레임)이 CPU를 덜 씁니다"))
-                        }
                     }
                 }
             }
@@ -969,19 +1052,15 @@ public struct PopoverView: View {
                     SectionTitle(title: L10n.t("\(model.receiverName) hardware", "\(model.receiverName) 하드웨어"), expanded: $showHardware)
                     if showHardware {
                         Box {
-                            Row(L10n.t("Model", "모델"), p.marketingName)
+                            Row(L10n.t("Model", "모델"), p.marketingName, mono: false)
                             Row(L10n.t("Model identifier", "모델 식별자"), p.modelID)
                             Row(L10n.t("Panel", "패널"), StatValue.resolution(p.panelPixels))
-                            Row("GPU", p.gpuNames.joined(separator: ", "))
+                            Row("GPU", p.gpuNames.joined(separator: ", "), mono: false)
                             Row("macOS", p.osVersion)
-                            Row(L10n.t("Hardware video decode", "하드웨어 영상 디코딩"), HardwareDecodeLabel.text(p))
+                            Row(L10n.t("Hardware video decode", "하드웨어 영상 디코딩"), HardwareDecodeLabel.text(p), mono: false)
                         }
                     }
                 }
-            }
-            HStack {
-                Spacer()
-                Button(L10n.t("Disconnect", "연결 끊기")) { model.disconnect() }
             }
         }
     }

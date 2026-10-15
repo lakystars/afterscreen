@@ -47,7 +47,7 @@ struct HUDContent: Equatable {
         let s = t.sender, r = t.receiver
         func fps(_ v: Double?) -> String { v.map { String(format: "%.0f", $0) } ?? dash }
 
-        var connection = [
+        let connection = [
             Row(label: StatName.link, value: "\(LinkLabel.name(config.linkKind)) · \(s?.interface ?? dash)", link: config.linkKind),
             Row(label: StatName.throughput, value: s.map { Format.gbps(bytesPerSecond: $0.throughputBitsPerSecond / 8) } ?? dash,
                 graph: s == nil ? nil : t.throughput.values, graphColor: .green),
@@ -58,10 +58,6 @@ struct HUDContent: Equatable {
             Row(label: StatName.retransmits, value: s.map { StatValue.retransmits($0.retransmitPercent) } ?? dash),
             Row(label: StatName.quality, value: StatValue.quality(s?.cableScore), tone: s?.cableScore.map { tone(ScoreBand($0)) } ?? .plain),
         ]
-        if let mtu = s?.mtu {
-            let m = StatValue.mtu(mtu, link: config.linkKind)
-            connection.append(Row(label: "MTU", value: m.text, tone: m.advised ? .warn : .plain))
-        }
 
         // No stats yet: the layer's bitrate stands in
         let bitrate = s == nil ? config.video?.bitrate : s?.videoBitrate

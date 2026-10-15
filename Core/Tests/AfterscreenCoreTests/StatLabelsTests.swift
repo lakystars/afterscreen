@@ -154,13 +154,6 @@ final class StatLabelsTests: XCTestCase {
         return try XCTUnwrap(rep.colorAt(x: Int(point.x * s), y: Int((image.size.height - point.y) * s))).alphaComponent
     }
 
-    func testJumboFramesAreAdvisedOnWiredLinks() {
-        XCTAssertEqual(LinkLabel.mtuAdvice(mtu: 1500, link: .thunderbolt), "9000 recommended")
-        XCTAssertNil(LinkLabel.mtuAdvice(mtu: 9000, link: .thunderbolt))
-        XCTAssertNil(LinkLabel.mtuAdvice(mtu: 1500, link: .wifi))
-        XCTAssertNil(LinkLabel.mtuAdvice(mtu: nil, link: .usb))
-    }
-
     func testLinkScoreBands() {
         XCTAssertEqual(ScoreBand(100), .good)
         XCTAssertEqual(ScoreBand(80), .good)

@@ -136,11 +136,6 @@ final class TransportTests: XCTestCase {
         client.close(reason: "done")
     }
 
-    func testInterfaceMTU() {
-        XCTAssertEqual(Interfaces.mtu("lo0"), 16384)
-        XCTAssertNil(Interfaces.mtu("nope0"))
-    }
-
     func testConnectFailureReportsError() {
         listener.stop()
         let done = expectation(description: "fail")

@@ -228,7 +228,7 @@ final class ReceiverSessionTests: XCTestCase {
     /// The sender's stats carry the debug tint switch
     func testSenderStatsTurnTheBlockTintOnAndOff() throws {
         _ = try token()
-        var stats = SenderStats(interface: "bridge0", mtu: 1500, capacityGbps: 12, throughputBitsPerSecond: 1e6,
+        var stats = SenderStats(interface: "bridge0", capacityGbps: 12, throughputBitsPerSecond: 1e6,
                                 latencyMs: 1, jitterMs: 0, retransmitPercent: 0, cableScore: 100,
                                 captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 0.1, compressionRatio: 1,
                                 encodeMs: 2, lossyTiles: 0, cpuPercent: 5, memoryBytes: 1 << 20, gpuPercent: 5)
@@ -272,7 +272,7 @@ final class ReceiverSessionTests: XCTestCase {
 
     func testSenderStatsReachTheHUD() throws {
         _ = try token()
-        let stats = SenderStats(interface: "bridge0", mtu: 9000, capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
+        let stats = SenderStats(interface: "bridge0", capacityGbps: 12.4, throughputBitsPerSecond: 754e6,
                                 latencyMs: 1, jitterMs: 0, retransmitPercent: 0, cableScore: 100,
                                 captureFPS: 60, sentFPS: 60, droppedPerMinute: 0, dirtyPercent: 11, compressionRatio: 1,
                                 encodeMs: 2.6, lossyTiles: 0, cpuPercent: 13, memoryBytes: 1 << 20, gpuPercent: 16)
@@ -290,7 +290,7 @@ final class ReceiverSessionTests: XCTestCase {
         let config = StreamConfig(path: .tile, streamPixels: PixelSize(width: 256, height: 128), video: nil, linkKind: .wifi)
         client.send(try JSONWire.message(.config, config))
         waitForDisplay { [display] in display.begun == [config] }
-        var stats = SenderStats(interface: "en0", mtu: 1500, capacityGbps: 0.2, throughputBitsPerSecond: 40e6,
+        var stats = SenderStats(interface: "en0", capacityGbps: 0.2, throughputBitsPerSecond: 40e6,
                                 latencyMs: 30, jitterMs: 5, retransmitPercent: 0, cableScore: nil,
                                 captureFPS: 60, sentFPS: 55, droppedPerMinute: 0, dirtyPercent: 30, compressionRatio: 1,
                                 encodeMs: 20, lossyTiles: 0, cpuPercent: 13, memoryBytes: 1 << 20, gpuPercent: 16)
