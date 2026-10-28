@@ -16,6 +16,30 @@ enum StatusButton {
     }
 }
 
+/// Why the app quits, from the Apple Event being handled
+/// No quit event: the Quit button
+enum QuitCause: Equatable {
+    /// `other`: log out, a script or another app
+    case user, shutDown, restart, other
+
+    init(event: NSAppleEventDescriptor?) {
+        guard let event = event, event.eventClass == kCoreEventClass, event.eventID == kAEQuitApplication else {
+            self = .user
+            return
+        }
+        switch event.attributeDescriptor(forKeyword: kAEQuitReason)?.enumCodeValue {
+        case kAEShutDown?, kAEShowShutdownDialog?: self = .shutDown
+        case kAERestart?, kAEShowRestartDialog?: self = .restart
+        default: self = .other
+        }
+    }
+
+    /// The receiver follows the end setting; a restart comes back
+    var powersReceiver: Bool { self == .user || self == .shutDown }
+
+    static var current: QuitCause { QuitCause(event: NSAppleEventManager.shared().currentAppleEvent) }
+}
+
 /// Restores open popover focus after display changes
 /// Virtual display add/remove moves focus off the app
 /// Next click then only reactivates it, closing its open menu
@@ -77,7 +101,9 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard model.isActive else { return .terminateNow }
         // Async: a session that ends at once replies after terminateLater
-        model.closeForQuit { DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) } }
+        model.closeForQuit(powerReceiver: QuitCause.current.powersReceiver) {
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
         return .terminateLater
     }
 

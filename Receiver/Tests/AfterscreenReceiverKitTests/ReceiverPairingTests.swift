@@ -13,6 +13,8 @@ final class ReceiverPairingTests: XCTestCase {
     private let limiter = PairingLimiter()
     private var codes: [String?] = []
     private var required = true
+    /// Admitted over a point-to-point cable, as the app judges
+    private var cable = false
     private var proofTimeout: TimeInterval = 10
     private var inbox: [Message] = []
     private var waiter: XCTestExpectation?
@@ -35,6 +37,7 @@ final class ReceiverPairingTests: XCTestCase {
             }
             auth.proofTimeout = proofTimeout
             let session = ReceiverSession(connection: c, hardware: welcome, display: display, idleTimeout: 3, auth: auth)
+            session.cable = cable
             // Handovers arrive over links that need pairing
             session.admission = { _ in .pairing }
             queue.sync { sessions.append(session) }
@@ -227,6 +230,69 @@ final class ReceiverPairingTests: XCTestCase {
         client.send(try JSONWire.message(.auth, AuthProof(mac: Data(count: 32))))
         wait(for: [e], timeout: 0.4)
         XCTAssertFalse(streams(client), "a proof answers no pairing challenge")
+    }
+
+    /// Power-off to black, then the session's end
+    private func powerOff(_ client: Connection, _ bye: Bye) throws -> ReceiverSession {
+        let session = try XCTUnwrap(queue.sync { sessions.first })
+        let ended = expectation(description: "ended")
+        session.onEnd = { _ in ended.fulfill() }
+        client.send(try JSONWire.message(.powerOff, bye))
+        let deadline = Date().addingTimeInterval(1)
+        while display.read({ display.powerOffDone == nil }), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        try XCTUnwrap(display.read { display.powerOffDone })()
+        wait(for: [ended], timeout: 3)
+        return session
+    }
+
+    func testAPairedSendersPowerRequestIsKept() throws {
+        let key = Pairing.nonce() + Pairing.nonce()
+        store.save(key, for: "mac", name: "MBP")
+        let client = try connect()
+        let nonce = Pairing.nonce()
+        let w = try JSONWire.decode(Welcome.self, from: try reply(client, try hello(paired: true, nonce: nonce)).payload)
+        let t = Pairing.Transcript(senderID: "mac", receiverID: "imac", senderNonce: nonce, receiverNonce: try XCTUnwrap(w.auth).nonce)
+        _ = try reply(client, try JSONWire.message(.auth, AuthProof(mac: Pairing.proof(key: key, role: .sender, transcript: t))))
+        XCTAssertTrue(streams(client))
+        XCTAssertEqual(try powerOff(client, Bye(reason: "Stopped on MBP", power: .shutDown)).powerRequest, .shutDown)
+    }
+
+    func testTheSendersFallbackByeKeepsItsPowerRequest() throws {
+        let key = Pairing.nonce() + Pairing.nonce()
+        store.save(key, for: "mac", name: "MBP")
+        let client = try connect()
+        let nonce = Pairing.nonce()
+        let w = try JSONWire.decode(Welcome.self, from: try reply(client, try hello(paired: true, nonce: nonce)).payload)
+        let t = Pairing.Transcript(senderID: "mac", receiverID: "imac", senderNonce: nonce, receiverNonce: try XCTUnwrap(w.auth).nonce)
+        _ = try reply(client, try JSONWire.message(.auth, AuthProof(mac: Pairing.proof(key: key, role: .sender, transcript: t))))
+        XCTAssertTrue(streams(client))
+        let session = try XCTUnwrap(queue.sync { sessions.first })
+        let ended = expectation(description: "ended")
+        session.onEnd = { _ in ended.fulfill() }
+        // Power-off still playing: the sender gives up and says bye
+        client.send(try JSONWire.message(.powerOff, Bye(reason: "Stopped on MBP", power: .sleep)))
+        client.send(try JSONWire.message(.bye, Bye(reason: "Stopped on MBP")))
+        wait(for: [ended], timeout: 3)
+        XCTAssertEqual(session.powerRequest, .sleep)
+    }
+
+    func testAnUnpairedSendersPowerRequestIsIgnored() throws {
+        required = false
+        let client = try connect()
+        _ = try reply(client, try hello(paired: false, nonce: Pairing.nonce()))
+        XCTAssertTrue(streams(client), "pairing off on this network")
+        let session = try powerOff(client, Bye(reason: "Stopped on MBP", power: .shutDown))
+        XCTAssertNil(session.powerRequest)
+        XCTAssertEqual(session.askedPower, .shutDown, "kept for the log")
+    }
+
+    func testACabledSendersPowerRequestIsKept() throws {
+        required = false
+        cable = true
+        let client = try connect()
+        _ = try reply(client, try hello(paired: false, nonce: Pairing.nonce()))
+        XCTAssertTrue(streams(client), "a cable streams without pairing")
+        XCTAssertEqual(try powerOff(client, Bye(reason: "Stopped on MBP", power: .shutDown)).powerRequest, .shutDown)
     }
 
     func testAPairedMacProvesItsKeyEvenOverACable() throws {

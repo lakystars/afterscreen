@@ -338,6 +338,14 @@ private struct SettingsPage: View {
                         } ?? L10n.t("Connects to the receiver you last connected to", "마지막으로 연결한 수신기에 연결합니다"))
                     SwitchRow(title: L10n.t("Open at login", "로그인 시 열기"),
                               isOn: Binding(get: { settings.launchAtLogin }, set: { settings.launchAtLogin = $0 }))
+                    Row(label: L10n.t("Receiver power after disconnecting", "연결 끊은 뒤 수신기 전원"), value: "", help: ReceiverPower.help(mac: model.macName)) {
+                        Picker("", selection: $settings.endPower) {
+                            ForEach(ReceiverPower.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                    }
                 }
             }
             Card(title: L10n.t("Menu bar", "메뉴 막대")) {
@@ -824,7 +832,7 @@ public struct PopoverView: View {
                         if model.isTesting {
                             Button(L10n.t("Stop", "중지")) { model.stopTest() }
                         } else if inSession {
-                            Button(L10n.t("Disconnect", "연결 끊기")) { model.disconnect() }
+                            Button(L10n.t("Disconnect", "연결 끊기")) { model.disconnect(powerReceiver: true) }
                         } else if let message = model.lastMessage {
                             note(message)
                         }

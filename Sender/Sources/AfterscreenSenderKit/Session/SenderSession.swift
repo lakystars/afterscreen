@@ -389,11 +389,12 @@ public final class SenderSession {
     /// Main queue: a disconnect the iMac plays out
     /// Picture and sound stay live through its power-off
     /// Ends at its bye, as the screen turns black
-    public func close(reason: String = SenderSession.stoppedHere) {
+    /// `power`: the receiver Mac's state afterwards
+    public func close(reason: String = SenderSession.stoppedHere, power: ReceiverPower? = nil) {
         guard closing == nil else { return }
         guard snapshot.isStreaming, purpose == .display, let c = connection, !c.isClosed else { return stop(reason: reason) }
         closing = reason
-        c.send(.powerOff, json: Bye(reason: reason))
+        c.send(.powerOff, json: Bye(reason: reason, power: power))
         // Longest power-off is 0.85 s; a silent receiver ends anyway
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.stop(reason: reason) }
     }

@@ -136,3 +136,24 @@ final class ReceiverSettingsTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
     }
 }
+
+final class AfterSessionTests: XCTestCase {
+    private func action(streamed: Bool = true, relinking: Bool = false, stoppedHere: Bool = false,
+                        request: ReceiverPower? = nil, onDisconnect: ReceiverSettings.OnDisconnect = .showDesktop) -> AfterSession {
+        AfterSession.action(streamed: streamed, relinking: relinking, stoppedHere: stoppedHere, request: request, onDisconnect: onDisconnect)
+    }
+
+    func testTheSendersRequestOutranksTheDisplaySetting() {
+        XCTAssertEqual(action(request: .shutDown, onDisconnect: .sleepDisplay), .shutDown)
+        XCTAssertEqual(action(request: .sleep), .sleep)
+        XCTAssertEqual(action(request: .keepOn, onDisconnect: .sleepDisplay), .sleepDisplay)
+        XCTAssertEqual(action(onDisconnect: .sleepDisplay), .sleepDisplay)
+        XCTAssertEqual(action(), .nothing)
+    }
+
+    func testOnlyAStreamThatEndedForGoodPowersDown() {
+        XCTAssertEqual(action(streamed: false, request: .shutDown, onDisconnect: .sleepDisplay), .nothing, "early failures retry")
+        XCTAssertEqual(action(relinking: true, request: .shutDown, onDisconnect: .sleepDisplay), .nothing, "the sender comes right back")
+        XCTAssertEqual(action(stoppedHere: true, request: .shutDown, onDisconnect: .sleepDisplay), .nothing, "stopped on this Mac: desktop stays")
+    }
+}

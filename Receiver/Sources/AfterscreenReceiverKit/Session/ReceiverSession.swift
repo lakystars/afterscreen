@@ -146,6 +146,13 @@ public final class ReceiverSession {
     /// The sender said it reconnects at once
     /// Read on main once the session has ended
     public var relinking: Bool { peerBye?.relink ?? false }
+    /// Main queue: the current link is a point-to-point cable
+    public var cable = false
+    /// Sender's power request, from a proven key or cable
+    /// Read on main once the session has ended
+    public var powerRequest: ReceiverPower? { sessionKey != nil || cable ? askedPower : nil }
+    /// As sent, trusted or not: for the log
+    public var askedPower: ReceiverPower? { peerBye?.power }
     /// The sender's bye, kept for its reason
     /// The close right after it reports only "closed by peer"
     private var peerBye: Bye?
@@ -552,7 +559,9 @@ public final class ReceiverSession {
         case .ping:
             connection.send(Message(type: .pong, payload: m.payload))
         case .bye:
-            let bye = (try? JSONWire.decode(Bye.self, from: m.payload)) ?? Bye(reason: "sender stopped")
+            var bye = (try? JSONWire.decode(Bye.self, from: m.payload)) ?? Bye(reason: "sender stopped")
+            // A slow power-off's fallback bye keeps its request
+            bye.power = bye.power ?? peerBye?.power
             peerBye = bye
             connection.close(reason: bye.reason)
         case .powerOff:

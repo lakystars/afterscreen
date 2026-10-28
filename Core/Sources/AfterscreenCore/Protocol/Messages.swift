@@ -296,6 +296,11 @@ public struct SenderStats: Codable, Equatable {
     }
 }
 
+/// The receiver Mac once a session ends
+public enum ReceiverPower: String, Codable, CaseIterable {
+    case keepOn, sleep, shutDown
+}
+
 public struct Bye: Codable, Equatable {
     public var reason: String
     /// Stopped by the receiver's user: no automatic reconnect
@@ -305,12 +310,15 @@ public struct Bye: Codable, Equatable {
     public var relink: Bool
     /// Keys disagree: the sender drops its own, then pairs anew
     public var repair: Bool?
+    /// Sender's request; heeded from paired or cabled senders
+    public var power: ReceiverPower?
 
-    public init(reason: String, pause: Bool = false, relink: Bool = false, repair: Bool? = nil) {
+    public init(reason: String, pause: Bool = false, relink: Bool = false, repair: Bool? = nil, power: ReceiverPower? = nil) {
         self.reason = reason
         self.pause = pause
         self.relink = relink
         self.repair = repair
+        self.power = power
     }
 
     public init(from decoder: Decoder) throws {
@@ -319,6 +327,8 @@ public struct Bye: Codable, Equatable {
         pause = try c.decodeIfPresent(Bool.self, forKey: .pause) ?? false
         relink = try c.decodeIfPresent(Bool.self, forKey: .relink) ?? false
         repair = try c.decodeIfPresent(Bool.self, forKey: .repair)
+        // A newer sender's request: ignored, the bye still read
+        power = try? c.decodeIfPresent(ReceiverPower.self, forKey: .power)
     }
 }
 

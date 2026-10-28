@@ -94,6 +94,7 @@ The receiver announces itself over Bonjour (`_afterscreen._tcp`). On connect, th
 - Open at login, on both Macs.
 - Pairing on shared networks: over Ethernet and Wi-Fi a receiver takes only Macs paired with it, so an office full of receivers stays each person's own. The first connection shows a 6-digit code on the iMac's screen to type on the Mac; after that both sides prove a key kept in the keychain, the Mac checking the iMac as well. Thunderbolt and USB cables connect without pairing. A wrong code shakes the boxes and can be typed again; five lock pairing for ten minutes, each later lock doubling up to a day.
 - The receiver can refuse Wi-Fi connections, and can turn its display off when the sender disconnects.
+- The sender can put the receiver to sleep or shut it down when you disconnect, quit or shut the Mac down, as a display turns off with its computer.
 - A live telemetry menu: link, throughput, measured link speed, latency, jitter, retransmits, link quality, frame rates, resolution, how moving areas are sent, CPU, memory and GPU on both Macs.
 - An optional frame rate and throughput readout in the menu bar, at a fixed width so the menu does not shift.
 
@@ -177,6 +178,7 @@ Sender (**Settings** in the menu opens them in place; **Back** returns):
 | 120 fps (experimental) | Off by default. On Thunderbolt to a receiver at 120 Hz or more, 120 fps when the encoder keeps up; the menu says which rate was chosen and why. |
 | Connect automatically | Connects to the receiver you last connected to. **Disconnect** pauses it until that receiver goes away. |
 | Open at login | Starts Afterscreen at login. |
+| Receiver after disconnecting | Stays on (default), sleeps or shuts down when you click **Disconnect**, quit Afterscreen or shut this Mac down. A restart, log out, sleep or dropped link leaves it on. A receiver of this version or later follows it when paired or on a Thunderbolt or USB cable. Shutting down needs **Allow…** in the receiver's settings; until then the receiver sleeps. Apps there may ask to save first. |
 | Arrange Displays… | Opens System Settings for arrangement and the main display. |
 | Menu bar | The icon only (default), or also the frame rate and throughput. |
 | Paired receivers | Each with Remove. |
@@ -193,7 +195,8 @@ Receiver (**Settings…** in its menu):
 | Accept connections over | Any network, or cables only (Wi-Fi refused). |
 | Show on | Automatic (this Mac's own panel first), or one of the connected screens. |
 | Switch the screen to its 1:1 resolution while streaming | On by default: a scaled resolution blurs the stream by resampling it twice. |
-| When the sender disconnects | Show this Mac's desktop, or turn the display off. A stop on the receiver always shows the desktop. |
+| When the sender disconnects | Show this Mac's desktop, or turn the display off. A stop on the receiver always shows the desktop. The sender's sleep or shut down request comes first. |
+| Shut down when the sender asks | **Allow…** asks macOS once for consent to shut this Mac down. Until then the sender's request puts it to sleep. |
 
 ### Quality test
 

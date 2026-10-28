@@ -53,8 +53,9 @@ $5
 PLIST
 }
 
-bundle() { # app-path executable-src executable-name icon plist-content [dylib...]
-    local app="$1" exe="$3"
+bundle() { # app-path executable-src executable-name icon plist-content entitlements-or-empty [dylib...]
+    local app="$1" exe="$3" entitlements=()
+    [[ -n "$6" ]] && entitlements=(--entitlements "$6")
     rm -rf "$app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "$2" "$app/Contents/MacOS/$exe"
@@ -63,7 +64,7 @@ bundle() { # app-path executable-src executable-name icon plist-content [dylib..
     strip "$app/Contents/MacOS/$exe"
     print -r -- "$5" > "$app/Contents/Info.plist"
     print -n "APPL????" > "$app/Contents/PkgInfo"
-    shift 5
+    shift 6
     local runtime=(--options runtime)
     # Nested code signed before the app
     for lib in "$@"; do
@@ -73,7 +74,7 @@ bundle() { # app-path executable-src executable-name icon plist-content [dylib..
         # No Team ID: library validation would refuse the copy
         if codesign -dv "$app/Contents/Frameworks/${lib:t}" 2>&1 | grep -q '^TeamIdentifier=not set'; then runtime=(); fi
     done
-    codesign --force "${runtime[@]}" --timestamp=none --sign "$IDENTITY" "$app" >/dev/null
+    codesign --force "${runtime[@]}" "${entitlements[@]}" --timestamp=none --sign "$IDENTITY" "$app" >/dev/null
 }
 
 print "== Sender"
@@ -84,7 +85,7 @@ SENDER_BIN="$(swift build -c release --package-path "$ROOT/Sender" --show-bin-pa
 # SDK below 26 turns off Liquid Glass on macOS 26+
 vtool -set-build-version macos "$SENDER_MIN_OS" "$SDK_VERSION" -replace -output "$OUT/AfterscreenSender" "$SENDER_BIN"
 bundle "$OUT/Afterscreen.app" "$OUT/AfterscreenSender" Afterscreen Sender \
-    "$(plist Afterscreen io.github.lakystars.afterscreen.sender Afterscreen "$SENDER_MIN_OS" '    <key>NSScreenCaptureUsageDescription</key><string>Afterscreen captures its virtual display to show it on the receiver.</string><key>NSAudioCaptureUsageDescription</key><string>Afterscreen plays the sound of this Mac on the receiver.</string>')"
+    "$(plist Afterscreen io.github.lakystars.afterscreen.sender Afterscreen "$SENDER_MIN_OS" '    <key>NSScreenCaptureUsageDescription</key><string>Afterscreen captures its virtual display to show it on the receiver.</string><key>NSAudioCaptureUsageDescription</key><string>Afterscreen plays the sound of this Mac on the receiver.</string>')" ""
 
 # SwiftPM in current Xcode targets macOS 12+ only
 # Receiver builds with swiftc directly
@@ -107,8 +108,10 @@ build_receiver x86_64 10.15
 print "== Receiver (arm64, macOS 11)"
 build_receiver arm64 11.0
 lipo -create "$OUT/receiver-x86_64/AfterscreenReceiver" "$OUT/receiver-arm64/AfterscreenReceiver" -output "$OUT/AfterscreenReceiver-universal"
+# Hardened runtime sends shut down Apple Events with entitlements
 bundle "$OUT/Afterscreen Receiver.app" "$OUT/AfterscreenReceiver-universal" "Afterscreen Receiver" Receiver \
-    "$(plist 'Afterscreen Receiver' io.github.lakystars.afterscreen.receiver 'Afterscreen Receiver' 10.15 '    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>')" "$CONCURRENCY"
+    "$(plist 'Afterscreen Receiver' io.github.lakystars.afterscreen.receiver 'Afterscreen Receiver' 10.15 '    <key>NSSupportsAutomaticGraphicsSwitching</key><true/><key>NSAppleEventsUsageDescription</key><string>Afterscreen Receiver shuts this Mac down when the sender asks, as allowed in its settings.</string>')" \
+    "$ROOT/scripts/Receiver.entitlements" "$CONCURRENCY"
 
 codesign --verify --strict --deep "$OUT/Afterscreen.app" "$OUT/Afterscreen Receiver.app"
 print "== Done"

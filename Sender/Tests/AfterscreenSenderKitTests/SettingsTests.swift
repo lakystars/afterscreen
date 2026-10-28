@@ -147,6 +147,44 @@ final class SenderSettingsTests: XCTestCase {
         again.mirrorFit = .iMac
         XCTAssertEqual(SenderSettings(defaults: defaults).mirrorFit, .iMac)
     }
+
+    func testTheReceiverStaysOnUnlessAsked() {
+        let settings = SenderSettings(defaults: defaults)
+        XCTAssertEqual(settings.endPower, .keepOn)
+        XCTAssertNil(settings.endPower.request, "keeping on asks nothing of an older receiver")
+        settings.endPower = .shutDown
+        XCTAssertEqual(SenderSettings(defaults: defaults).endPower, .shutDown)
+        XCTAssertEqual(ReceiverPower.sleep.request, .sleep)
+    }
+}
+
+final class QuitCauseTests: XCTestCase {
+    private func quitEvent(reason: OSType?) -> NSAppleEventDescriptor {
+        let event = NSAppleEventDescriptor(eventClass: kCoreEventClass, eventID: kAEQuitApplication, targetDescriptor: nil,
+                                           returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+        if let reason = reason { event.setAttribute(NSAppleEventDescriptor(enumCode: reason), forKeyword: kAEQuitReason) }
+        return event
+    }
+
+    func testTheQuitEventsReasonNamesTheCause() {
+        XCTAssertEqual(QuitCause(event: nil), .user, "the Quit button sends no event")
+        XCTAssertEqual(QuitCause(event: quitEvent(reason: nil)), .other, "a script or another app")
+        XCTAssertEqual(QuitCause(event: quitEvent(reason: kAEShutDown)), .shutDown)
+        XCTAssertEqual(QuitCause(event: quitEvent(reason: kAEShowShutdownDialog)), .shutDown)
+        XCTAssertEqual(QuitCause(event: quitEvent(reason: kAERestart)), .restart)
+        XCTAssertEqual(QuitCause(event: quitEvent(reason: kAEShowRestartDialog)), .restart)
+        XCTAssertEqual(QuitCause(event: quitEvent(reason: kAEReallyLogOut)), .other)
+        XCTAssertEqual(QuitCause(event: NSAppleEventDescriptor(eventClass: kCoreEventClass, eventID: kAEOpenDocuments, targetDescriptor: nil,
+                                                               returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))),
+                       .user, "another event in flight is no quit")
+    }
+
+    func testOnlyAQuitByHandOrAShutDownPowersTheReceiver() {
+        XCTAssertTrue(QuitCause.user.powersReceiver)
+        XCTAssertTrue(QuitCause.shutDown.powersReceiver)
+        XCTAssertFalse(QuitCause.restart.powersReceiver, "this Mac comes right back")
+        XCTAssertFalse(QuitCause.other.powersReceiver)
+    }
 }
 
 final class AutoConnectTests: XCTestCase {

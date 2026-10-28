@@ -41,6 +41,25 @@ public enum DisplayRole: String, CaseIterable, Identifiable {
     }
 }
 
+/// Receiver Mac after Disconnect, a quit or shut down
+extension ReceiverPower {
+    public var title: String {
+        switch self {
+        case .keepOn: return L10n.t("Stays on", "켜 두기")
+        case .sleep: return L10n.t("Sleeps", "잠자기")
+        case .shutDown: return L10n.t("Shuts down", "시스템 종료")
+        }
+    }
+
+    /// Sent with the power-off; keeping on sends none
+    var request: ReceiverPower? { self == .keepOn ? nil : self }
+
+    public static func help(mac: String) -> String {
+        L10n.t("Applies when you click Disconnect, quit Afterscreen or shut down \(mac). A restart, log out, sleep or dropped link leaves the receiver on. A receiver of this version or later follows it when paired or on a Thunderbolt or USB cable. Shutting down needs Allow… in the receiver's settings; until then the receiver sleeps",
+               "연결 끊기를 누를 때, Afterscreen을 종료할 때, \(mac)을(를) 시스템 종료할 때 적용됩니다. 재시동, 로그아웃, 잠자기, 링크 끊김에는 수신기를 켜 둡니다. 이 버전 이상의 수신기는 페어링됐거나 Thunderbolt·USB 케이블로 연결됐을 때 따릅니다. 시스템 종료는 수신기 설정의 허용… 버튼으로 허락해야 하며, 그 전에는 잠자기로 대신합니다")
+    }
+}
+
 /// Mirror's shape, as macOS's "Optimize for"
 /// mac: its own resolution, letterboxed on the receiver
 /// iMac: the desktop takes the receiver's shape; the Mac letterboxes
@@ -111,6 +130,7 @@ public final class SenderSettings: ObservableObject {
         static let mirrorFit = "mirrorFit"
         static let brightnessFollows = "brightnessFollows"
         static let receiverBrightness = "receiverBrightness"
+        static let endPower = "endPower"
     }
 
     /// This Mac's lasting identity, made once; receivers pair with it
@@ -160,6 +180,11 @@ public final class SenderSettings: ObservableObject {
     /// Experiment: 120 fps on Thunderbolt if the encoder keeps up
     @Published public var highRefresh: Bool {
         didSet { defaults.set(highRefresh, forKey: Key.highRefresh) }
+    }
+
+    /// Receiver Mac when a session ends on purpose
+    @Published public var endPower: ReceiverPower {
+        didSet { defaults.set(endPower.rawValue, forKey: Key.endPower) }
     }
 
     /// Frame rate and throughput next to the menu bar icon
@@ -216,6 +241,7 @@ public final class SenderSettings: ObservableObject {
         deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
         brightnessFollows = defaults.object(forKey: Key.brightnessFollows) as? Bool ?? true
         receiverBrightness = defaults.object(forKey: Key.receiverBrightness) as? Double ?? 0.5
+        endPower = defaults.enumValue(forKey: Key.endPower, default: .keepOn)
         language = defaults.enumValue(forKey: Key.language, default: .system)
         L10n.language = language
     }

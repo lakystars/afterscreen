@@ -357,18 +357,19 @@ public final class AppModel: ObservableObject {
     }
 
     /// Pauses automatic connection until the receiver goes away
-    public func disconnect() {
+    /// `powerReceiver`: the receiver Mac follows the end setting
+    public func disconnect(powerReceiver: Bool = false) {
         auto.userDisconnected()
         reconnect = nil
-        session?.close()
+        session?.close(power: powerReceiver ? settings.endPower.request : nil)
     }
 
     /// Quit while connected: the iMac powers off first
     /// `done` once the session has ended
-    public func closeForQuit(_ done: @escaping () -> Void) {
+    public func closeForQuit(powerReceiver: Bool, _ done: @escaping () -> Void) {
         guard session != nil else { return done() }
         quitDone = done
-        disconnect()
+        disconnect(powerReceiver: powerReceiver)
     }
 
     /// Unfollowing starts from the receiver's current level: no jump

@@ -3,6 +3,23 @@ import AfterscreenCore
 import Combine
 import SwiftUI
 
+/// This Mac once a session ends
+enum AfterSession: Equatable {
+    case nothing, sleepDisplay, sleep, shutDown
+
+    /// Only after a stream: early failures retry
+    /// The sender's request outranks the display setting
+    static func action(streamed: Bool, relinking: Bool, stoppedHere: Bool, request: ReceiverPower?,
+                       onDisconnect: ReceiverSettings.OnDisconnect) -> AfterSession {
+        guard streamed, !relinking, !stoppedHere else { return .nothing }
+        switch request {
+        case .sleep?: return .sleep
+        case .shutDown?: return .shutDown
+        case .keepOn?, nil: return onDisconnect == .sleepDisplay ? .sleepDisplay : .nothing
+        }
+    }
+}
+
 /// Menu bar app: Bonjour advertising, one sender at a time
 public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NetServiceDelegate {
     private var statusItem: NSStatusItem!
@@ -79,7 +96,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         if let peak = screen?.panelPeakNits { FileHandle.standardError.write(Data("[receiver] Panel peak \(Int(peak.rounded())) nits\n".utf8)) }
         screen?.onExitRequest = { [weak self] in self?.stopStreaming() }
         screen?.onSettingsRequest = { [weak self] in self?.openSettings(overStream: true) }
-        screen?.onRelinkTimeout = { [weak self] in self?.sleepDisplayIfIdle() }
+        screen?.onRelinkTimeout = { [weak self] in
+            guard let self = self else { return }
+            self.apply(AfterSession.action(streamed: true, relinking: false, stoppedHere: false, request: nil, onDisconnect: self.settings.onDisconnect))
+        }
         screen?.hudContent = { [weak self] in self?.hudContent() }
         screen?.hudPlacement = (settings.hudCorner, settings.hudCollapsed)
         screen?.onHUDChange = { [weak self] corner, collapsed in
@@ -172,6 +192,13 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         session.stop(reason: L10n.t("The screen was disconnected", "화면 연결이 끊겼습니다"))
     }
 
+    /// Thunderbolt or USB with packets on that interface
+    /// Not via Wi-Fi: the peer must answer on the cable
+    private static func isCable(_ c: Connection, _ link: LinkKind) -> Bool {
+        let local = c.localInterfaceName
+        return (link == .thunderbolt || link == .usb) && local != nil && c.peerInterfaceName == local
+    }
+
     private func refuse(_ connection: Connection, _ reason: String) {
         connection.send(.bye, json: Bye(reason: reason))
         connection.closeAfterFlush(reason: reason)
@@ -192,11 +219,11 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         screen.matchPanelMode = settings.matchPanelMode
         // A point-to-point cable is proof enough; anything else pairs
         // Unclassified links pair too: fail closed
-        // Packets must arrive on the cable, not via Wi-Fi
-        let onCable = (link == .thunderbolt || link == .usb) && local != nil && connection.peerInterfaceName == local
-        let cable = onCable || link == .loopback
-        let auth = ReceiverAuth(receiverID: settings.deviceID, required: settings.pairedOnly && !cable,
-                                store: pairings, limiter: cable ? cablePairingLimiter : pairingLimiter) { [weak self] code, sender in
+        let cable = ReceiverAppDelegate.isCable(connection, link)
+        // Loopback skips pairing; power still needs a key
+        let open = cable || link == .loopback
+        let auth = ReceiverAuth(receiverID: settings.deviceID, required: settings.pairedOnly && !open,
+                                store: pairings, limiter: open ? cablePairingLimiter : pairingLimiter) { [weak self] code, sender in
             guard let self = self else { return }
             guard let code = code else { return self.codeWindow.hide() }
             // Development: tests read the code from the log
@@ -207,6 +234,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self.codeWindow.show(code: code, sender: sender, on: display?.screen)
         }
         let session = ReceiverSession(connection: connection, hardware: welcome(for: display), display: screen, auth: auth)
+        session.cable = cable
         // A handover's link, judged as a new session's would be
         // Settings as this session started: read off main
         let acceptsWiFi = settings.accepts(.wifi), pairedOnly = settings.pairedOnly
@@ -216,12 +244,12 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             guard link != .wifi || acceptsWiFi else {
                 return .refused(L10n.t("This receiver accepts Thunderbolt, USB and Ethernet only", "이 수신기는 Thunderbolt, USB, 이더넷 연결만 받습니다"))
             }
-            let onCable = (link == .thunderbolt || link == .usb) && local != nil && c.peerInterfaceName == local
-            return onCable || link == .loopback || !pairedOnly ? .open : .pairing
+            return ReceiverAppDelegate.isCable(c, link) || link == .loopback || !pairedOnly ? .open : .pairing
         }
         session.onHandover = { [weak self, weak session] c in
             let link = c.localInterfaceName.map { LinkClassifier.classify(LinkClassifier.facts(for: $0)) } ?? .unsupported
             session?.linkChanged(to: link)
+            session?.cable = ReceiverAppDelegate.isCable(c, link)
             self?.showStatus(link: link)
             FileHandle.standardError.write(Data("[receiver] Handed over to \(LinkLabel.name(link))\n".utf8))
         }
@@ -232,17 +260,17 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
             FileHandle.standardError.write(Data("[receiver] Session ended: \(reason)\n".utf8))
+            if let asked = session?.askedPower, session?.powerRequest == nil {
+                FileHandle.standardError.write(Data("[receiver] Ignored \(asked) request: no pairing key or cable\n".utf8))
+            }
             // Only the current session's end resets the app
             guard self.session === session else { return }
             let duration = self.startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
             let peer = session?.peer?.name ?? L10n.t("sender", "송신기")
             self.lastSummary = L10n.t("Last session: \(peer), \(duration / 60)m \(duration % 60)s — \(reason)",
                                       "마지막 연결: \(peer), \(duration / 60)분 \(duration % 60)초 — \(reason)")
-            // Only after a session that showed a stream
-            // Else early failures sleep the display on every retry
-            if let config = session?.config, !config.test, session?.relinking == false, !self.stoppedHere {
-                self.sleepDisplayIfIdle()
-            }
+            self.apply(AfterSession.action(streamed: session?.config.map { !$0.test } ?? false, relinking: session?.relinking ?? false,
+                                           stoppedHere: self.stoppedHere, request: session?.powerRequest, onDisconnect: self.settings.onDisconnect))
             self.stoppedHere = false
             self.session = nil
             self.state("Waiting for a sender", "송신기를 기다리는 중")
@@ -339,20 +367,32 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    /// Per the disconnect setting, after power-off and Space slide-back
-    /// A new session by then keeps the display on
-    private func sleepDisplayIfIdle() {
-        guard settings.onDisconnect == .sleepDisplay else { return }
+    /// After power-off and Space slide-back
+    /// A new session by then keeps this Mac on
+    private func apply(_ action: AfterSession) {
+        guard action != .nothing else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + StreamWindow.longestOff + 1) { [weak self] in
-            if self?.session == nil { ReceiverAppDelegate.sleepDisplay() }
+            guard let self = self, self.session == nil else { return }
+            FileHandle.standardError.write(Data("[receiver] After the session: \(action)\n".utf8))
+            // Windowed runs beside the sender: that Mac stays on
+            guard !self.windowed || action == .sleepDisplay else { return }
+            switch action {
+            case .nothing: break
+            case .sleepDisplay: ReceiverAppDelegate.pmset("displaysleepnow")
+            case .sleep: ReceiverAppDelegate.pmset("sleepnow")
+            case .shutDown:
+                guard !Shutdown.now() else { return }
+                FileHandle.standardError.write(Data("[receiver] Shut down not allowed: sleeping instead\n".utf8))
+                ReceiverAppDelegate.pmset("sleepnow")
+            }
         }
     }
 
-    /// `pmset displaysleepnow`: needs no privileges
-    private static func sleepDisplay() {
+    /// Needs no privileges
+    private static func pmset(_ command: String) {
         let pmset = Process()
         pmset.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        pmset.arguments = ["displaysleepnow"]
+        pmset.arguments = [command]
         try? pmset.run()
     }
 

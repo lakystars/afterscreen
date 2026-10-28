@@ -59,6 +59,14 @@ final class MessagesTests: XCTestCase {
         XCTAssertFalse(bye.relink)
     }
 
+    func testByeCarriesTheReceiversPower() throws {
+        try roundTrip(Bye(reason: "Stopped on MBP", power: .shutDown))
+        XCTAssertNil(try JSONWire.decode(Bye.self, from: Data(#"{"reason":"x"}"#.utf8)).power, "an older sender asks nothing")
+        let newer = try JSONWire.decode(Bye.self, from: Data(#"{"reason":"x","power":"hibernate"}"#.utf8))
+        XCTAssertEqual(newer.reason, "x")
+        XCTAssertNil(newer.power, "an unknown request is ignored, the rest kept")
+    }
+
     func testCursorWireRoundTrip() throws {
         let pos = try CursorWire.parsePos(CursorWire.pos(x: 0.25, y: 0.75, visible: true))
         XCTAssertEqual(pos.x, 0.25)
