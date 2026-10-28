@@ -46,9 +46,7 @@ public final class AppModel: ObservableObject {
     @Published public var flashBlocks = false {
         didSet { session?.flashBlocks = flashBlocks }
     }
-    /// Faster link relinks went for: kind, last try, tries
-    /// Cleared when that link leaves the list
-    private var fasterLink: (kind: LinkKind, at: TimeInterval, tries: Int)?
+    private var fasterLink: FasterLinkTries?
     private var fasterLinkRetry: DispatchWorkItem?
     /// Relinking for a faster link: its outcome replaces the message
     private var awaitingFasterLink: LinkKind?
@@ -121,6 +119,8 @@ public final class AppModel: ObservableObject {
         }
         // A wake without screensDidWake must not leave connecting off
         workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            // Uptime stood still in sleep: tries start over
+            self?.fasterLink = nil
             guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
             self?.screensWoke()
         }
@@ -165,21 +165,27 @@ public final class AppModel: ObservableObject {
     }
 
     /// Asks each receiver on every link; popover lists answering links
-    public func refreshLinks() {
-        for receiver in receivers {
+    /// `recheck`: the active receiver only, then its faster link check
+    public func refreshLinks(recheck: Bool = false) {
+        for receiver in receivers where !recheck || receiver.name == activeReceiver {
             RoutePlanner.routes(to: receiver) { [weak self] routes in
                 DispatchQueue.main.async {
-                    // Change only: rebuilt items close an open link menu
                     let kinds = RoutePlanner.kinds(routes)
-                    guard let self = self, self.links[receiver.name] != kinds else { return }
-                    self.links[receiver.name] = kinds
-                    // A cable may now allow connecting without pairing
-                    self.considerAutoConnect()
-                    if receiver.name == self.activeReceiver {
-                        // Unplugged: a new plug gets fresh tries
-                        if let tried = self.fasterLink?.kind, !kinds.contains(tried) { self.fasterLink = nil }
-                        self.considerFasterLink()
+                    guard let self = self else { return }
+                    let changed = self.links[receiver.name] != kinds
+                    // Change only: rebuilt items close an open link menu
+                    if changed {
+                        self.links[receiver.name] = kinds
+                        // A cable may now allow connecting without pairing
+                        self.considerAutoConnect()
                     }
+                    // Unplugged: a new plug gets fresh tries
+                    // Not on a poll: one unanswered lookup is no unplug
+                    if !recheck, let tried = self.fasterLink, tried.receiver == receiver.name, !kinds.contains(tried.kind) {
+                        self.fasterLink = nil
+                    }
+                    guard receiver.name == self.activeReceiver, changed || recheck else { return }
+                    self.considerFasterLink()
                 }
             }
         }
@@ -187,35 +193,38 @@ public final class AppModel: ObservableObject {
         if kept != links { links = kept }
     }
 
-    /// nil: automatic
-    /// Display session on another link moves: seamless if possible
+    /// nil: automatic, moved by the faster link check
+    /// A chosen link: the session moves, seamless if possible
     public func setLink(_ link: LinkKind?) {
         settings.link = link
-        // Automatic before the links are known: no basis to switch
+        guard let link = link else { return considerFasterLink() }
         guard let session = session, !isTesting, !session.isClosing, !session.isHandingOver,
-              let receiver = receivers.first(where: { $0.name == activeReceiver }),
-              let target = link ?? links[receiver.name]?.first, snapshot.link != target else { return }
-        if session.handover(to: target, done: { [weak self] in self?.handedOver($0, to: target, receiver: receiver, faster: false) }) { return }
+              let receiver = receivers.first(where: { $0.name == activeReceiver }), snapshot.link != link else { return }
+        if session.handover(to: link, done: { [weak self] in self?.handedOver($0, to: link, receiver: receiver, faster: false) }) { return }
         reconnect = receiver
-        let name = link.map { LinkLabel.name($0) } ?? L10n.t("the fastest link", "가장 빠른 링크")
+        let name = LinkLabel.name(link)
         session.stop(reason: L10n.t("Switching to \(name)", "\(name)(으)로 바꾸는 중"), relink: true)
     }
 
     /// Automatic link: a faster link mid-session takes over
-    /// Checked on link changes and once streaming starts
-    /// Two tries per link, 10 s apart: no relink loop
+    /// Checked on link changes, streaming start, resumes and a poll
+    /// Also after handovers and on choosing Automatic
     private func considerFasterLink() {
         guard settings.link == nil, SenderSession.simulatedLinkMbps == nil, snapshot.isStreaming, let session = session,
-              !isTesting, !session.isClosing, !session.isHandingOver, let receiver = receivers.first(where: { $0.name == activeReceiver }),
-              let faster = RoutePlanner.upgrade(from: snapshot.link, available: links[receiver.name] ?? []) else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        var tries = 0
-        if let last = fasterLink, last.kind == faster {
-            guard last.tries < 2 else { return }
-            if now < last.at + 10 { return scheduleFasterLink(after: last.at + 10 - now) }
-            tries = last.tries
+              !isTesting, !session.isClosing, !session.isHandingOver,
+              let receiver = receivers.first(where: { $0.name == activeReceiver }) else { return }
+        guard let faster = RoutePlanner.upgrade(from: snapshot.link, available: links[receiver.name] ?? []) else {
+            // A link up only on the iMac raises no event
+            if RoutePlanner.belowFastest(snapshot.link) { scheduleFasterLink(after: 15) }
+            return
         }
-        fasterLink = (faster, now, tries + 1)
+        let now = ProcessInfo.processInfo.systemUptime
+        switch AppModel.fasterLinkTry(last: fasterLink, receiver: receiver.name, to: faster, now: now, seamless: session.canHandOver(to: faster)) {
+        // Polled still: a faster kind may come up
+        case .never: return scheduleFasterLink(after: 15)
+        case .wait(let seconds): return scheduleFasterLink(after: seconds)
+        case .go(let next): fasterLink = next
+        }
         if session.handover(to: faster, done: { [weak self] in self?.handedOver($0, to: faster, receiver: receiver, faster: true) }) { return }
         awaitingFasterLink = faster
         reconnect = receiver
@@ -228,13 +237,15 @@ public final class AppModel: ObservableObject {
         switch outcome {
         case .switched:
             lastMessage = faster ? AppModel.fasterLinkOutcome(wanted: kind, got: kind) : L10n.t("Switched to \(name)", "\(name)(으)로 바꿨습니다")
+            // Still below the fastest: keeps polling
+            considerFasterLink()
         case .stayed where session?.isHandingOver == true:
             // A lost link's resume took over from it
             break
         case .stayed where faster:
             let current = LinkLabel.name(snapshot.link)
             lastMessage = L10n.t("\(name) did not take over; staying on \(current)", "\(name)(으)로 넘기지 못해 \(current)(으)로 계속 보냅니다")
-            // Second try 10 s on
+            // Tried again after the backoff
             considerFasterLink()
         case .stayed:
             // A chosen link: relink there as without handover
@@ -245,7 +256,41 @@ public final class AppModel: ObservableObject {
             // The session ends next: reconnect over the chosen link
             awaitingFasterLink = faster ? kind : nil
             reconnect = receiver
+            if faster, fasterLink?.kind == kind, fasterLink?.receiver == receiver.name { fasterLink?.reconnects += 1 }
         }
+    }
+
+    /// Faster link tried: receiver, kind, last try, tries
+    /// `reconnects`: tries that ended in a new session
+    struct FasterLinkTries: Equatable {
+        var receiver: String
+        var kind: LinkKind
+        var at: TimeInterval
+        var tries: Int
+        var reconnects = 0
+    }
+
+    enum FasterLinkTry: Equatable {
+        case go(FasterLinkTries), wait(TimeInterval), never
+    }
+
+    /// `seamless`: a handover, else the try reconnects
+    /// Handovers: waits double from 10 s, ten minutes at most
+    /// Twenty quiet minutes restart the waits, as for the next wake
+    /// Two reconnects stop it until an unplug or wake
+    static func fasterLinkTry(last: FasterLinkTries?, receiver: String, to kind: LinkKind, now: TimeInterval,
+                              seamless: Bool) -> FasterLinkTry {
+        guard var next = last, next.receiver == receiver, next.kind == kind else {
+            return .go(FasterLinkTries(receiver: receiver, kind: kind, at: now, tries: 1, reconnects: seamless ? 0 : 1))
+        }
+        if now >= next.at + 1200 { next.tries = 0 }
+        guard next.reconnects < 2 else { return .never }
+        let gap = next.tries == 0 ? 0 : seamless ? min(600, 10 * pow(2, Double(next.tries - 1))) : 10
+        if now < next.at + gap { return .wait(next.at + gap - now) }
+        next.at = now
+        next.tries += 1
+        if !seamless { next.reconnects += 1 }
+        return .go(next)
     }
 
     static func fasterLinkOutcome(wanted: LinkKind, got: LinkKind?) -> String {
@@ -256,7 +301,8 @@ public final class AppModel: ObservableObject {
 
     private func scheduleFasterLink(after seconds: TimeInterval) {
         fasterLinkRetry?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.considerFasterLink() }
+        // Links may have changed unnoticed: ask first
+        let work = DispatchWorkItem { [weak self] in self?.refreshLinks(recheck: true) }
         fasterLinkRetry = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
@@ -314,9 +360,16 @@ public final class AppModel: ObservableObject {
             }
             self.lastMessage = L10n.t("\(LinkLabel.name(from)) dropped; continuing over \(LinkLabel.name(to))",
                                       "\(LinkLabel.name(from)) 연결이 끊겨 \(LinkLabel.name(to))(으)로 이어서 보냅니다")
+            // Held a minute before dropping: tried again from 10 s
+            let now = ProcessInfo.processInfo.systemUptime
+            if let f = self.fasterLink, f.receiver == self.activeReceiver, f.kind == from, now - f.at >= 60 { self.fasterLink?.tries = 0 }
+            // The lost link may return, as right after a wake
+            self.scheduleFasterLink(after: 10)
         }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
+            // A next session checks links when it streams
+            self.fasterLinkRetry?.cancel()
             // A stop on the iMac counts as a Disconnect here
             if session?.pausedByReceiver == true {
                 self.auto.userDisconnected()

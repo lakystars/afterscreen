@@ -472,16 +472,21 @@ public final class SenderSession {
         L10n.t("The link dropped and no other link took over", "링크가 끊겨 다른 링크로 잇지 못했습니다")
     }
 
-    /// Moves the stream to `kind` within this session
-    /// false: this receiver or session cannot; relink instead
-    public func handover(to kind: LinkKind, done: @escaping (HandoverOutcome) -> Void) -> Bool {
+    /// Moving to `kind` now keeps the session, without a reconnect
+    public func canHandOver(to kind: LinkKind) -> Bool {
         guard purpose == .display, snapshot.isStreaming, closing == nil, !ended, handoff == nil, streamer != nil,
-              let welcome = snapshot.peer, let token = welcome.handoverToken else { return false }
+              let welcome = snapshot.peer, welcome.handoverToken != nil else { return false }
         // 120 fps is Thunderbolt only; elsewhere a new session
         guard (snapshot.config?.frameRate ?? 0) <= HighRefresh.base || kind == .thunderbolt else { return false }
         // The key this session proved; none for an open session
+        return welcome.auth == nil || welcome.receiverID.flatMap { pairings.key(for: $0) } != nil
+    }
+
+    /// Moves the stream to `kind` within this session
+    /// false: this receiver or session cannot; relink instead
+    public func handover(to kind: LinkKind, done: @escaping (HandoverOutcome) -> Void) -> Bool {
+        guard canHandOver(to: kind), let welcome = snapshot.peer, let token = welcome.handoverToken else { return false }
         let key = welcome.auth == nil ? nil : welcome.receiverID.flatMap { pairings.key(for: $0) }
-        guard welcome.auth == nil || key != nil else { return false }
         let h = Handoff(kind: kind, secret: Handover.secret(key: key, token: token), done: done)
         handoff = h
         RoutePlanner.routes(to: target) { [weak self] routes in
@@ -765,7 +770,7 @@ public final class SenderSession {
     }
 
     /// Live links; the lost one first if up again
-    /// Resumed on a slower link, it stays until links change
+    /// On a slower link, AppModel's faster link check returns it
     /// Later tries wait longer for mDNS answers
     private func seekResume(wait: TimeInterval) {
         guard let h = handoff, h.resume, h.connection == nil, !ended else { return }

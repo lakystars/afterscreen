@@ -76,6 +76,11 @@ public enum RoutePlanner {
         return fastest
     }
 
+    /// A faster kind of link could take over
+    public static func belowFastest(_ current: LinkKind?) -> Bool {
+        current.flatMap { priority.firstIndex(of: $0) }.map { $0 > 0 } ?? false
+    }
+
     /// Routes over the chosen link
     /// nil or link gone: all routes, fastest first
     public static func select(_ routes: [Route], prefer: LinkKind?) -> (routes: [Route], fellBack: Bool) {

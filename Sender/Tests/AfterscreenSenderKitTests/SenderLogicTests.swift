@@ -55,8 +55,46 @@ final class PopoverLabelTests: XCTestCase {
         XCTAssertNil(RoutePlanner.upgrade(from: .thunderbolt, available: [.usb, .wifi]), "never down")
         XCTAssertNil(RoutePlanner.upgrade(from: .loopback, available: [.wifi]))
         XCTAssertNil(RoutePlanner.upgrade(from: nil, available: [.ethernet]))
+        XCTAssertTrue(RoutePlanner.belowFastest(.wifi), "a cable may come up on the iMac's side")
+        XCTAssertTrue(RoutePlanner.belowFastest(.usb))
+        XCTAssertFalse(RoutePlanner.belowFastest(.thunderbolt))
+        XCTAssertFalse(RoutePlanner.belowFastest(.loopback))
+        XCTAssertFalse(RoutePlanner.belowFastest(nil))
         XCTAssertEqual(AppModel.fasterLinkOutcome(wanted: .ethernet, got: .ethernet), "Switched to the faster Ethernet")
         XCTAssertEqual(AppModel.fasterLinkOutcome(wanted: .ethernet, got: .wifi), "Ethernet did not connect; on Wi-Fi instead")
+    }
+
+    private typealias Tries = AppModel.FasterLinkTries
+
+    private func tries(_ kind: LinkKind = .usb, at: TimeInterval, _ count: Int, reconnects: Int = 0, receiver: String = "iMac") -> Tries {
+        Tries(receiver: receiver, kind: kind, at: at, tries: count, reconnects: reconnects)
+    }
+
+    private func next(_ last: Tries?, _ kind: LinkKind = .usb, at now: TimeInterval, seamless: Bool = true) -> AppModel.FasterLinkTry {
+        AppModel.fasterLinkTry(last: last, receiver: "iMac", to: kind, now: now, seamless: seamless)
+    }
+
+    func testFasterLinkHandoversBackOffAndStartOver() {
+        XCTAssertEqual(next(nil, at: 100), .go(tries(at: 100, 1)))
+        XCTAssertEqual(next(tries(at: 100, 1), at: 104), .wait(6), "10 s apart")
+        XCTAssertEqual(next(tries(at: 100, 1), at: 110), .go(tries(at: 110, 2)))
+        XCTAssertEqual(next(tries(at: 110, 2), at: 120), .wait(10), "20 s after a second try")
+        XCTAssertEqual(next(tries(at: 100, 2), at: 400), .go(tries(at: 400, 3)), "a link not up yet after a wake keeps being tried")
+        XCTAssertEqual(next(tries(at: 100, 7), at: 500), .wait(200), "ten minutes apart at most")
+        XCTAssertEqual(next(tries(at: 100, 7), at: 700), .go(tries(at: 700, 8)))
+        XCTAssertEqual(next(tries(at: 100, 8), at: 1300), .go(tries(at: 1300, 1)), "twenty quiet minutes start over")
+        XCTAssertEqual(next(tries(at: 100, 0), at: 101), .go(tries(at: 101, 1)), "a link that held before dropping")
+        XCTAssertEqual(next(tries(at: 110, 2), .thunderbolt, at: 120), .go(tries(.thunderbolt, at: 120, 1)))
+        XCTAssertEqual(next(tries(at: 110, 2, receiver: "other iMac"), at: 120), .go(tries(at: 120, 1)), "each receiver its own")
+    }
+
+    func testFasterLinkReconnectsStopAfterTwo() {
+        XCTAssertEqual(next(nil, at: 100, seamless: false), .go(tries(at: 100, 1, reconnects: 1)))
+        XCTAssertEqual(next(tries(at: 100, 1, reconnects: 1), at: 104, seamless: false), .wait(6))
+        XCTAssertEqual(next(tries(at: 100, 1, reconnects: 1), at: 110, seamless: false), .go(tries(at: 110, 2, reconnects: 2)))
+        XCTAssertEqual(next(tries(at: 100, 2, reconnects: 2), at: 500, seamless: false), .never, "each try is a reconnect")
+        XCTAssertEqual(next(tries(at: 100, 5, reconnects: 2), at: 500), .never, "handovers that ended in reconnects count")
+        XCTAssertEqual(next(tries(at: 100, 2, reconnects: 2), at: 9999, seamless: false), .never, "until an unplug or wake")
     }
 
     func testWireStatsCarryThePopoverNumbers() {
