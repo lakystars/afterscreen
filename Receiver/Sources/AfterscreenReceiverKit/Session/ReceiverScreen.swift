@@ -148,6 +148,8 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     public func prepare(config: StreamConfig) {
+        configs += 1
+        awaitingPicture = true
         renderer.dropFarewell()
         renderer.reset()
         // Each session's sender turns it on again
@@ -245,8 +247,19 @@ public final class ReceiverScreen: StreamDisplay {
     }
 
     public func showTiles(_ frame: TileFrame, present: Bool, refinement: Bool) -> Bool {
-        renderer.applyTiles(frame, present: present, refinement: refinement)
+        let shown = renderer.applyTiles(frame, present: present, refinement: refinement)
+        if shown, present, awaitingPicture {
+            awaitingPicture = false
+            let config = configs
+            DispatchQueue.main.async { [window] in window.pictureArrived(config: config) }
+        }
+        return shown
     }
+
+    /// Decode queue: the session's first picture not drawn yet
+    private var awaitingPicture = false
+    /// Decode queue: configs prepared, matched by the window's count
+    private var configs = 0
 
     public func setVideoParams(codec: VideoCodec, tenBit: Bool, parameterSets: [Data]) -> Bool {
         renderer.setVideoParams(codec: codec, tenBit: tenBit, parameterSets: parameterSets)

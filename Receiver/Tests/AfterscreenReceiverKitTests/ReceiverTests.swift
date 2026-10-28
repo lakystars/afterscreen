@@ -1294,6 +1294,66 @@ final class StreamRendererTests: XCTestCase {
         return { x, y in Array(pixels[(y * 128 + x) * 4..<(y * 128 + x) * 4 + 3]) }
     }
 
+    /// 128 × 64 red picture through `tileFragment` under `wave`; RGBA
+    private func tiles(_ wave: StreamRenderer.Wave.Parameters, device: MTLDevice) throws -> (Int, Int) -> [UInt8] {
+        let library = try device.makeLibrary(source: StreamRenderer.shaders, options: nil)
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "screenQuad")
+        desc.fragmentFunction = library.makeFunction(name: "tileFragment")
+        desc.colorAttachments[0].pixelFormat = .rgba8Unorm
+        let pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        let target = texture(device, .rgba8Unorm, 128, 64, [9, 9, 9, 9])
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        let queue = try XCTUnwrap(device.makeCommandQueue())
+        let cb = try XCTUnwrap(queue.makeCommandBuffer())
+        let enc = try XCTUnwrap(cb.makeRenderCommandEncoder(descriptor: pass))
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(texture(device, .rgba8Unorm, 128, 64, [255, 0, 0, 255]), index: 0)
+        var params = wave, none = SIMD4<Float>(repeating: 0)
+        enc.setFragmentBytes(&params, length: MemoryLayout<StreamRenderer.Wave.Parameters>.stride, index: 2)
+        enc.setFragmentBytes(&none, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        var pixels = [UInt8](repeating: 0, count: 128 * 64 * 4)
+        target.getBytes(&pixels, bytesPerRow: 128 * 4, from: MTLRegionMake2D(0, 0, 128, 64), mipmapLevel: 0)
+        return { x, y in Array(pixels[(y * 128 + x) * 4..<(y * 128 + x) * 4 + 4]) }
+    }
+
+    func testClosedTilesLetTheDesktopShowWhenSeeThrough() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        var closed = StreamRenderer.Wave.closing(start: 0, duration: 1).parameters(at: 2, tilePixels: 64, size: CGSize(width: 128, height: 64))
+        XCTAssertEqual(try tiles(closed, device: device)(10, 10), [0, 0, 0, 255], "black over the window's own background")
+        closed.reveal = 1
+        XCTAssertEqual(try tiles(closed, device: device)(10, 10), [0, 0, 0, 0], "clear: what lies below shows")
+        var open = StreamRenderer.Wave.still
+        open.reveal = 1
+        XCTAssertEqual(try tiles(open, device: device)(10, 10), [255, 0, 0, 255], "an open tile stays opaque")
+    }
+
+    /// The drawable keeps 2 bits of alpha: thirds, dithered
+    /// Colour premultiplied by the same value, never above it
+    func testSeeThroughAlphaKeepsToTheDrawablesSteps() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        var half = StreamRenderer.Wave.closing(start: 0, duration: 1).parameters(at: 0.5, tilePixels: 16, size: CGSize(width: 128, height: 64))
+        half.reveal = 1
+        let pixel = try tiles(half, device: device)
+        var steps = Set<UInt8>()
+        for y in 0..<64 {
+            for x in 0..<128 {
+                let p = pixel(x, y)
+                steps.insert(p[3])
+                XCTAssertLessThanOrEqual(p[0], p[3], "premultiplied at (\(x), \(y))")
+            }
+        }
+        XCTAssertTrue(steps.isSubset(of: [0, 85, 170, 255]), "\(steps.sorted())")
+        XCTAssertGreaterThan(steps.count, 2, "partly open tiles dither between steps")
+    }
+
     func testHybridFragmentShowsVideoOnlyInMaskedTiles() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         // Video layer at half size: white (Y 235, Cb = Cr = 128)

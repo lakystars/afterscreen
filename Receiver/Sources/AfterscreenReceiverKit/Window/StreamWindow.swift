@@ -206,6 +206,17 @@ final class StreamWindow {
     private let noticeBox = CALayer()
     private let noticeText = CATextLayer()
     private let wave: TileWave
+    private let renderer: StreamRenderer
+    /// Over the desktop, not in a Space: effects show it
+    private var covering = false
+    /// Power-on held for a screen still dark from sleep
+    private var powerOnWaiting = false
+    /// The session's first picture drawn; the window opens sooner
+    private var hasPicture = false
+    /// Configs shown; a picture counts for its own config only
+    private var configs = 0
+    /// Power-on held for that picture
+    private var pictureWaiting = false
     /// The effect of the window on screen
     private var shownEffect = ReceiverSettings.Effect.tiles
     /// Stream pointer hidden until the tile wave has opened
@@ -247,6 +258,7 @@ final class StreamWindow {
     /// `windowed` opens a normal resizable window (development on one Mac)
     init(renderer: StreamRenderer, windowed: Bool) {
         self.windowed = windowed
+        self.renderer = renderer
         wave = TileWave(renderer: renderer)
         view.layer = root
         view.wantsLayer = true
@@ -313,6 +325,7 @@ final class StreamWindow {
 
     /// Called again per new session config (quality test stages)
     func show(config: StreamConfig) {
+        configs += 1
         held?.cancel()
         held = nil
         poweredOffAt = 0
@@ -334,6 +347,8 @@ final class StreamWindow {
         restoreMode?.cancel()
         restoreMode = nil
         generation += 1
+        hasPicture = false
+        pictureWaiting = false
         guard !windowed, matchPanelMode, let id = display, let size = panelMode.match(id) else {
             // Turned off while the last session's mode was kept
             if windowed || !matchPanelMode { panelMode.restore() }
@@ -370,9 +385,14 @@ final class StreamWindow {
         }
         hud.alphaValue = 0
         let style = Style(presentation: presentation, windowed: windowed)
+        covering = !windowed && !style.fullScreen
         let target = display.flatMap { id in NSScreen.screens.first { $0.displayID == id } } ?? NSScreen.main
         let screen = target?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let window = makeWindow(style, frame: style.initialFrame(in: screen), on: target)
+        // Covering tile wave: the desktop until the tiles arrive
+        let reveals = covering && shownEffect == .tiles
+        seeThrough(reveals)
+        if reveals { renderer.presentClear() }
         NSApp.activate(ignoringOtherApps: true)
         if !windowed && !style.fullScreen {
             NSApp.presentationOptions = [.hideDock, .hideMenuBar]
@@ -396,7 +416,7 @@ final class StreamWindow {
         }
         hudTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshHUD() }
         view.needsLayout = true
-        if !style.fullScreen { powerOn() }
+        if !style.fullScreen { powerOnWhenLit() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.claimFocus() }
     }
 
@@ -455,7 +475,10 @@ final class StreamWindow {
         reportShown()
         guard animate else { return done() }
         view.layoutSubtreeIfNeeded()
-        if shownEffect == .tiles { wave.powerOff(live: true) }
+        if shownEffect == .tiles {
+            if covering { seeThrough(true) }
+            wave.powerOff(live: true)
+        }
         poweredOffAt = CACurrentMediaTime() + duration(on: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: false), execute: done)
     }
@@ -468,6 +491,8 @@ final class StreamWindow {
     func hide() {
         held?.cancel()
         held = nil
+        powerOnWaiting = false
+        pictureWaiting = false
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
         keyMonitor = nil
         hudTimer?.invalidate()
@@ -502,7 +527,10 @@ final class StreamWindow {
         guard animate || playing > 0 else { return close(window) }
         if animate {
             view.layoutSubtreeIfNeeded()
-            if shownEffect == .tiles { wave.powerOff() }
+            if shownEffect == .tiles {
+                if covering { seeThrough(true) }
+                wave.powerOff()
+            }
         } else if shownEffect == .tiles {
             // Live redraws stop with the session's resources
             wave.closeOverFarewell(for: playing)
@@ -519,14 +547,64 @@ final class StreamWindow {
         }
     }
 
+    /// A screen dark from sleep: power-on once it lights
+    /// Else the effect plays unseen, as on a wake's reconnect
+    private func powerOnWhenLit() {
+        guard CGDisplayIsAsleep(display ?? CGMainDisplayID()) != 0 else { return powerOn() }
+        FileHandle.standardError.write(Data("[receiver] Screen asleep: power-on waits for it\n".utf8))
+        powerOnWaiting = true
+        let session = generation
+        // No wake reported: plays anyway
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard self?.generation == session else { return }
+            self?.litPowerOn()
+        }
+    }
+
+    private func litPowerOn() {
+        guard powerOnWaiting else { return }
+        powerOnWaiting = false
+        FileHandle.standardError.write(Data("[receiver] Screen lit: power-on\n".utf8))
+        powerOn()
+    }
+
+    /// Main queue: the first picture of config `config` is drawn
+    /// An ended session's late one is ignored
+    func pictureArrived(config: Int) {
+        guard config == configs else { return }
+        hasPicture = true
+        guard pictureWaiting else { return }
+        pictureWaiting = false
+        powerOn()
+    }
+
     /// Plays the session's power-on effect
     /// Then the HUD and, in a Space, the hint appear
     private func powerOn() {
-        guard keyMonitor != nil, power.powerOn() else { return }
+        guard keyMonitor != nil else { return }
+        // Frames lag the window up to a second: else unseen
+        guard hasPicture else {
+            pictureWaiting = true
+            let session = generation
+            // No picture yet: plays anyway
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self = self, self.generation == session, self.pictureWaiting else { return }
+                self.pictureArrived(config: self.configs)
+            }
+            return
+        }
+        guard power.powerOn() else { return }
         reportShown()
         view.layoutSubtreeIfNeeded()
         if shownEffect == .tiles { wave.powerOn() }
         let session = generation
+        if covering && shownEffect == .tiles {
+            // After the wave's last frame: covered by then
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: true) + 0.1) { [weak self] in
+                guard let self = self, self.generation == session else { return }
+                self.seeThrough(false)
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: true)) { [weak self] in
             guard let self = self, self.generation == session else { return }
             self.cursorSuppressed = false
@@ -553,6 +631,8 @@ final class StreamWindow {
         if !fullScreen { window.orderOut(nil) }
         window.close()
         if !windowed { NSApp.presentationOptions = [] }
+        // See-through kept: queued decode redraws may draw after this
+        // Else black shows first in the next see-through window
         // After the Space's slide: a mode switch mid-slide stutters
         let restore = DispatchWorkItem { [weak self] in
             self?.restoreMode = nil
@@ -560,6 +640,19 @@ final class StreamWindow {
         }
         restoreMode = restore
         DispatchQueue.main.asyncAfter(deadline: .now() + (fullScreen ? 1 : 0), execute: restore)
+    }
+
+    /// Closed tiles show the desktop below, not black
+    /// Opaque while streaming: nothing below to composite
+    private func seeThrough(_ on: Bool) {
+        // At once: an implicit fade shows black over the desktop
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        window?.isOpaque = !on
+        window?.backgroundColor = on ? .clear : .black
+        root.backgroundColor = on ? nil : CGColor(gray: 0, alpha: 1)
+        renderer.setSeeThrough(on)
+        CATransaction.commit()
     }
 
     /// New session during a power-off: that window closes at once
@@ -577,6 +670,8 @@ final class StreamWindow {
         // Once more a second later: activation may lag the screens
         wakeObserver = workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.claimFocus()
+            // The backlight comes up a moment after the wake
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.litPowerOn() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.claimFocus() }
         }
         window?.contentView = nil
@@ -617,7 +712,7 @@ final class StreamWindow {
                 guard self.window === window, self.keyMonitor != nil else { return window.close() }
                 // The Space switch shows the pointer again
                 NSCursor.setHiddenUntilMouseMoves(true)
-                self.powerOn()
+                self.powerOnWhenLit()
             },
         ]
         self.window = window

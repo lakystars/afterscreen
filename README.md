@@ -6,6 +6,10 @@ Use an iMac as a display for your Apple Silicon Mac, extended or mirrored, at th
 
 iMacs from late 2014 on have no Target Display Mode. Afterscreen gives them, and older iMacs too, a second life as a display. It is two menu bar apps, one on each Mac, connected by a cable or Wi-Fi. There is no capture card, no driver and no third-party library.
 
+![The stream opening over the iMac's desktop, then closing back to it](assets/cover-transition.gif)
+
+*Connecting and disconnecting in cover mode: the stream opens over the iMac's own desktop and closes back to it. Rendered with the receiver's shaders.*
+
 ## Why Afterscreen
 
 - **Sharp text at full resolution.** On a fast cable the screen goes out as GPU texture blocks, not as video, and the iMac's GPU draws them directly. There is no video decoder on the path, so there is no codec delay.
@@ -25,7 +29,7 @@ iMacs from late 2014 on have no Target Display Mode. Afterscreen gives them, and
   - Connects automatically to the last receiver, including after sleep.
   - On Ethernet and Wi-Fi, a receiver takes only Macs paired with it by a 6-digit code. Thunderbolt and USB cables connect without pairing.
 - **Power:**
-  - Disconnecting plays a power-off effect on the iMac.
+  - Connecting and disconnecting play a tile effect. Covering the screen, the stream opens over the iMac's desktop and closes back to it.
   - The sender can put the receiver to sleep or shut it down when you disconnect.
   - Closing a MacBook's lid on power keeps streaming.
 - **Receiver settings from the sender:**

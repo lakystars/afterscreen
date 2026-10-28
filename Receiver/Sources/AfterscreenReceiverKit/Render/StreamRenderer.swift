@@ -91,6 +91,8 @@ final class StreamRenderer {
     private var lastGeometry: TileGeometry?
     /// Power effect, under `sizeLock`; nil draws the picture as sent
     private var wave: Wave?
+    /// Closed tiles clear, not black; under `sizeLock`
+    private var seeThrough = false
     /// Kept past its session for a closing wave; under `sizeLock`
     private var farewell: (texture: MTLTexture, tilePixels: Int)?
     /// Time of the last presented picture; under `statsLock`
@@ -144,6 +146,8 @@ final class StreamRenderer {
             var flash: Float = 0
             /// Seconds after the renderer's flash base
             var flashNow: Float = 0
+            /// 1: unopened and closed tiles clear, what lies below shows
+            var reveal: Float = 0
         }
 
         /// The picture as sent
@@ -305,11 +309,12 @@ final class StreamRenderer {
     // Power effect: each tile opens after a jittered centre-distance delay
     // Tiles grow from 60% with overshoot, brightening from black
     // Closing runs corners-in and shrinks tiles to black
+    // reveal 1: clear instead of black, the desktop below shows
     // active 0: the picture as sent
     struct Wave {
         float progress; float active; float closing; float tilePixels; float2 size;
         float grey; float breathing; float time; float reviving; float motion;
-        float flash; float flashNow;
+        float flash; float flashNow; float reveal;
     };
     // Share of the wave one tile takes
     // Remainder: start spread from first tile to last
@@ -384,14 +389,24 @@ final class StreamRenderer {
         return mix(rgb, float3(1.0, 0.12, 0.08), a.x);
     }
 
+    // See-through: the drawable's alpha has 2 bits
+    // Coverage dithered to its thirds, colour premultiplied to match
+    constant float kBayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    static float coverage(float k, float2 px) {
+        uint2 p = uint2(px) % 4;
+        return floor(k * 3.0 + (kBayer[p.y * 4 + p.x] + 0.5) / 16.0) / 3.0;
+    }
+
     // BC7 picture or its debanded copy; alpha not streamed
     fragment float4 tileFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Wave &w [[buffer(2)]],
                                  device const float4 *flash [[buffer(4)]]) {
         bool up = scalingUp(tex, in.uv);
         float k;
         float2 uv = waveUV(in.uv, w, k);
-        if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
-        return float4(flashTint(waitTint(picture(tex, uv, up), in.uv, w), in.uv, w, flash) * k, 1.0);
+        if (w.reveal > 0.0) k = coverage(k, in.position.xy);
+        if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0 - w.reveal);
+        // Premultiplied: the tile's light is its cover over the desktop
+        return float4(flashTint(waitTint(picture(tex, uv, up), in.uv, w), in.uv, w, flash) * k, mix(1.0, k, w.reveal));
     }
 
     // grid: tiles per row, tile edge px, stream width, height
@@ -431,12 +446,13 @@ final class StreamRenderer {
         bool up = scalingUp(tex, in.uv), videoUp = scalingUp(luma, in.uv);
         float k;
         float2 uv = waveUV(in.uv, w, k);
-        if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
+        if (w.reveal > 0.0) k = coverage(k, in.position.xy);
+        if (k <= 0.0) return float4(0.0, 0.0, 0.0, 1.0 - w.reveal);
         uint2 p = min(uint2(uv * float2(grid.zw)), grid.zw - uint2(1));
         if (mask[(p.y / grid.y) * grid.x + p.x / grid.y] == 0) {
             float2 lo = 0.0, hi = 1.0;
             if (up) bc7Bounds(mask, grid, p, uv, lo, hi);
-            return float4(flashTint(waitTint(picture(tex, uv, up, lo, hi), in.uv, w), in.uv, w, flash) * k, 1.0);
+            return float4(flashTint(waitTint(picture(tex, uv, up, lo, hi), in.uv, w), in.uv, w, flash) * k, mix(1.0, k, w.reveal));
         }
         // VideoToolbox scales from each texel's top-left source pixel
         // Shift: half a plane texel less half a stream pixel
@@ -448,7 +464,7 @@ final class StreamRenderer {
         float y = ((videoUp ? catmullRom(luma, luv).r : luma.sample(s, luv).r) - range.x) * range.y;
         float2 c = (chroma.sample(s, cuv).rg - range.z) * range.w;
         float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
-        return float4(flashTint(waitTint(saturate(rgb), in.uv, w), in.uv, w, flash) * k, 1.0);
+        return float4(flashTint(waitTint(saturate(rgb), in.uv, w), in.uv, w, flash) * k, mix(1.0, k, w.reveal));
     }
     """
 
@@ -504,6 +520,42 @@ final class StreamRenderer {
         statsLock.unlock()
         guard !recent, let g = lastGeometry, let cb = gpu.queue.makeCommandBuffer() else { return }
         encodePicture(cb, geometry: g)
+    }
+
+    /// Letterbox cover over the desktop as the wave runs
+    static func barCover(_ p: Wave.Parameters) -> Double {
+        guard p.active > 0 else { return 1 }
+        return Double(p.closing > 0 ? 1 - p.progress : p.progress)
+    }
+
+    /// Main queue: power effects over the desktop, or opaque
+    /// Opaque while streaming: allows direct scan-out
+    func setSeeThrough(_ on: Bool) {
+        sizeLock.lock()
+        seeThrough = on
+        sizeLock.unlock()
+        layer.isOpaque = !on
+        layer.backgroundColor = on ? nil : CGColor(gray: 0, alpha: 1)
+    }
+
+    /// Main queue: an empty frame for a window opening see-through
+    /// Else the last session's last frame shows first
+    /// GPU done before the window shows: no black flash
+    func presentClear() {
+        // Not held while waiting: a farewell draw may hold drawables
+        gpuLock.lock()
+        let queue = gpu.queue
+        gpuLock.unlock()
+        guard let cb = queue.makeCommandBuffer(), let drawable = layer.nextDrawable() else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        cb.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        cb.present(drawable)
+        cb.commit()
+        cb.waitUntilCompleted()
     }
 
     /// Any queue: applies from the next draw
@@ -849,9 +901,11 @@ final class StreamRenderer {
         let size = drawableSize, inset = insetPixels
         let current = wave
         let flashing = flash && flashOn
+        let clear = seeThrough
         sizeLock.unlock()
         let now = CACurrentMediaTime()
         var params = current?.parameters(at: now, tilePixels: tilePixels, size: content) ?? Wave.still
+        params.reveal = clear ? 1 : 0
         // The tint finds its block without a wave too
         params.tilePixels = Float(tilePixels)
         params.size = SIMD2(Float(content.width), Float(content.height))
@@ -890,7 +944,8 @@ final class StreamRenderer {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // See-through: letterbox bars fade with the wave
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: clear ? StreamRenderer.barCover(params) : 1)
         pass.colorAttachments[0].storeAction = .store
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else {
             cb.commit()
