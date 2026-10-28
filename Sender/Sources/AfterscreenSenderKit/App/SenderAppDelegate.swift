@@ -92,6 +92,8 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     private let model = AppModel()
     private var cancellables: Set<AnyCancellable> = []
     private let focusKeeper = PopoverFocusKeeper()
+    /// Shown until it starts closing; isShown holds through the close
+    private var popoverOpen = false
     private var wasStreaming = false
 
     public override init() {}
@@ -140,8 +142,13 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
                 if self.statusItem.length != length { self.statusItem.length = length }
             }.store(in: &cancellables)
         // Display changes while the popover stays open
+        // The menu bar's screen settles over a few hundred ms
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
-            .sink { [weak self] _ in self?.fitPopover() }
+            .sink { [weak self] _ in
+                for delay in [0] + PopoverFocusKeeper.checks {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.reanchorPopover() }
+                }
+            }
             .store(in: &cancellables)
         // Code field in front while the iMac shows the code
         model.$pairingWith.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] name in
@@ -174,11 +181,21 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
         // Transient popover needs activation to see deactivation and close
         NSApp.activate(ignoringOtherApps: true)
         fitPopover()
+        popoverOpen = true
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
         outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.popover.performClose(nil)
         }
+    }
+
+    /// A shown popover stays put on a display change
+    /// Shown again: back under the status item, resized to fit
+    private func reanchorPopover() {
+        fitPopover()
+        // Closing: shown again it would lose its outside-click close
+        guard popoverOpen, popover.isShown, let button = statusItem.button else { return }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 
     /// Room below the menu bar for the popover's content
@@ -187,6 +204,10 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
         guard let screen = statusItem.button?.window?.screen ?? NSScreen.main else { return }
         let top = statusItem.button?.window?.frame.minY ?? screen.visibleFrame.maxY
         model.popoverHeight = top - screen.visibleFrame.minY - SenderAppDelegate.popoverChrome
+    }
+
+    public func popoverWillClose(_ notification: Notification) {
+        popoverOpen = false
     }
 
     public func popoverDidClose(_ notification: Notification) {
