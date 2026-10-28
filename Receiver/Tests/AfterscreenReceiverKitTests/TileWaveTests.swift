@@ -138,7 +138,7 @@ final class PowerSequenceTests: XCTestCase {
         XCTAssertTrue(p.powerOn())
         XCTAssertFalse(p.powerOn())
         XCTAssertTrue(p.powerOff(effect: .tiles))
-        XCTAssertFalse(p.powerOff(effect: .crt))
+        XCTAssertFalse(p.powerOff(effect: .tiles))
     }
 }
 

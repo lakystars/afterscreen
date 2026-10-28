@@ -98,7 +98,6 @@ struct ReceiverSettingsView: View {
                 Text(L10n.t("Connection effect", "연결 효과")).font(.headline)
                 Picker("", selection: $settings.effect) {
                     Text(L10n.t("Tile wave", "타일 웨이브")).tag(ReceiverSettings.Effect.tiles)
-                    Text(L10n.t("Picture tube", "브라운관")).tag(ReceiverSettings.Effect.crt)
                     Text(L10n.t("None", "없음")).tag(ReceiverSettings.Effect.none)
                 }
                 .pickerStyle(RadioGroupPickerStyle())

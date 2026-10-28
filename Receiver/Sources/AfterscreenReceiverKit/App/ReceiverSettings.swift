@@ -23,8 +23,6 @@ public final class ReceiverSettings: ObservableObject {
     public enum Effect: String, CaseIterable {
         /// Tiles open centre-out, close corners-in
         case tiles
-        /// A picture tube switching on and off
-        case crt
         case none
     }
 

@@ -7,7 +7,7 @@ private final class KeyWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
-/// Layer-hosting view: tube picture and beam layers, plus the hint
+/// Layer-hosting view: picture, cursor, hint and notice layers
 private final class StreamView: NSView {
     var onLayout: ((CGRect, CGFloat) -> Void)?
     var menuProvider: (() -> NSMenu?)?
@@ -174,7 +174,7 @@ final class StreamWindow {
     static let cursorActions: [String: CAAction] = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "hidden": NSNull(),
                                                     "anchorPoint": NSNull()]
     /// Longest power-off duration, for steps waiting on it
-    static let longestOff = max(CRTEffect.offDuration, TileWave.offDuration)
+    static let longestOff = TileWave.offDuration
 
     private var window: KeyWindow?
     /// Holds the stream view and the HUD above it
@@ -192,7 +192,6 @@ final class StreamWindow {
     /// Congestion notice: a box of one or two centred lines
     private let noticeBox = CALayer()
     private let noticeText = CATextLayer()
-    private let tube = CRTTube()
     private let wave: TileWave
     /// The effect of the window on screen
     private var shownEffect = ReceiverSettings.Effect.tiles
@@ -242,7 +241,8 @@ final class StreamWindow {
         cursorLayer.isHidden = true
         cursorLayer.actions = StreamWindow.cursorActions
         cursorLayer.magnificationFilter = .linear
-        tube.install(in: root, holding: [renderer.layer, cursorLayer])
+        root.addSublayer(renderer.layer)
+        root.addSublayer(cursorLayer)
 
         hintLayer.opacity = 0
         hintLayer.backgroundColor = CGColor(gray: 0.08, alpha: 0.8)
@@ -287,7 +287,6 @@ final class StreamWindow {
         }
         hud.menuProvider = view.menuProvider
         view.onLayout = { [weak self, weak renderer] bounds, scale in
-            self?.tube.layout(bounds: bounds)
             renderer?.layout(bounds: bounds, scale: scale, topInset: self?.notchInset ?? 0)
             self?.hintText.contentsScale = scale
             self?.noticeText.contentsScale = scale
@@ -351,15 +350,8 @@ final class StreamWindow {
         shownEffect = effect
         cursorSuppressed = shownEffect == .tiles
         switch shownEffect {
-        case .crt:
-            wave.finish()
-            tube.darken()
-        case .tiles:
-            tube.restore()
-            wave.prepare()
-        case .none:
-            wave.finish()
-            tube.restore()
+        case .tiles: wave.prepare()
+        case .none: wave.finish()
         }
         hud.alphaValue = 0
         let style = Style(presentation: presentation, windowed: windowed)
@@ -436,11 +428,7 @@ final class StreamWindow {
         reportShown()
         guard animate else { return done() }
         view.layoutSubtreeIfNeeded()
-        switch shownEffect {
-        case .crt: tube.powerOff()
-        case .tiles: wave.powerOff(live: true)
-        case .none: break
-        }
+        if shownEffect == .tiles { wave.powerOff(live: true) }
         poweredOffAt = CACurrentMediaTime() + duration(on: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: false), execute: done)
     }
@@ -489,11 +477,7 @@ final class StreamWindow {
         guard animate || playing > 0 else { return close(window) }
         if animate {
             view.layoutSubtreeIfNeeded()
-            switch shownEffect {
-            case .crt: tube.powerOff()
-            case .tiles: wave.powerOff()
-            case .none: break
-            }
+            if shownEffect == .tiles { wave.powerOff() }
         } else if shownEffect == .tiles {
             // Live redraws stop with the session's resources
             wave.closeOverFarewell(for: playing)
@@ -505,7 +489,6 @@ final class StreamWindow {
 
     private func duration(on: Bool) -> CFTimeInterval {
         switch shownEffect {
-        case .crt: return on ? CRTEffect.onDuration : CRTEffect.offDuration
         case .tiles: return on ? TileWave.onDuration : TileWave.offDuration
         case .none: return 0
         }
@@ -517,11 +500,7 @@ final class StreamWindow {
         guard keyMonitor != nil, power.powerOn() else { return }
         reportShown()
         view.layoutSubtreeIfNeeded()
-        switch shownEffect {
-        case .crt: tube.powerOn()
-        case .tiles: wave.powerOn()
-        case .none: break
-        }
+        if shownEffect == .tiles { wave.powerOn() }
         let session = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + duration(on: true)) { [weak self] in
             guard let self = self, self.generation == session else { return }

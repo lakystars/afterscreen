@@ -53,9 +53,14 @@ final class ReceiverSettingsTests: XCTestCase {
     func testConnectionEffectDefaultsToTheTileWave() {
         let s = settings()
         XCTAssertEqual(s.effect, .tiles)
-        s.effect = .crt
-        XCTAssertEqual(settings().effect, .crt)
-        XCTAssertEqual(ReceiverSettings.Effect.allCases, [.tiles, .crt, .none])
+        s.effect = ReceiverSettings.Effect.none
+        XCTAssertEqual(settings().effect, ReceiverSettings.Effect.none)
+        XCTAssertEqual(ReceiverSettings.Effect.allCases, [.tiles, .none])
+    }
+
+    func testARemovedEffectFallsBackToTheTileWave() {
+        defaults.set("crt", forKey: "effect")
+        XCTAssertEqual(settings().effect, .tiles)
     }
 
     func testHUDPlacementIsRemembered() {
