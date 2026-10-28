@@ -378,8 +378,9 @@ public final class AppModel: ObservableObject {
                 self.reconnect = nil
             }
             // Receiver gave way: at once, at most every 5 s
+            // Reopened for an edit here: at once, each time
             let now = ProcessInfo.processInfo.systemUptime
-            if session?.askedBack == true, self.reconnect == nil, now - self.askedBackAt > 5 {
+            if session?.askedBack == true, self.reconnect == nil, now - self.askedBackAt > 5 || session?.reopened == true {
                 self.askedBackAt = now
                 self.reconnect = self.receivers.first { $0.name == self.activeReceiver } ?? session?.target
             }
@@ -459,6 +460,11 @@ public final class AppModel: ObservableObject {
     public func setDeband(_ level: Deband) {
         settings.deband = level
         session?.setDeband(level)
+    }
+
+    /// From the menu; window edits make the receiver reopen
+    public func changeReceiver(_ change: ReceiverOptionsChange) {
+        session?.setReceiverOptions(change)
     }
 
     public func stopTest() {

@@ -43,9 +43,11 @@ public struct Hello: Codable, Equatable {
     public var paired: Bool?
     /// Kept key failed its proof: pair anew with a code
     public var repair: Bool?
+    /// Takes `receiverOptions`; older senders close on it
+    public var readsOptions: Bool?
 
     public init(protocolVersion: Int, name: String, model: String, osVersion: String, senderID: String? = nil, nonce: Data? = nil,
-                paired: Bool? = nil, repair: Bool? = nil) {
+                paired: Bool? = nil, repair: Bool? = nil, readsOptions: Bool? = nil) {
         self.protocolVersion = protocolVersion
         self.name = name
         self.model = model
@@ -54,6 +56,7 @@ public struct Hello: Codable, Equatable {
         self.nonce = nonce
         self.paired = paired
         self.repair = repair
+        self.readsOptions = readsOptions
     }
 }
 
@@ -301,6 +304,130 @@ public enum ReceiverPower: String, Codable, CaseIterable {
     case keepOn, sleep, shutDown
 }
 
+/// Receiver settings a sender may change, as they stand
+/// Who may connect, pairings and consent stay on the receiver
+public struct ReceiverOptions: Codable, Equatable {
+    /// Where the stream shows
+    public enum Presentation: String, Codable, CaseIterable {
+        /// Own full-screen Space; Control-arrow switches to the iMac's desktops
+        case space
+        /// Above everything, menu bar and Dock included
+        case cover
+    }
+
+    /// Power-on and power-off effect
+    public enum Effect: String, Codable, CaseIterable {
+        /// Tiles open centre-out, close corners-in
+        case tiles
+        case none
+    }
+
+    /// The receiver's screen with no sender
+    public enum OnDisconnect: String, Codable, CaseIterable {
+        case showDesktop
+        case sleepDisplay
+    }
+
+    /// A screen the stream can show on
+    public struct Screen: Codable, Equatable {
+        /// Vendor, model and serial: same screen after replugging
+        public var key: String
+        public var name: String
+        public var pixels: PixelSize
+
+        public init(key: String, name: String, pixels: PixelSize) {
+            self.key = key
+            self.name = name
+            self.pixels = pixels
+        }
+    }
+
+    /// false: no proven key or cable, edits ignored
+    public var editable: Bool
+    public var hud: Bool
+    public var presentation: Presentation
+    public var screens: [Screen]
+    /// Chosen screen's key; nil: automatic
+    public var screen: String?
+    /// Chosen screen's name while it is unplugged
+    public var missingScreen: String?
+    /// Scaled resolutions switch to the panel's own while streaming
+    public var matchPanelMode: Bool
+    public var effect: Effect
+    public var onDisconnect: OnDisconnect
+    public var launchAtLogin: Bool
+
+    public init(editable: Bool, hud: Bool, presentation: Presentation, screens: [Screen], screen: String?, missingScreen: String?,
+                matchPanelMode: Bool, effect: Effect, onDisconnect: OnDisconnect, launchAtLogin: Bool) {
+        self.editable = editable
+        self.hud = hud
+        self.presentation = presentation
+        self.screens = screens
+        self.screen = screen
+        self.missingScreen = missingScreen
+        self.matchPanelMode = matchPanelMode
+        self.effect = effect
+        self.onDisconnect = onDisconnect
+        self.launchAtLogin = launchAtLogin
+    }
+
+    /// As the receiver will report it after `change`
+    public func applying(_ change: ReceiverOptionsChange) -> ReceiverOptions {
+        var next = self
+        if let v = change.hud { next.hud = v }
+        if let v = change.presentation { next.presentation = v }
+        if let key = change.screen {
+            if key.isEmpty {
+                next.screen = nil
+                next.missingScreen = nil
+            } else if screens.contains(where: { $0.key == key }) {
+                next.screen = key
+                next.missingScreen = nil
+            }
+        }
+        if let v = change.matchPanelMode { next.matchPanelMode = v }
+        if let v = change.effect { next.effect = v }
+        if let v = change.onDisconnect { next.onDisconnect = v }
+        if let v = change.launchAtLogin { next.launchAtLogin = v }
+        return next
+    }
+}
+
+/// A sender's edit; nil fields stay as they are
+public struct ReceiverOptionsChange: Codable, Equatable {
+    public var hud: Bool?
+    public var presentation: ReceiverOptions.Presentation?
+    /// A listed screen's key; empty for automatic
+    public var screen: String?
+    public var matchPanelMode: Bool?
+    public var effect: ReceiverOptions.Effect?
+    public var onDisconnect: ReceiverOptions.OnDisconnect?
+    public var launchAtLogin: Bool?
+
+    public init(hud: Bool? = nil, presentation: ReceiverOptions.Presentation? = nil, screen: String? = nil, matchPanelMode: Bool? = nil,
+                effect: ReceiverOptions.Effect? = nil, onDisconnect: ReceiverOptions.OnDisconnect? = nil, launchAtLogin: Bool? = nil) {
+        self.hud = hud
+        self.presentation = presentation
+        self.screen = screen
+        self.matchPanelMode = matchPanelMode
+        self.effect = effect
+        self.onDisconnect = onDisconnect
+        self.launchAtLogin = launchAtLogin
+    }
+
+    /// A newer sender's value: that field skipped, the rest applied
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hud = try? c.decodeIfPresent(Bool.self, forKey: .hud)
+        presentation = try? c.decodeIfPresent(ReceiverOptions.Presentation.self, forKey: .presentation)
+        screen = try? c.decodeIfPresent(String.self, forKey: .screen)
+        matchPanelMode = try? c.decodeIfPresent(Bool.self, forKey: .matchPanelMode)
+        effect = try? c.decodeIfPresent(ReceiverOptions.Effect.self, forKey: .effect)
+        onDisconnect = try? c.decodeIfPresent(ReceiverOptions.OnDisconnect.self, forKey: .onDisconnect)
+        launchAtLogin = try? c.decodeIfPresent(Bool.self, forKey: .launchAtLogin)
+    }
+}
+
 public struct Bye: Codable, Equatable {
     public var reason: String
     /// Stopped by the receiver's user: no automatic reconnect
@@ -312,13 +439,17 @@ public struct Bye: Codable, Equatable {
     public var repair: Bool?
     /// Sender's request; heeded from paired or cabled senders
     public var power: ReceiverPower?
+    /// Receiver reopens for the sender's edit: back at once
+    public var reopen: Bool?
 
-    public init(reason: String, pause: Bool = false, relink: Bool = false, repair: Bool? = nil, power: ReceiverPower? = nil) {
+    public init(reason: String, pause: Bool = false, relink: Bool = false, repair: Bool? = nil, power: ReceiverPower? = nil,
+                reopen: Bool? = nil) {
         self.reason = reason
         self.pause = pause
         self.relink = relink
         self.repair = repair
         self.power = power
+        self.reopen = reopen
     }
 
     public init(from decoder: Decoder) throws {
@@ -329,6 +460,7 @@ public struct Bye: Codable, Equatable {
         repair = try c.decodeIfPresent(Bool.self, forKey: .repair)
         // A newer sender's request: ignored, the bye still read
         power = try? c.decodeIfPresent(ReceiverPower.self, forKey: .power)
+        reopen = try c.decodeIfPresent(Bool.self, forKey: .reopen)
     }
 }
 

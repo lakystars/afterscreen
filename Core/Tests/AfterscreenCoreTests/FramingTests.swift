@@ -105,6 +105,8 @@ final class FramingTests: XCTestCase {
         XCTAssertEqual(MessageType.powerOff.rawValue, 0x27)
         XCTAssertEqual(MessageType.senderStats.rawValue, 0x51)
         XCTAssertEqual(MessageType.deband.rawValue, 0x26)
+        XCTAssertEqual(MessageType.receiverOptions.rawValue, 0x28)
+        XCTAssertEqual(MessageType.setReceiverOptions.rawValue, 0x29)
     }
 
     func testDebandWireCarriesOneLevelByte() throws {

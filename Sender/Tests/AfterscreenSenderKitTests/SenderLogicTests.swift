@@ -48,6 +48,13 @@ final class PopoverLabelTests: XCTestCase {
         XCTAssertTrue(LinkMenu.choices(available: [], pinned: nil).isEmpty)
     }
 
+    func testReceiverSettingsChoicesReadApart() {
+        XCTAssertEqual(Set(ReceiverOptions.Presentation.allCases.map(\.title)).count, ReceiverOptions.Presentation.allCases.count)
+        XCTAssertEqual(Set(ReceiverOptions.Effect.allCases.map(\.title)).count, ReceiverOptions.Effect.allCases.count)
+        XCTAssertEqual(Set(ReceiverOptions.OnDisconnect.allCases.map(\.title)).count, ReceiverOptions.OnDisconnect.allCases.count)
+        XCTAssertEqual(ReceiverOptions.Effect.none.title, "None")
+    }
+
     func testAutomaticLinkMovesOnlyToAFasterOne() {
         XCTAssertEqual(RoutePlanner.upgrade(from: .wifi, available: [.ethernet, .wifi]), .ethernet, "a cable plugged in")
         XCTAssertEqual(RoutePlanner.upgrade(from: .ethernet, available: [.thunderbolt, .ethernet, .wifi]), .thunderbolt)

@@ -28,6 +28,9 @@ iMacs from late 2014 on have no Target Display Mode. Afterscreen gives them, and
   - Disconnecting plays a power-off effect on the iMac.
   - The sender can put the receiver to sleep or shut it down when you disconnect.
   - Closing a MacBook's lid on power keeps streaming.
+- **Receiver settings from the sender:**
+  - While connected, the sender's menu changes how and where the iMac shows the stream, its effect and what it shows with no sender. It also shows or hides the iMac's HUD.
+  - Which connections the iMac accepts, its pairings and its permission to shut down are set on the iMac only.
 - **Tools:**
   - A quality test that measures what your link sustains.
   - A live menu of link, throughput, latency, frame rates and resource use on both Macs.

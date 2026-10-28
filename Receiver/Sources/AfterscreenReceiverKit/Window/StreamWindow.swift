@@ -151,6 +151,18 @@ final class StreamWindow {
     var hudCollapsed = false
     /// Reports HUD corner and fold changes for the settings
     var onHUDChange: ((ReceiverSettings.HUDCorner, Bool) -> Void)?
+    /// Main queue: HUD toggled here or by the sender
+    var onHUDToggle: ((Bool) -> Void)?
+    /// Main queue: set as a sender asks
+    var hudShown: Bool {
+        get { !hud.isHidden }
+        set {
+            guard newValue == hud.isHidden else { return }
+            // Chosen now: a quality test's end keeps it
+            forcedHUD = false
+            toggleHUD()
+        }
+    }
     /// Main queue: false while on another Space or covered
     var onVisibilityChange: ((Bool) -> Void)?
     /// Main queue: picture powered on and on screen
@@ -308,6 +320,7 @@ final class StreamWindow {
         if config.test && hud.isHidden {
             hud.isHidden = false
             forcedHUD = true
+            onHUDToggle?(true)
         }
         guard keyMonitor == nil, !opening else {
             view.needsLayout = true
@@ -614,6 +627,7 @@ final class StreamWindow {
     private func toggleHUD() {
         hud.isHidden.toggle()
         refreshHUD()
+        onHUDToggle?(!hud.isHidden)
     }
 
     // MARK: - Hint

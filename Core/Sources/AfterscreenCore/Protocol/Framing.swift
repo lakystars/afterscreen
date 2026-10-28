@@ -45,6 +45,11 @@ public enum MessageType: UInt8, CaseIterable {
     /// Sender's disconnect: power-off over the live stream
     /// Receiver says bye once the screen is black
     case powerOff = 0x27
+    /// Receiver settings a sender may change, as they stand
+    /// Only to senders whose hello reads them
+    case receiverOptions = 0x28
+    /// A sender's edit; heeded from a proven key or cable
+    case setReceiverOptions = 0x29
     case probe = 0x30
     case probeResult = 0x31
     case ping = 0x40

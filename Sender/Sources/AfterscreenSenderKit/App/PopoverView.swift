@@ -348,6 +348,9 @@ private struct SettingsPage: View {
                     }
                 }
             }
+            if model.snapshot.isStreaming, let options = model.snapshot.receiverOptions, options.editable {
+                ReceiverOptionsCard(options: options, receiver: model.receiverName) { model.changeReceiver($0) }
+            }
             Card(title: L10n.t("Menu bar", "메뉴 막대")) {
                 SwitchRow(title: L10n.t("Show frame rate and throughput", "프레임과 전송량 표시"), isOn: $settings.menuBarStats)
                     .help(L10n.t("Off: the icon only", "끄면 아이콘만 보입니다"))
@@ -426,6 +429,96 @@ private struct SettingsPage: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The connected receiver's own settings, as it allows
+/// Who may connect stays on the receiver
+private struct ReceiverOptionsCard: View {
+    var options: ReceiverOptions
+    var receiver: String
+    var edit: (ReceiverOptionsChange) -> Void
+
+    private var reconnects: String { L10n.t("Applies by reconnecting at once", "바꾸면 바로 다시 연결해 적용합니다") }
+
+    var body: some View {
+        Card(title: L10n.t("\(receiver) settings", "\(receiver) 설정")) {
+            VStack(alignment: .leading, spacing: 8) {
+                Row(label: L10n.t("Show the stream", "스트림 표시 방식"), value: "", help: reconnects) {
+                    menu(Binding(get: { options.presentation }, set: { edit(ReceiverOptionsChange(presentation: $0)) })) {
+                        ForEach(ReceiverOptions.Presentation.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                }
+                Row(label: L10n.t("Show on", "표시할 화면"), value: "",
+                    help: L10n.t("Automatic: \(receiver)'s own panel first. \(reconnects)", "자동: \(receiver) 자체 화면 우선. \(reconnects)")) {
+                    menu(Binding(get: { options.screen ?? "" }, set: { edit(ReceiverOptionsChange(screen: $0)) })) {
+                        Text(L10n.t("Automatic", "자동")).tag("")
+                        ForEach(options.screens, id: \.key) { screen in
+                            // Verbatim: no thousands separators
+                            Text(verbatim: "\(screen.name) · \(screen.pixels.width)×\(screen.pixels.height)").tag(screen.key)
+                        }
+                        if let missing = options.missingScreen, let key = options.screen {
+                            Text(L10n.t("\(missing) (not connected)", "\(missing) (연결 안 됨)")).tag(key)
+                        }
+                    }
+                }
+                SwitchRow(title: L10n.t("Switch to the panel's 1:1 resolution", "패널 1:1 해상도로 전환"),
+                          isOn: Binding(get: { options.matchPanelMode }, set: { edit(ReceiverOptionsChange(matchPanelMode: $0)) }))
+                    .help(L10n.t("While streaming, a scaled resolution on \(receiver) switches to the panel's own, so the stream is not resampled twice. \(reconnects)",
+                                 "스트리밍하는 동안 \(receiver)의 스케일된 해상도를 패널 본래 해상도로 바꿔 스트림이 두 번 리샘플링되지 않게 합니다. \(reconnects)"))
+                Row(label: L10n.t("Connection effect", "연결 효과"), value: "",
+                    help: L10n.t("Applies from the next connection", "다음 연결부터 적용됩니다")) {
+                    menu(Binding(get: { options.effect }, set: { edit(ReceiverOptionsChange(effect: $0)) })) {
+                        ForEach(ReceiverOptions.Effect.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                }
+                Row(label: L10n.t("Display with no sender", "송신기가 없을 때 화면"), value: "",
+                    help: L10n.t("After a disconnect. A stop on \(receiver) always shows its desktop", "연결이 끊긴 뒤의 화면입니다. \(receiver)에서 중지하면 항상 데스크톱이 보입니다")) {
+                    menu(Binding(get: { options.onDisconnect }, set: { edit(ReceiverOptionsChange(onDisconnect: $0)) })) {
+                        ForEach(ReceiverOptions.OnDisconnect.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                }
+                SwitchRow(title: L10n.t("Open at login", "로그인 시 열기"),
+                          isOn: Binding(get: { options.launchAtLogin }, set: { edit(ReceiverOptionsChange(launchAtLogin: $0)) }))
+                Text(L10n.t("Connections it accepts, pairings and permission to shut down are set on \(receiver).",
+                            "받을 연결, 페어링, 시스템 종료 허용은 \(receiver)에서 설정합니다."))
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func menu<Value: Hashable, Items: View>(_ selection: Binding<Value>, @ViewBuilder _ items: () -> Items) -> some View {
+        Picker("", selection: selection, content: items)
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+    }
+}
+
+extension ReceiverOptions.Presentation {
+    var title: String {
+        switch self {
+        case .space: return L10n.t("A desktop of its own", "별도 데스크톱")
+        case .cover: return L10n.t("Cover the whole screen", "화면 전체 덮기")
+        }
+    }
+}
+
+extension ReceiverOptions.Effect {
+    var title: String {
+        switch self {
+        case .tiles: return L10n.t("Tile wave", "타일 웨이브")
+        case .none: return L10n.t("None", "없음")
+        }
+    }
+}
+
+extension ReceiverOptions.OnDisconnect {
+    var title: String {
+        switch self {
+        case .showDesktop: return L10n.t("Show its desktop", "데스크톱 보기")
+        case .sleepDisplay: return L10n.t("Turn the display off", "화면 끄기")
         }
     }
 }
@@ -1014,6 +1107,12 @@ public struct PopoverView: View {
                         SwitchRow(title: L10n.t("Show sent blocks on \(receiver)", "\(receiver)에 보낸 블록 표시"), isOn: $model.flashBlocks)
                             .help(L10n.t("For checking: changed blocks flash red, blocks sent again sharper yellow, video blue. Off when Afterscreen starts again",
                                          "확인용: 바뀐 블록은 빨강, 선명하게 다시 보낸 블록은 노랑, 비디오는 파랑으로 잠깐 칠합니다. Afterscreen을 다시 실행하면 꺼집니다"))
+                        if let options = s.receiverOptions, options.editable {
+                            SwitchRow(title: L10n.t("Show the HUD on \(receiver)", "\(receiver)에 HUD 표시"),
+                                      isOn: Binding(get: { options.hud }, set: { model.changeReceiver(ReceiverOptionsChange(hud: $0)) }))
+                                .help(L10n.t("Link and frame figures over the picture. ⌥⌘I on \(receiver) also shows or hides them",
+                                             "화면 위에 링크와 프레임 정보를 띄웁니다. \(receiver)에서 ⌥⌘I로도 켜고 끕니다"))
+                        }
                         Row(StatName.compression, StatValue.compression(s.compressionRatio),
                             help: L10n.t("Tile data size before and after LZ4; 1.0× when the link has room and LZ4 is skipped. Video not included",
                                          "타일 데이터에 LZ4를 건 전후 크기 비율입니다. 링크에 여유가 있으면 LZ4를 쓰지 않아 1.0×입니다. 비디오는 빠집니다"))

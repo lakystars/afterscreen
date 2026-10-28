@@ -77,9 +77,9 @@ final class ReceiverPairingTests: XCTestCase {
         }
     }
 
-    private func hello(paired: Bool, nonce: Data) throws -> Message {
+    private func hello(paired: Bool, nonce: Data, readsOptions: Bool? = nil) throws -> Message {
         try JSONWire.message(.hello, Hello(protocolVersion: AfterscreenProtocol.version, name: "MBP", model: "Mac17,1", osVersion: "27",
-                                           senderID: "mac", nonce: nonce, paired: paired))
+                                           senderID: "mac", nonce: nonce, paired: paired, readsOptions: readsOptions))
     }
 
     private func streams(_ client: Connection) -> Bool {
@@ -347,5 +347,76 @@ final class ReceiverPairingTests: XCTestCase {
         XCTAssertNil(w.auth)
         XCTAssertEqual(w.receiverID, "imac")
         XCTAssertTrue(streams(client))
+    }
+
+    /// Edits reaching the app, with the session's trust then
+    private func edits(_ client: Connection) throws -> (edits: [ReceiverOptionsChange], trusted: Bool) {
+        let session = try XCTUnwrap(queue.sync { sessions.first })
+        var got: [ReceiverOptionsChange] = []
+        session.onOptionsChange = { got.append($0) }
+        client.send(try JSONWire.message(.setReceiverOptions, ReceiverOptionsChange(hud: true)))
+        // Edits arrive on main: keep its run loop turning
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        return (got, session.trusted)
+    }
+
+    func testAnUnpairedSendersOptionEditIsIgnored() throws {
+        required = false
+        let client = try connect()
+        _ = try reply(client, try hello(paired: false, nonce: Pairing.nonce()))
+        XCTAssertTrue(streams(client), "pairing off on this network")
+        let result = try edits(client)
+        XCTAssertEqual(result.edits, [])
+        XCTAssertFalse(result.trusted)
+    }
+
+    func testACabledSendersOptionEditArrives() throws {
+        required = false
+        cable = true
+        let client = try connect()
+        _ = try reply(client, try hello(paired: false, nonce: Pairing.nonce()))
+        XCTAssertTrue(streams(client))
+        let result = try edits(client)
+        XCTAssertEqual(result.edits, [ReceiverOptionsChange(hud: true)])
+        XCTAssertTrue(result.trusted)
+    }
+
+    func testAPairedSendersOptionEditArrives() throws {
+        let key = Pairing.nonce() + Pairing.nonce()
+        store.save(key, for: "mac", name: "MBP")
+        let client = try connect()
+        let nonce = Pairing.nonce()
+        let w = try JSONWire.decode(Welcome.self, from: try reply(client, try hello(paired: true, nonce: nonce)).payload)
+        let t = Pairing.Transcript(senderID: "mac", receiverID: "imac", senderNonce: nonce, receiverNonce: try XCTUnwrap(w.auth).nonce)
+        _ = try reply(client, try JSONWire.message(.auth, AuthProof(mac: Pairing.proof(key: key, role: .sender, transcript: t))))
+        XCTAssertTrue(streams(client))
+        let result = try edits(client)
+        XCTAssertEqual(result.edits, [ReceiverOptionsChange(hud: true)])
+        XCTAssertTrue(result.trusted)
+    }
+
+    /// Options the receiver sends after `hello`; nil when none came
+    private func optionsSent(readsOptions: Bool?) throws -> ReceiverOptions? {
+        required = false
+        cable = true
+        let client = try connect()
+        _ = try reply(client, try hello(paired: false, nonce: Pairing.nonce(), readsOptions: readsOptions))
+        XCTAssertTrue(streams(client))
+        let session = try XCTUnwrap(queue.sync { sessions.first })
+        queue.sync { inbox.removeAll() }
+        session.send(ReceiverOptions(editable: true, hud: true, presentation: .space, screens: [], screen: nil, missingScreen: nil,
+                                     matchPanelMode: true, effect: .tiles, onDisconnect: .showDesktop, launchAtLogin: false))
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        return try queue.sync { try inbox.first { $0.type == .receiverOptions }.map { try JSONWire.decode(ReceiverOptions.self, from: $0.payload) } }
+    }
+
+    func testOptionsGoOnlyToSendersThatReadThem() throws {
+        XCTAssertNil(try optionsSent(readsOptions: nil), "an older sender closes on an unknown message")
+    }
+
+    func testOptionsReachASenderThatReadsThem() throws {
+        XCTAssertEqual(try optionsSent(readsOptions: true)?.hud, true)
     }
 }

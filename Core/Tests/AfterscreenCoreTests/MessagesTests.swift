@@ -111,6 +111,49 @@ final class MessagesTests: XCTestCase {
         XCTAssertEqual(try PingWire.decode(PingWire.encode(123_456_789_012)), 123_456_789_012)
         XCTAssertThrowsError(try PingWire.decode(Data([1, 2])))
     }
+
+    private let options = ReceiverOptions(editable: true, hud: false, presentation: .space,
+                                          screens: [ReceiverOptions.Screen(key: "imac", name: "iMac", pixels: PixelSize(width: 5120, height: 2880))],
+                                          screen: "gone", missingScreen: "LG", matchPanelMode: true, effect: .tiles,
+                                          onDisconnect: .showDesktop, launchAtLogin: false)
+
+    func testReceiverOptionsRoundTrip() throws {
+        try roundTrip(options)
+        try roundTrip(Hello(protocolVersion: 1, name: "MacBook", model: "Mac17,1", osVersion: "27.0", readsOptions: true))
+    }
+
+    func testAnOptionsEditCarriesOnlyItsFields() throws {
+        XCTAssertEqual(String(decoding: try JSONWire.encode(ReceiverOptionsChange(hud: true)), as: UTF8.self), #"{"hud":true}"#)
+        try roundTrip(ReceiverOptionsChange(presentation: .cover, screen: "", effect: .tiles))
+    }
+
+    func testANewerSendersValueIsSkippedNotTheEdit() throws {
+        let edit = try JSONWire.decode(ReceiverOptionsChange.self, from: Data(#"{"hud":true,"effect":"sparkle","matchPanelMode":"yes"}"#.utf8))
+        XCTAssertEqual(edit, ReceiverOptionsChange(hud: true))
+    }
+
+    func testAReopenByeAsksTheSenderBack() throws {
+        try roundTrip(Bye(reason: "Applying", relink: true, reopen: true))
+        XCTAssertNil(try JSONWire.decode(Bye.self, from: Data(#"{"reason":"older"}"#.utf8)).reopen)
+    }
+
+    func testAnEditAppliesToTheOptionsShown() {
+        let automatic = options.applying(ReceiverOptionsChange(screen: ""))
+        XCTAssertNil(automatic.screen)
+        XCTAssertNil(automatic.missingScreen, "automatic misses no screen")
+        let picked = options.applying(ReceiverOptionsChange(screen: "imac"))
+        XCTAssertEqual(picked.screen, "imac")
+        XCTAssertNil(picked.missingScreen)
+        XCTAssertEqual(options.applying(ReceiverOptionsChange(screen: "other")), options, "a screen not listed changes nothing")
+        // Spelled out: a bare .none is the optional's nil
+        let all = options.applying(ReceiverOptionsChange(hud: true, presentation: .cover, matchPanelMode: false, effect: ReceiverOptions.Effect.none,
+                                                         onDisconnect: .sleepDisplay, launchAtLogin: true))
+        XCTAssertEqual([all.hud, all.matchPanelMode, all.launchAtLogin], [true, false, true])
+        XCTAssertEqual(all.presentation, .cover)
+        XCTAssertEqual(all.effect, ReceiverOptions.Effect.none)
+        XCTAssertEqual(all.onDisconnect, .sleepDisplay)
+        XCTAssertEqual(all.screen, "gone", "untouched fields stay")
+    }
 }
 
 final class VideoWireTests: XCTestCase {

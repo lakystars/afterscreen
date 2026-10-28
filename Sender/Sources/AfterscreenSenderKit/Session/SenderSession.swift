@@ -64,6 +64,8 @@ public struct SenderSnapshot {
     public var pairing: String?
     /// Wrong codes typed for this pairing
     public var wrongCodes = 0
+    /// Receiver settings this Mac may change; nil from older receivers
+    public var receiverOptions: ReceiverOptions?
 
     public init() {}
 
@@ -94,6 +96,8 @@ public final class SenderSession {
     public private(set) var pausedByReceiver = false
     /// Receiver gave way to this session: connect again
     public private(set) var askedBack = false
+    /// Receiver reopened for an edit made here
+    public private(set) var reopened = false
     /// Debug: the receiver tints blocks as they arrive
     /// Rides the stats: on screen within a second
     public var flashBlocks = false
@@ -200,6 +204,14 @@ public final class SenderSession {
         // Levels of the two modes are different scales
         brightnessSent = nil
         if snapshot.isStreaming { followBrightness() }
+    }
+
+    /// Main queue: a receiver settings edit, shown at once
+    /// Only where the receiver reported its settings editable
+    public func setReceiverOptions(_ change: ReceiverOptionsChange) {
+        guard let options = snapshot.receiverOptions, options.editable, let c = connection, !c.isClosed else { return }
+        c.send(.setReceiverOptions, json: change)
+        update { $0.receiverOptions = options.applying(change) }
     }
 
     /// Receiver 8-bit step smoothing; sent at handshake and on change
@@ -371,7 +383,8 @@ public final class SenderSession {
         let paired = (!target.deviceID.isEmpty && pairings.key(for: target.deviceID) != nil) || pairings.pairs.contains { $0.name == target.name }
         connection?.send(.hello, json: Hello(protocolVersion: AfterscreenProtocol.version, name: host, model: HardwareModel.identifier,
                                              osVersion: "\(os.majorVersion).\(os.minorVersion)", senderID: senderID, nonce: helloNonce,
-                                             paired: paired, repair: SenderSession.disowned.contains(target.deviceID) ? true : nil))
+                                             paired: paired, repair: SenderSession.disowned.contains(target.deviceID) ? true : nil,
+                                             readsOptions: true))
     }
 
     /// `relink`: new session follows at once; receiver keeps its picture
@@ -911,6 +924,10 @@ public final class SenderSession {
             guard let stats = try? JSONWire.decode(ReceiverStats.self, from: m.payload) else { return }
             snapshot.receiver = stats
             testRun?.receiverStats(stats)
+        case .receiverOptions:
+            // Unreadable, as from a newer receiver: no edits offered
+            let options = try? JSONWire.decode(ReceiverOptions.self, from: m.payload)
+            update { $0.receiverOptions = options }
         case .keyRequest:
             streamer?.requestKeyframe()
             testRun?.requestKeyframe()
@@ -919,6 +936,7 @@ public final class SenderSession {
             pausedByReceiver = bye?.pause ?? false
             // Not after a disconnect from this Mac
             askedBack = bye?.relink == true && !stopping && closing == nil
+            reopened = askedBack && bye?.reopen == true
             SenderSession.disowned.formUnion(SenderSession.disownedBy(bye, receiverID: pendingWelcome?.receiverID))
             end(bye?.reason ?? "Receiver stopped")
         default:

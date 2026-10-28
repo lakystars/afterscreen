@@ -1,4 +1,5 @@
 import Combine
+import CoreGraphics
 import Foundation
 import AfterscreenCore
 
@@ -11,29 +12,14 @@ public final class ReceiverSettings: ObservableObject {
         case wired
     }
 
-    /// Where the stream shows
-    public enum Presentation: String, CaseIterable {
-        /// Own full-screen Space; Control-arrow switches to the iMac's desktops
-        case space
-        /// Above everything, menu bar and Dock included
-        case cover
-    }
-
-    /// Power-on and power-off effect
-    public enum Effect: String, CaseIterable {
-        /// Tiles open centre-out, close corners-in
-        case tiles
-        case none
-    }
+    // Shared with senders, which may change them
+    public typealias Presentation = ReceiverOptions.Presentation
+    public typealias Effect = ReceiverOptions.Effect
+    public typealias OnDisconnect = ReceiverOptions.OnDisconnect
 
     /// Screen corner the HUD snaps to
     public enum HUDCorner: String, CaseIterable {
         case topLeft, topRight, bottomLeft, bottomRight
-    }
-
-    public enum OnDisconnect: String, CaseIterable {
-        case showDesktop
-        case sleepDisplay
     }
 
     /// A screen picked in the settings
@@ -144,6 +130,31 @@ public final class ReceiverSettings: ObservableObject {
         accept == .any || link != .wifi
     }
 
+    /// Settings a sender may change; HUD state from the screen
+    public func options(screens: [ReceiverDisplay], hud: Bool, editable: Bool) -> ReceiverOptions {
+        let missing = display.flatMap { chosen in screens.contains { $0.key == chosen.key } ? nil : chosen.name }
+        return ReceiverOptions(editable: editable, hud: hud, presentation: presentation,
+                               screens: screens.map { ReceiverOptions.Screen(key: $0.key, name: $0.name, pixels: $0.pixels) },
+                               screen: display?.key, missingScreen: missing, matchPanelMode: matchPanelMode, effect: effect,
+                               onDisconnect: onDisconnect, launchAtLogin: launchAtLogin)
+    }
+
+    /// A trusted sender's edit; HUD left to the caller
+    public func apply(_ change: ReceiverOptionsChange, screens: [ReceiverDisplay]) {
+        if let v = change.presentation { presentation = v }
+        if let key = change.screen {
+            if key.isEmpty {
+                display = nil
+            } else if let d = screens.first(where: { $0.key == key }) {
+                display = ChosenDisplay(key: d.key, name: d.name)
+            }
+        }
+        if let v = change.matchPanelMode { matchPanelMode = v }
+        if let v = change.effect { effect = v }
+        if let v = change.onDisconnect { onDisconnect = v }
+        if let v = change.launchAtLogin, v != launchAtLogin { launchAtLogin = v }
+    }
+
     /// Starts the app at login in the user's GUI session
     /// Located by bundle id, independent of install path
     public var launchAtLogin: Bool {
@@ -163,5 +174,19 @@ public final class ReceiverSettings: ObservableObject {
             try? FileManager.default.createDirectory(at: agentFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: agentFile)
         }
+    }
+}
+
+/// What a stream's window opens with; fixed until it closes
+struct StreamWindowSettings: Equatable {
+    var presentation: ReceiverSettings.Presentation
+    var display: CGDirectDisplayID
+    var matchPanelMode: Bool
+
+    /// The edit touched these and the window differs now
+    /// A change made here waits for the next connection
+    static func reopens(_ change: ReceiverOptionsChange, open: StreamWindowSettings, next: StreamWindowSettings) -> Bool {
+        let touched = change.presentation != nil || change.screen != nil || change.matchPanelMode != nil
+        return touched && open != next
     }
 }

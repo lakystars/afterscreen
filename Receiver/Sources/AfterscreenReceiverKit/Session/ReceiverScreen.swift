@@ -24,6 +24,14 @@ public final class ReceiverScreen: StreamDisplay {
     var onHUDChange: ((ReceiverSettings.HUDCorner, Bool) -> Void)? {
         didSet { window.onHUDChange = onHUDChange }
     }
+    /// Main queue: HUD shown; changes go to `onHUDToggle`
+    var hudShown: Bool {
+        get { window.hudShown }
+        set { window.hudShown = newValue }
+    }
+    var onHUDToggle: ((Bool) -> Void)? {
+        didSet { window.onHUDToggle = onHUDToggle }
+    }
 
     // Per-item autorelease: busy queue would retain payloads via Metal objects
     public let decodeQueue = DispatchQueue(label: "afterscreen.decode", qos: .userInteractive, autoreleaseFrequency: .workItem)

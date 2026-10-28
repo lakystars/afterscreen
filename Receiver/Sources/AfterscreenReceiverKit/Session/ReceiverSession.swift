@@ -148,6 +148,15 @@ public final class ReceiverSession {
     public var relinking: Bool { peerBye?.relink ?? false }
     /// Main queue: the current link is a point-to-point cable
     public var cable = false
+    /// Main queue: admitted with a proven pairing key
+    public private(set) var keyed = false
+    /// Main queue: the sender's edits are heeded
+    /// A proven key or a cable, as for power requests
+    public var trusted: Bool { keyed || cable }
+    /// Main queue: a trusted sender's settings edit
+    public var onOptionsChange: ((ReceiverOptionsChange) -> Void)?
+    /// Session queue: the sender's hello takes `receiverOptions`
+    private var readsOptions = false
     /// Sender's power request, from a proven key or cable
     /// Read on main once the session has ended
     public var powerRequest: ReceiverPower? { sessionKey != nil || cable ? askedPower : nil }
@@ -547,6 +556,16 @@ public final class ReceiverSession {
         case .brightness:
             guard currentPeer != nil, let light = try? BrightnessWire.decode(m.payload) else { return }
             DispatchQueue.main.async { [weak self] in self?.display?.setBrightness(light) }
+        case .setReceiverOptions:
+            guard currentPeer != nil, let change = try? JSONWire.decode(ReceiverOptionsChange.self, from: m.payload) else { return }
+            let keyed = sessionKey != nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                guard keyed || self.cable else {
+                    return FileHandle.standardError.write(Data("[receiver] Ignored a settings edit: no pairing key or cable\n".utf8))
+                }
+                self.onOptionsChange?(change)
+            }
         case .probe:
             probe(m, on: connection)
         case .reconfigure:
@@ -575,7 +594,7 @@ public final class ReceiverSession {
         case .switchover:
             switchOver()
         case .welcome, .probeResult, .pong, .stats, .keyRequest, .cursorChannel, .authOK, .paired, .pairWrong,
-             .handover, .handoverChallenge, .handoverProof, .handoverOK:
+             .handover, .handoverChallenge, .handoverProof, .handoverOK, .receiverOptions:
             break
         }
     }
@@ -797,7 +816,31 @@ public final class ReceiverSession {
         configLock.lock()
         currentPeer = hello
         configLock.unlock()
-        DispatchQueue.main.async { [weak self] in self?.onPeer?(hello) }
+        readsOptions = hello.readsOptions == true
+        let keyed = sessionKey != nil
+        DispatchQueue.main.async { [weak self] in
+            self?.keyed = keyed
+            self?.onPeer?(hello)
+        }
+    }
+
+    /// Any queue: current settings, to a sender that reads them
+    public func send(_ options: ReceiverOptions) {
+        queue.async { [self] in
+            guard readsOptions, !ended, suspended == nil else { return }
+            connection.send(.receiverOptions, json: options)
+        }
+    }
+
+    /// Ends for settings that take a new window
+    /// The bye brings the sender back at once
+    public func reopen(reason: String) {
+        queue.async { [self] in
+            leaving = true
+            if suspended != nil { return finish(reason: reason) }
+            connection.send(.bye, json: Bye(reason: reason, relink: true, reopen: true))
+            connection.closeAfterFlush(reason: reason)
+        }
     }
 
     private var lockedReason: String {

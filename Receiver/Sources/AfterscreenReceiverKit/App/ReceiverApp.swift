@@ -58,6 +58,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private var settingsWindow: NSWindow?
     /// Session stopped on this Mac: display stays on
     private var stoppedHere = false
+    /// Ended for a sender's edit; it comes right back
+    private var reopening = false
 
     public override init() {}
 
@@ -106,6 +108,11 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             self?.settings.hudCorner = corner
             self?.settings.hudCollapsed = collapsed
         }
+        screen?.onHUDToggle = { [weak self] _ in self?.sendOptions() }
+        // Edits here or from the sender; one report per burst
+        settings.objectWillChange.debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.sendOptions() }
+            .store(in: &cancellables)
         guard screen != nil else {
             state("Metal is unavailable on \(ComputerName.current)", "\(ComputerName.current)에서는 Metal을 쓸 수 없습니다")
             return
@@ -173,6 +180,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 self.advertise()
+                self.sendOptions()
                 self.screenCheck?.cancel()
                 let check = DispatchWorkItem { [weak self] in self?.endIfScreenLeft() }
                 self.screenCheck = check
@@ -251,11 +259,18 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             session?.linkChanged(to: link)
             session?.cable = ReceiverAppDelegate.isCable(c, link)
             self?.showStatus(link: link)
+            // On or off a cable: edits allowed or not
+            self?.sendOptions()
             FileHandle.standardError.write(Data("[receiver] Handed over to \(LinkLabel.name(link))\n".utf8))
         }
         session.onPeer = { [weak self] hello in
             self?.state("Streaming from \(hello.name)", "\(hello.name)에서 스트리밍 중")
             self?.showStatus(link: link)
+            self?.sendOptions()
+        }
+        session.onOptionsChange = { [weak self, weak session] change in
+            guard let session = session else { return }
+            self?.applyRemote(change, from: session)
         }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
@@ -269,9 +284,19 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             let peer = session?.peer?.name ?? L10n.t("sender", "송신기")
             self.lastSummary = L10n.t("Last session: \(peer), \(duration / 60)m \(duration % 60)s — \(reason)",
                                       "마지막 연결: \(peer), \(duration / 60)분 \(duration % 60)초 — \(reason)")
-            self.apply(AfterSession.action(streamed: session?.config.map { !$0.test } ?? false, relinking: session?.relinking ?? false,
+            self.apply(AfterSession.action(streamed: session?.config.map { !$0.test } ?? false,
+                                           relinking: (session?.relinking ?? false) || self.reopening,
                                            stoppedHere: self.stoppedHere, request: session?.powerRequest, onDisconnect: self.settings.onDisconnect))
             self.stoppedHere = false
+            if self.reopening {
+                self.reopening = false
+                // Not back as a relink would be: as a disconnect
+                DispatchQueue.main.asyncAfter(deadline: .now() + StreamWindow.relinkWait) { [weak self] in
+                    guard let self = self, self.session == nil else { return }
+                    self.apply(AfterSession.action(streamed: true, relinking: false, stoppedHere: false, request: nil,
+                                                   onDisconnect: self.settings.onDisconnect))
+                }
+            }
             self.session = nil
             self.state("Waiting for a sender", "송신기를 기다리는 중")
             self.showStatus(link: nil)
@@ -291,6 +316,30 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         } else {
             statusItem.button?.title = link == nil ? "▭" : "▭ ●"
         }
+    }
+
+    /// Settings a sender may change, to the current sender
+    private func sendOptions() {
+        guard let session = session, session.peer != nil else { return }
+        session.send(settings.options(screens: ReceiverDisplay.connected(), hud: screen?.hudShown ?? false, editable: session.trusted))
+    }
+
+    /// A trusted sender's edit; window settings open the stream anew
+    private func applyRemote(_ change: ReceiverOptionsChange, from session: ReceiverSession) {
+        guard self.session === session, let screen = screen else { return }
+        // As the open window was set up at accept
+        let open = StreamWindowSettings(presentation: screen.presentation, display: screen.display, matchPanelMode: screen.matchPanelMode)
+        settings.apply(change, screens: ReceiverDisplay.connected())
+        if let shown = change.hud { screen.hudShown = shown }
+        let next = StreamWindowSettings(presentation: settings.presentation, display: target()?.id ?? CGMainDisplayID(),
+                                        matchPanelMode: settings.matchPanelMode)
+        // A stop on this Mac outranks the edit
+        let reopen = StreamWindowSettings.reopens(change, open: open, next: next) && !stoppedHere && session.config != nil
+        let fields = (try? JSONWire.encode(change)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        FileHandle.standardError.write(Data("[receiver] Settings from \(session.peer?.name ?? "the sender"): \(fields)\(reopen ? ", reopening" : "")\n".utf8))
+        guard reopen else { return }
+        reopening = true
+        session.reopen(reason: L10n.t("Applying the new settings", "새 설정을 적용하는 중"))
     }
 
     private func hudContent() -> HUDContent? {

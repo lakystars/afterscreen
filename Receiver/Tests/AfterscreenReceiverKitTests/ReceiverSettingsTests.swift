@@ -140,6 +140,51 @@ final class ReceiverSettingsTests: XCTestCase {
         s.launchAtLogin = false
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
     }
+
+    private let imac = ReceiverDisplay(id: 1, key: "imac", name: "iMac", pixels: PixelSize(width: 5120, height: 2880), builtIn: true, main: true)
+    private let lg = ReceiverDisplay(id: 2, key: "lg", name: "LG", pixels: PixelSize(width: 3840, height: 2160), builtIn: false, main: false)
+
+    func testASendersEditSetsOnlyItsFields() {
+        let s = settings()
+        s.apply(ReceiverOptionsChange(effect: ReceiverOptions.Effect.none, onDisconnect: .sleepDisplay, launchAtLogin: true), screens: [imac, lg])
+        XCTAssertEqual(s.effect, ReceiverOptions.Effect.none)
+        XCTAssertEqual(s.onDisconnect, .sleepDisplay)
+        XCTAssertTrue(s.launchAtLogin)
+        XCTAssertEqual(s.presentation, .space, "untouched")
+
+        s.apply(ReceiverOptionsChange(presentation: .cover, matchPanelMode: false), screens: [imac, lg])
+        XCTAssertEqual(s.presentation, .cover)
+        XCTAssertFalse(s.matchPanelMode)
+
+        s.apply(ReceiverOptionsChange(screen: "gone"), screens: [imac, lg])
+        XCTAssertNil(s.display, "a screen not listed changes nothing")
+        s.apply(ReceiverOptionsChange(screen: "lg"), screens: [imac, lg])
+        XCTAssertEqual(s.display, ReceiverSettings.ChosenDisplay(key: "lg", name: "LG"))
+        s.apply(ReceiverOptionsChange(screen: ""), screens: [imac, lg])
+        XCTAssertNil(s.display, "empty is automatic")
+    }
+
+    func testOnlyAnEditToTheOpenWindowsSettingsReopensIt() {
+        let open = StreamWindowSettings(presentation: .space, display: 1, matchPanelMode: true)
+        let cover = StreamWindowSettings(presentation: .cover, display: 1, matchPanelMode: true)
+        XCTAssertTrue(StreamWindowSettings.reopens(ReceiverOptionsChange(presentation: .cover), open: open, next: cover))
+        XCTAssertFalse(StreamWindowSettings.reopens(ReceiverOptionsChange(screen: ""), open: open, next: open),
+                       "automatic picks the screen already shown")
+        XCTAssertFalse(StreamWindowSettings.reopens(ReceiverOptionsChange(effect: .tiles), open: open, next: cover),
+                       "a pending change made here waits for the next connection")
+    }
+
+    func testOptionsNameAChosenScreenThatIsGone() {
+        let s = settings()
+        s.display = ReceiverSettings.ChosenDisplay(key: "lg", name: "LG")
+        let gone = s.options(screens: [imac], hud: true, editable: false)
+        XCTAssertEqual(gone.screens, [ReceiverOptions.Screen(key: "imac", name: "iMac", pixels: PixelSize(width: 5120, height: 2880))])
+        XCTAssertEqual(gone.screen, "lg")
+        XCTAssertEqual(gone.missingScreen, "LG")
+        XCTAssertTrue(gone.hud)
+        XCTAssertFalse(gone.editable)
+        XCTAssertNil(s.options(screens: [imac, lg], hud: false, editable: true).missingScreen)
+    }
 }
 
 final class AfterSessionTests: XCTestCase {
