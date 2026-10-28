@@ -66,9 +66,11 @@ public final class AppModel: ObservableObject {
         self.pairings = pairings
         pairedIDs = Set(pairings.pairs.map(\.id))
         discovery.onChange = { [weak self] list in
-            self?.receivers = list
-            self?.refreshLinks()
-            self?.considerAutoConnect()
+            guard let self = self else { return }
+            let fresh = AppModel.listsNewEndpoint(old: self.receivers, new: list)
+            self.receivers = list
+            self.refreshLinks()
+            if fresh { self.considerAutoConnect() }
         }
         discovery.start()
         // Cable plug/unplug changes which links reach a receiver
@@ -399,6 +401,8 @@ public final class AppModel: ObservableObject {
                 self.lastMessage = reason
                 return
             }
+            // A restarted receiver may listen on a new port
+            self.discovery.refresh(receiver.name)
             self.scheduleRetry()
             self.refreshLinks()
         }
@@ -471,6 +475,12 @@ public final class AppModel: ObservableObject {
         start(receiver, manual: false)
     }
 
+    /// A receiver newly listed or on a new port
+    /// Address-only changes wait for the retry backoff
+    static func listsNewEndpoint(old: [DiscoveredReceiver], new: [DiscoveredReceiver]) -> Bool {
+        new.contains { r in !old.contains { $0.name == r.name && $0.port == r.port } }
+    }
+
     static func connectsWithoutCode(paired: Bool, route: LinkKind?) -> Bool {
         paired || route == .thunderbolt || route == .usb || route == .loopback
     }
@@ -537,6 +547,8 @@ public final class AppModel: ObservableObject {
             if let r = s.qualityTest { self?.testReport = r }
         }
         session.onEnd = { [weak self] reason in
+            // A restarted receiver may listen on a new port
+            self?.discovery.refresh(receiver.name)
             self?.session = nil
             self?.isTesting = false
             self?.follow(pairing: nil)

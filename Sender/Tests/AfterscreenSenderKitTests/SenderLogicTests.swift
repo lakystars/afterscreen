@@ -155,6 +155,18 @@ final class CursorNormalizeTests: XCTestCase {
         XCTAssertFalse(AppModel.connectsWithoutCode(paired: false, route: nil), "links not known yet: wait")
     }
 
+    func testOnlyANewReceiverOrPortConnectsAtOnce() {
+        func imac(_ port: UInt16, _ addresses: [String]) -> DiscoveredReceiver {
+            DiscoveredReceiver(name: "iMac", model: "", panel: "", port: port, host: "imac.local.", addresses: addresses)
+        }
+        let listed = [imac(4000, ["169.254.1.2"])]
+        XCTAssertTrue(AppModel.listsNewEndpoint(old: [], new: listed))
+        XCTAssertTrue(AppModel.listsNewEndpoint(old: listed, new: [imac(4001, ["169.254.1.2"])]), "restarted on a new port")
+        XCTAssertFalse(AppModel.listsNewEndpoint(old: listed, new: [imac(4000, ["192.168.0.150", "169.254.1.2"])]),
+                       "addresses vary per answer: the backoff holds")
+        XCTAssertFalse(AppModel.listsNewEndpoint(old: listed, new: []))
+    }
+
     func testAKnownReceiverMustProveItself() {
         XCTAssertTrue(SenderSession.expectsProof(pairedTarget: true, pairedReceiver: false, pairedName: false))
         XCTAssertTrue(SenderSession.expectsProof(pairedTarget: false, pairedReceiver: true, pairedName: false))
@@ -764,5 +776,36 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertEqual(list.map(\.name), ["iMac"], "still reachable over Wi-Fi")
         discovery.netServiceBrowser(browser, didRemove: wifi, moreComing: false)
         XCTAssertEqual(list.map(\.name), [])
+    }
+
+    /// Resolves at once to `current`, without the network
+    private final class Restarting: NetService {
+        var current = 4000
+        override var port: Int { current }
+        override func resolve(withTimeout timeout: TimeInterval) { delegate?.netServiceDidResolveAddress?(self) }
+    }
+
+    func testARefreshPublishesOnlyANewPort() {
+        let discovery = Discovery()
+        var lists: [[DiscoveredReceiver]] = []
+        discovery.onChange = { lists.append($0) }
+        let browser = NetServiceBrowser()
+        let imac = Restarting(domain: "local.", type: AfterscreenProtocol.bonjourType + ".", name: "iMac")
+        let other = Restarting(domain: "local.", type: AfterscreenProtocol.bonjourType + ".", name: "Other")
+        discovery.netServiceBrowser(browser, didFind: imac, moreComing: true)
+        discovery.netServiceBrowser(browser, didFind: other, moreComing: false)
+        XCTAssertEqual(lists.count, 2)
+
+        // Unchanged: no connect at once after a failure
+        discovery.refresh("iMac")
+        XCTAssertEqual(lists.count, 2)
+
+        // Restarted fast: same name, new port, no browser event
+        imac.current = 4001
+        other.current = 4002
+        discovery.refresh("iMac")
+        XCTAssertEqual(lists.count, 3)
+        XCTAssertEqual(lists.last?.first { $0.name == "iMac" }?.port, 4001)
+        XCTAssertEqual(lists.last?.first { $0.name == "Other" }?.port, 4000, "only the named receiver resolves again")
     }
 }

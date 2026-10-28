@@ -33,6 +33,16 @@ final class Discovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
         browser.stop()
     }
 
+    /// Resolves `name` again after a failed connection
+    /// A fast restart moves the port without a browser event
+    /// Stopped first: a resolve still running refuses another
+    func refresh(_ name: String) {
+        for service in services where service.name == name {
+            service.stop()
+            service.resolve(withTimeout: 5)
+        }
+    }
+
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         services.append(service)
         service.delegate = self
@@ -55,8 +65,11 @@ final class Discovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
         let txt = sender.txtRecordData().map(NetService.dictionary(fromTXTRecord:)) ?? [:]
         func text(_ key: String) -> String { txt[key].flatMap { String(data: $0, encoding: .utf8) } ?? "" }
         let addresses = (sender.addresses ?? []).compactMap(Discovery.ip(from:))
-        resolved[sender.name] = DiscoveredReceiver(name: sender.name, model: text("model"), panel: text("panel"), port: port,
-                                                   host: sender.hostName ?? "", addresses: addresses, deviceID: text("id"))
+        let receiver = DiscoveredReceiver(name: sender.name, model: text("model"), panel: text("panel"), port: port,
+                                          host: sender.hostName ?? "", addresses: addresses, deviceID: text("id"))
+        // Unchanged: a refresh would connect at once, past the backoff
+        guard resolved[sender.name] != receiver else { return }
+        resolved[sender.name] = receiver
         publish()
     }
 
