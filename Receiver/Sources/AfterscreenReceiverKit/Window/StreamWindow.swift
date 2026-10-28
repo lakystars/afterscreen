@@ -128,8 +128,9 @@ final class StreamWindow {
         return menu
     }
 
-    /// This Mac's pointer over a stream in its own Space
+    /// This Mac's pointer over the stream, while it moves
     /// A ring: distinct from the sender's pointer
+    /// A cursor rect, not NSCursor.hide: no counts to unbalance
     static let localPointer: NSCursor = {
         let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { rect in
             let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 4, dy: 4))
@@ -229,10 +230,11 @@ final class StreamWindow {
     private var contentPixels = CGSize.zero
     /// HUD shown for a quality test, not by the user
     private var forcedHUD = false
-    private var cursorHidden = false
     private var mouseMonitor: Any?
     private var idleTimer: Timer?
     private var observers: [NSObjectProtocol] = []
+    /// Screens waking: a refused activation is tried again
+    private var wakeObserver: NSObjectProtocol?
     private let actions = MenuActions()
     private let panelMode = PanelMode()
     /// Mode put back once a closed Space has slid away
@@ -374,14 +376,15 @@ final class StreamWindow {
         NSApp.activate(ignoringOtherApps: true)
         if !windowed && !style.fullScreen {
             NSApp.presentationOptions = [.hideDock, .hideMenuBar]
-            NSCursor.hide()
-            cursorHidden = true
         }
         window.makeKeyAndOrderFront(nil)
         if style.fullScreen {
             // Power-on runs once the Space has slid in
             window.toggleFullScreen(nil)
             retryFullScreen(window)
+        }
+        if !windowed {
+            // Shown while it moves, as to drag the HUD
             NSCursor.setHiddenUntilMouseMoves(true)
             mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDown]) { [weak self] event in
                 self?.scheduleCursorHide()
@@ -394,6 +397,17 @@ final class StreamWindow {
         hudTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshHUD() }
         view.needsLayout = true
         if !style.fullScreen { powerOn() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.claimFocus() }
+    }
+
+    /// Active app, key window: keys and the pointer's cursor rect
+    /// Refused while the screen sleeps, as at a wake's reconnect
+    private func claimFocus() {
+        // Not when its Space was left on purpose
+        guard !windowed, let window = window, window.isOnActiveSpace, keyMonitor != nil,
+              !(NSApp.isActive && window.isKeyWindow) else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// Sender switching links: everything stays up for its next session
@@ -466,8 +480,6 @@ final class StreamWindow {
         noticeBox.removeAllAnimations()
         noticeBox.opacity = 0
         pendingNotice = nil
-        if cursorHidden { NSCursor.unhide() }
-        cursorHidden = false
         if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
         mouseMonitor = nil
         idleTimer?.invalidate()
@@ -560,6 +572,13 @@ final class StreamWindow {
     /// `screen`: without it AppKit moves the window to the main one
     private func makeWindow(_ style: Style, frame: NSRect, on screen: NSScreen?) -> KeyWindow {
         observers.forEach(NotificationCenter.default.removeObserver)
+        let workspace = NSWorkspace.shared.notificationCenter
+        if let old = wakeObserver { workspace.removeObserver(old) }
+        // Once more a second later: activation may lag the screens
+        wakeObserver = workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.claimFocus()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.claimFocus() }
+        }
         window?.contentView = nil
         // This initializer takes the rect from the screen's origin
         let origin = screen?.frame.origin ?? .zero
@@ -577,7 +596,7 @@ final class StreamWindow {
         }
         container.frame = NSRect(origin: .zero, size: frame.size)
         view.frame = container.bounds
-        view.pointer = style.fullScreen ? StreamWindow.localPointer : nil
+        view.pointer = windowed ? nil : StreamWindow.localPointer
         window.contentView = container
         window.invalidateCursorRects(for: view)
         let center = NotificationCenter.default
@@ -586,6 +605,11 @@ final class StreamWindow {
                 guard let window = window else { return }
                 self?.onVisibilityChange?(window.occlusionState.contains(.visible))
                 self?.reportShown()
+            },
+            // Key once active: the ring applies, hidden till moved
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                guard self?.windowed == false else { return }
+                NSCursor.setHiddenUntilMouseMoves(true)
             },
             center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self, weak window] _ in
                 guard let self = self, let window = window else { return }
