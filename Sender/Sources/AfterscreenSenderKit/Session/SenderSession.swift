@@ -1355,6 +1355,7 @@ public final class SenderSession {
         var stats = snapshot.wireStats
         stats.congestionNotice = notice ? true : nil
         stats.flashBlocks = flashBlocks ? true : nil
+        stats.language = L10n.shown.rawValue
         connection?.send(.senderStats, json: stats)
         if SenderSession.logStats { logLine() }
     }

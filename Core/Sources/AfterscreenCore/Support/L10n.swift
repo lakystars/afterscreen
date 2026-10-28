@@ -28,6 +28,9 @@ public enum L10n {
         isKorean(language) ? korean : english
     }
 
+    /// The language text shows in; system resolved
+    public static var shown: Language { isKorean(language) ? .korean : .english }
+
     /// Picker label for each choice, in its own language
     public static func name(_ language: Language) -> String {
         switch language {

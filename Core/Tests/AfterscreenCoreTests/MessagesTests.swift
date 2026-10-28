@@ -186,6 +186,15 @@ final class L10nTests: XCTestCase {
         L10n.language = .english
         XCTAssertEqual(L10n.t("Throughput", "전송량"), "Throughput")
     }
+
+    func testTheShownLanguageIsNeverSystem() {
+        let saved = L10n.language
+        defer { L10n.language = saved }
+        L10n.language = .korean
+        XCTAssertEqual(L10n.shown, .korean)
+        L10n.language = .system
+        XCTAssertNotEqual(L10n.shown, .system, "a receiver shows what this Mac shows")
+    }
 }
 
 final class AudioWireTests: XCTestCase {

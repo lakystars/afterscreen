@@ -90,6 +90,7 @@ public final class ReceiverSettings: ObservableObject {
     public var hudCollapsed: Bool {
         didSet { defaults.set(hudCollapsed, forKey: Key.hudCollapsed) }
     }
+    /// The last sender's shown language; system before any
     @Published public var language: Language {
         didSet {
             defaults.set(language.rawValue, forKey: Key.language)

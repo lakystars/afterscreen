@@ -419,4 +419,24 @@ final class ReceiverPairingTests: XCTestCase {
     func testOptionsReachASenderThatReadsThem() throws {
         XCTAssertEqual(try optionsSent(readsOptions: true)?.hud, true)
     }
+
+    func testTheReceiverTakesUpTheSendersLanguageOnce() throws {
+        required = false
+        let client = try connect()
+        _ = try reply(client, try hello(paired: false, nonce: Pairing.nonce()))
+        XCTAssertTrue(streams(client), "any admitted sender: its user reads this screen")
+        let session = try XCTUnwrap(queue.sync { sessions.first })
+        var languages: [Language] = []
+        session.onLanguage = { languages.append($0) }
+        for language in ["english", "english", "klingon", "korean"] {
+            var stats = SenderStats(interface: nil, capacityGbps: nil, throughputBitsPerSecond: 0, latencyMs: nil, jitterMs: 0, retransmitPercent: 0,
+                                    cableScore: nil, captureFPS: 0, sentFPS: 0, droppedPerMinute: 0, dirtyPercent: 0, compressionRatio: 1,
+                                    encodeMs: 0, lossyTiles: 0, cpuPercent: 0, memoryBytes: 0, gpuPercent: 0)
+            stats.language = language
+            client.send(try JSONWire.message(.senderStats, stats))
+        }
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(languages, [.english, .korean], "repeats and unknown languages pass by")
+    }
 }

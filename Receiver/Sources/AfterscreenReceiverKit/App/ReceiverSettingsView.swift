@@ -121,14 +121,6 @@ struct ReceiverSettingsView: View {
                     .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                 ShutdownPermission().padding(.top, 6)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(L10n.t("Language", "언어")).font(.headline)
-                Picker("", selection: $settings.language) {
-                    ForEach(Language.allCases, id: \.self) { Text(L10n.name($0)).tag($0) }
-                }
-                .labelsHidden()
-                .frame(width: 180)
-            }
         }
         .padding(20)
         .frame(width: 420, alignment: .leading)

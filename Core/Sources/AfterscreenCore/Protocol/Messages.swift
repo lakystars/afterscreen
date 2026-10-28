@@ -274,6 +274,9 @@ public struct SenderStats: Codable, Equatable {
     public var congestionNotice: Bool?
     /// Debug: the receiver tints the blocks each frame updates
     public var flashBlocks: Bool?
+    /// This Mac's shown `Language`, raw: the receiver follows it
+    /// A string: unknown values keep the stats decodable
+    public var language: String?
 
     public init(interface: String?, capacityGbps: Double?, throughputBitsPerSecond: Double,
                 latencyMs: Double?, jitterMs: Double, retransmitPercent: Double, cableScore: Int?,

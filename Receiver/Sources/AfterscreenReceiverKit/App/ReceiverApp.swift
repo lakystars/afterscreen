@@ -46,12 +46,13 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private let pairingLimiter = PairingLimiter()
     private let cablePairingLimiter = PairingLimiter()
     private let codeWindow = PairingCodeWindow()
-    private var lastSummary = L10n.t("No session yet", "아직 연결한 적 없음")
-    private var stateLine = L10n.t("Starting…", "시작하는 중…")
+    /// Both languages: the menu shows the one current then
+    private var lastSummary = (english: "No session yet", korean: "아직 연결한 적 없음")
+    private var stateLine = (english: "Starting…", korean: "시작하는 중…")
 
-    /// Shown localized; logged in English for scripts waiting on it
+    /// Logged in English for scripts waiting on it
     private func state(_ english: String, _ korean: String) {
-        stateLine = L10n.t(english, korean)
+        stateLine = (english, korean)
         FileHandle.standardError.write(Data("[receiver] \(english)\n".utf8))
     }
     private var startedAt: Date?
@@ -190,6 +191,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         settings.$display.dropFirst().receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.advertise() }
             .store(in: &cancellables)
+        // A sender's language: the open window follows
+        settings.$language.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.settingsWindow?.title = ReceiverAppDelegate.settingsTitle }
+            .store(in: &cancellables)
     }
 
     /// Other screens stay on: no display sleep as for a disconnect
@@ -272,6 +277,10 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             guard let session = session else { return }
             self?.applyRemote(change, from: session)
         }
+        session.onLanguage = { [weak self] language in
+            guard let self = self, self.settings.language != language else { return }
+            self.settings.language = language
+        }
         session.onEnd = { [weak self, weak session] reason in
             guard let self = self else { return }
             FileHandle.standardError.write(Data("[receiver] Session ended: \(reason)\n".utf8))
@@ -281,9 +290,9 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             // Only the current session's end resets the app
             guard self.session === session else { return }
             let duration = self.startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
-            let peer = session?.peer?.name ?? L10n.t("sender", "송신기")
-            self.lastSummary = L10n.t("Last session: \(peer), \(duration / 60)m \(duration % 60)s — \(reason)",
-                                      "마지막 연결: \(peer), \(duration / 60)분 \(duration % 60)초 — \(reason)")
+            let peer = session?.peer?.name
+            self.lastSummary = ("Last session: \(peer ?? "sender"), \(duration / 60)m \(duration % 60)s — \(reason)",
+                                "마지막 연결: \(peer ?? "송신기"), \(duration / 60)분 \(duration % 60)초 — \(reason)")
             self.apply(AfterSession.action(streamed: session?.config.map { !$0.test } ?? false,
                                            relinking: (session?.relinking ?? false) || self.reopening,
                                            stoppedHere: self.stoppedHere, request: session?.powerRequest, onDisconnect: self.settings.onDisconnect))
@@ -356,7 +365,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
             item.isEnabled = false
             menu.addItem(item)
         }
-        info("Afterscreen Receiver — \(stateLine)")
+        info("Afterscreen Receiver — \(L10n.t(stateLine.english, stateLine.korean))")
         menu.addItem(.separator())
         let display = target()
         let hardware = welcome(for: display)
@@ -367,7 +376,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         info(L10n.t("Hardware decode", "하드웨어 디코딩") + ": BC7 · HEVC \(hardware.hevcDecode ? yes : no) · Main10 \(hardware.hevcMain10Decode ? yes : no) · H.264 \(hardware.h264Decode ? yes : no)")
         info(L10n.t("Listening on port \(listener?.port ?? 0)", "포트 \(listener?.port ?? 0)에서 대기 중"))
         menu.addItem(.separator())
-        info(lastSummary)
+        info(L10n.t(lastSummary.english, lastSummary.korean))
         info(L10n.t("While streaming: ⌥⌘I toggles the HUD, Esc twice stops", "스트리밍 중: ⌥⌘I로 정보 표시, Esc 두 번으로 중지"))
         menu.addItem(.separator())
         if session != nil {
@@ -394,6 +403,8 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
         screen.powerOff(done: stop)
     }
 
+    private static var settingsTitle: String { L10n.t("Afterscreen Receiver Settings", "Afterscreen Receiver 설정") }
+
     @objc private func showSettings() {
         openSettings(overStream: false)
     }
@@ -403,7 +414,7 @@ public final class ReceiverAppDelegate: NSObject, NSApplicationDelegate, NSMenuD
     private func openSettings(overStream: Bool) {
         if settingsWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(rootView: ReceiverSettingsView(settings: settings, pairings: pairings)))
-            window.title = L10n.t("Afterscreen Receiver Settings", "Afterscreen Receiver 설정")
+            window.title = ReceiverAppDelegate.settingsTitle
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             // From the stream's menu: shows in its full-screen Space

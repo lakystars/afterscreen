@@ -34,7 +34,7 @@ iMacs from late 2014 on have no Target Display Mode. Afterscreen gives them, and
 - **Tools:**
   - A quality test that measures what your link sustains.
   - A live menu of link, throughput, latency, frame rates and resource use on both Macs.
-- **Languages:** English and Korean.
+- **Languages:** English and Korean. The iMac follows the language chosen on the sender, the system language by default.
 
 ## Performance
 

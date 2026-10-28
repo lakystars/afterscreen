@@ -155,6 +155,10 @@ public final class ReceiverSession {
     public var trusted: Bool { keyed || cable }
     /// Main queue: a trusted sender's settings edit
     public var onOptionsChange: ((ReceiverOptionsChange) -> Void)?
+    /// Main queue: the sender shows another language
+    public var onLanguage: ((Language) -> Void)?
+    /// Session queue: last language the sender reported
+    private var senderLanguage: Language?
     /// Session queue: the sender's hello takes `receiverOptions`
     private var readsOptions = false
     /// Sender's power request, from a proven key or cable
@@ -549,6 +553,11 @@ public final class ReceiverSession {
                 if let ms = stats.latencyMs { $0.latency.push(ms) }
             }
             display?.setFlashBlocks(stats.flashBlocks == true)
+            // Its user reads this screen too; unknown ones ignored
+            if let language = stats.language.flatMap(Language.init(rawValue:)), language != .system, language != senderLanguage {
+                senderLanguage = language
+                DispatchQueue.main.async { [weak self] in self?.onLanguage?(language) }
+            }
             if stats.congestionNotice == true {
                 let wifi = config?.linkKind == .wifi
                 DispatchQueue.main.async { [weak self] in self?.display?.showCongestionNotice(wifi: wifi) }
