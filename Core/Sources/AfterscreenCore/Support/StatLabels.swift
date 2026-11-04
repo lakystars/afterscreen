@@ -101,7 +101,7 @@ public enum StatName {
     public static var videoTarget: String { L10n.t("Video target bitrate", "영상 목표 비트레이트") }
     public static var blocks: String { L10n.t("Changed blocks", "바뀐 블록") }
     public static var compression: String { L10n.t("Tile LZ4 ratio", "타일 LZ4 압축률") }
-    public static var deband: String { L10n.t("Smooth gradients", "계단 완화") }
+    public static var deband: String { L10n.t("Smoothing", "계단 완화") }
     public static var encode: String { L10n.t("Frame processing", "프레임 처리 시간") }
     /// Receiver's texture upload and decompression
     public static func upload(_ receiver: String) -> String { L10n.t("\(receiver): upload · decompress", "\(receiver): 업로드 · 압축 해제") }

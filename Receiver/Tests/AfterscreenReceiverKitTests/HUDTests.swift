@@ -50,7 +50,7 @@ final class HUDContentTests: XCTestCase {
 
     func testSmoothingShowsTheLevelOnly() {
         let c = HUDContent.make(peer: nil, config: tiles, telemetry: telemetry())
-        XCTAssertEqual(row(c, "Smooth gradients")?.value, "Medium")
+        XCTAssertEqual(row(c, "Smoothing")?.value, "Medium")
     }
 
     func testHybridPathNamesTheVideoLayer() {
