@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import AfterscreenCore
 import SwiftUI
 
@@ -304,15 +305,16 @@ private struct LinkChart<Picker: View>: View {
 /// Popover's second level: display, pairings, connection, menu bar, language
 /// Explanations live in help tags: the popover stays short
 private struct SettingsPage: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject var feed: PopoverFeed
     @ObservedObject var settings: SenderSettings
     var back: () -> Void
     /// Re-read after a removal; the keychain posts no change
     @State private var paired: [(id: String, name: String)] = []
+    private var model: AppModel { feed.model }
 
-    init(model: AppModel, back: @escaping () -> Void) {
-        self.model = model
-        settings = model.settings
+    init(feed: PopoverFeed, back: @escaping () -> Void) {
+        self.feed = feed
+        settings = feed.model.settings
         self.back = back
     }
 
@@ -527,12 +529,13 @@ extension ReceiverOptions.OnDisconnect {
 /// Following: one slider, this Mac's; the receiver comes along
 /// Not following: this Mac's, then the receiver's
 private struct BrightnessCard: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject var feed: PopoverFeed
     @ObservedObject var settings: SenderSettings
+    private var model: AppModel { feed.model }
 
-    init(model: AppModel) {
-        self.model = model
-        settings = model.settings
+    init(feed: PopoverFeed) {
+        self.feed = feed
+        settings = feed.model.settings
     }
 
     var body: some View {
@@ -610,12 +613,13 @@ private struct SwitchRow: View {
 /// Sound: play on the receiver, and this Mac's volume
 /// Session only: idle has no receiver to play on
 private struct SoundCard: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject var feed: PopoverFeed
     @ObservedObject var settings: SenderSettings
+    private var model: AppModel { feed.model }
 
-    init(model: AppModel) {
-        self.model = model
-        settings = model.settings
+    init(feed: PopoverFeed) {
+        self.feed = feed
+        settings = feed.model.settings
     }
 
     var body: some View {
@@ -638,12 +642,13 @@ private struct SoundCard: View {
 /// The code the receiver shows, typed here once per receiver
 /// Networks only; point-to-point cables never ask
 private struct PairingCard: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject var feed: PopoverFeed
     var receiver: String
     @State private var code = ""
     @State private var shakes = 0
     @State private var wrong = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var model: AppModel { feed.model }
 
     var body: some View {
         // Receiver named once, in the title
@@ -802,8 +807,9 @@ private struct RoleRows: View {
 
 /// Automatic, then each link that reaches the receiver now
 private struct LinkPicker: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject var feed: PopoverFeed
     var receiver: String
+    private var model: AppModel { feed.model }
 
     var body: some View {
         Picker(L10n.t("Link", "연결"), selection: Binding(get: { model.settings.link }, set: { model.setLink($0) })) {
@@ -880,26 +886,48 @@ private struct QualityCard: View {
     }
 }
 
-public struct PopoverView: View {
-    @ObservedObject var model: AppModel
+/// Model changes reach the views only while shown
+/// Closed, the graph would update on every stats tick
+final class PopoverFeed: ObservableObject {
+    let model: AppModel
+    let objectWillChange = ObservableObjectPublisher()
+    /// Set before showing, cleared once closed
+    /// Opening renders once: changes while closed went unseen
+    var isOpen = false {
+        didSet { if isOpen { objectWillChange.send() } }
+    }
+    private var forward: AnyCancellable?
+
+    init(model: AppModel) {
+        self.model = model
+        forward = model.objectWillChange.sink { [weak self] _ in
+            guard let self = self, self.isOpen else { return }
+            self.objectWillChange.send()
+        }
+    }
+}
+
+struct PopoverView: View {
+    @ObservedObject var feed: PopoverFeed
     // Folded by default; kept across popover openings
     @AppStorage("popover.connection") private var showConnection = false
     @AppStorage("popover.picture") private var showPicture = false
     @AppStorage("popover.resources") private var showResources = false
     @AppStorage("popover.hardware") private var showHardware = false
     @State private var showOthers = false
+    private var model: AppModel { feed.model }
 
-    public init(model: AppModel) {
-        self.model = model
+    init(feed: PopoverFeed) {
+        self.feed = feed
     }
 
-    public var body: some View {
+    var body: some View {
         // Taller than the screen: sections scroll, buttons stay
         PopoverColumn(height: model.popoverHeight, spacing: 10) {
             ScrollView {
                 Group {
                     if model.showsSettings {
-                        SettingsPage(model: model) { model.showsSettings = false }
+                        SettingsPage(feed: feed) { model.showsSettings = false }
                     } else if model.isTesting {
                         testBody
                     } else if inSession {
@@ -998,7 +1026,7 @@ public struct PopoverView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             HStack {
-                LinkPicker(model: model, receiver: r.name)
+                LinkPicker(feed: feed, receiver: r.name)
                 Spacer()
                 Button(L10n.t("Test", "테스트")) { model.runQualityTest(r) }
                     .help(L10n.t("Measure the highest resolution and frame rate, then typical use, on this receiver and link",
@@ -1011,7 +1039,7 @@ public struct PopoverView: View {
     private var testBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(L10n.t("Quality test", "품질 테스트")).font(.headline)
-            if let name = model.pairingWith { PairingCard(model: model, receiver: name) }
+            if let name = model.pairingWith { PairingCard(feed: feed, receiver: name).id(model.pairingAttempt) }
             Text(L10n.t("\(model.testReport?.receiver ?? model.receiverName) shows full-motion frames at each size for a few seconds.",
                         "\(model.testReport?.receiver ?? model.receiverName)에 크기별로 몇 초씩 전체가 움직이는 화면이 나옵니다."))
                 .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -1035,13 +1063,13 @@ public struct PopoverView: View {
                 Text(s.isStreaming ? "● " + L10n.t("Streaming", "스트리밍 중") : s.state).font(.system(size: 11))
                     .foregroundStyle(s.isStreaming ? .green : .secondary)
             }
-            if let name = model.pairingWith { PairingCard(model: model, receiver: name) }
-            SoundCard(model: model)
-            if s.isStreaming { BrightnessCard(model: model) }
+            if let name = model.pairingWith { PairingCard(feed: feed, receiver: name).id(model.pairingAttempt) }
+            SoundCard(feed: feed)
+            if s.isStreaming { BrightnessCard(feed: feed) }
             VStack(alignment: .leading, spacing: 4) {
                 SectionTitle(title: StatName.connection, expanded: $showConnection)
                 LinkChart(s: s, receiver: receiver, scoreColor: scoreColor) {
-                    if let receiver = model.activeReceiver { LinkPicker(model: model, receiver: receiver) }
+                    if let receiver = model.activeReceiver { LinkPicker(feed: feed, receiver: receiver) }
                 }
                 // Warnings stay visible while folded
                 if let missing = s.missingLink {
@@ -1104,7 +1132,7 @@ public struct PopoverView: View {
                                 help: L10n.t("What the video encoder aims for; lowered while the network is busy, raised again after. Data actually sent is the throughput",
                                              "비디오 인코더가 맞추려는 비트레이트입니다. 네트워크가 혼잡하면 낮추고 풀리면 다시 올립니다. 실제로 보낸 양은 전송량을 보세요"))
                         }
-                        SwitchRow(title: L10n.t("Show sent blocks on \(receiver)", "\(receiver)에 보낸 블록 표시"), isOn: $model.flashBlocks)
+                        SwitchRow(title: L10n.t("Show sent blocks on \(receiver)", "\(receiver)에 보낸 블록 표시"), isOn: Binding(get: { model.flashBlocks }, set: { model.flashBlocks = $0 }))
                             .help(L10n.t("For checking: changed blocks flash red, blocks sent again sharper yellow, video blue. Off when Afterscreen starts again",
                                          "확인용: 바뀐 블록은 빨강, 선명하게 다시 보낸 블록은 노랑, 비디오는 파랑으로 잠깐 칠합니다. Afterscreen을 다시 실행하면 꺼집니다"))
                         if let options = s.receiverOptions, options.editable {

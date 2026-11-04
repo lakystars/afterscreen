@@ -90,6 +90,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     /// Clicks in other apps while the popover is open
     private var outsideClicks: Any?
     private let model = AppModel()
+    private lazy var feed = PopoverFeed(model: model)
     private var cancellables: Set<AnyCancellable> = []
     private let focusKeeper = PopoverFocusKeeper()
     /// Shown until it starts closing; isShown holds through the close
@@ -125,7 +126,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
             NSApp.activate(ignoringOtherApps: true)
             self?.popover.contentViewController?.view.window?.makeKey()
         }
-        let content = NSHostingController(rootView: PopoverView(model: model))
+        let content = NSHostingController(rootView: PopoverView(feed: feed))
         // Size known before showing; later changes keep the arrow anchored
         content.sizingOptions = .preferredContentSize
         popover.contentViewController = content
@@ -181,6 +182,9 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
         // Transient popover needs activation to see deactivation and close
         NSApp.activate(ignoringOtherApps: true)
         fitPopover()
+        feed.isOpen = true
+        // Changes made while closed: sized before showing
+        popover.contentViewController?.view.layoutSubtreeIfNeeded()
         popoverOpen = true
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
@@ -215,6 +219,8 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
         outsideClicks = nil
         // Reopens on the first level
         model.showsSettings = false
+        // Reset forwarded first: rendered before pausing
+        feed.isOpen = false
     }
 
     /// Development: codes from a file, as if typed

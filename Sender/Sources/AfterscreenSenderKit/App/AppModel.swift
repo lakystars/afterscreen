@@ -34,6 +34,8 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var pairedIDs: Set<String> = []
     /// Receiver showing a code, for display and test sessions alike
     @Published public private(set) var pairingWith: String?
+    /// Rises per code shown: each gets a fresh code field
+    @Published public private(set) var pairingAttempt = 0
     /// Rises with each wrong code: the code boxes shake
     @Published public private(set) var wrongCodes = 0
     private var auto = AutoConnect()
@@ -500,6 +502,7 @@ public final class AppModel: ObservableObject {
     /// Paired just now: the list marks the receiver
     private func follow(pairing: String?, wrongCodes: Int = 0) {
         if pairingWith != nil, pairing == nil { pairedIDs = Set(pairings.pairs.map(\.id)) }
+        if pairingWith == nil, pairing != nil { pairingAttempt += 1 }
         if pairingWith != pairing { pairingWith = pairing }
         if self.wrongCodes != wrongCodes { self.wrongCodes = wrongCodes }
     }
