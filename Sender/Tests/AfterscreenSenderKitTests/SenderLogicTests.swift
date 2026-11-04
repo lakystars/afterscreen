@@ -815,4 +815,101 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertEqual(lists.last?.first { $0.name == "iMac" }?.port, 4001)
         XCTAssertEqual(lists.last?.first { $0.name == "Other" }?.port, 4000, "only the named receiver resolves again")
     }
+
+    /// Listed with no receiver behind it until `answers`
+    private final class Stale: NetService {
+        var answers = false
+        var resolves = 0
+        override var port: Int { answers ? 4000 : -1 }
+        override func resolve(withTimeout timeout: TimeInterval) {
+            resolves += 1
+            if answers { delegate?.netServiceDidResolveAddress?(self) } else { delegate?.netService?(self, didNotResolve: [:]) }
+        }
+    }
+
+    private func stale(_ name: String = "iMac") -> Stale {
+        Stale(domain: "local.", type: AfterscreenProtocol.bonjourType + ".", name: name)
+    }
+
+    func testAFailedResolveIsRetriedUntilTheReceiverAnswers() {
+        var pending: [(delay: TimeInterval, run: () -> Void)] = []
+        let discovery = Discovery { pending.append(($0, $1)) }
+        var list: [DiscoveredReceiver]?
+        discovery.onChange = { list = $0 }
+        let imac = stale()
+        discovery.netServiceBrowser(NetServiceBrowser(), didFind: imac, moreComing: false)
+        XCTAssertNil(list)
+        XCTAssertEqual(pending.count, 1)
+
+        // Still unanswered: tried again, later each time
+        let first = pending.removeFirst()
+        first.run()
+        XCTAssertEqual(imac.resolves, 2)
+        XCTAssertGreaterThan(pending.first?.delay ?? 0, first.delay)
+
+        // Back under the same name, no browser event
+        imac.answers = true
+        pending.removeFirst().run()
+        XCTAssertEqual(list?.map(\.name), ["iMac"])
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testOneRetryIsPendingPerService() {
+        var pending: [() -> Void] = []
+        let discovery = Discovery { pending.append($1) }
+        let imac = stale()
+        discovery.netServiceBrowser(NetServiceBrowser(), didFind: imac, moreComing: false)
+        // A failed connection's refresh fails too
+        discovery.refresh("iMac")
+        XCTAssertEqual(imac.resolves, 2)
+        XCTAssertEqual(pending.count, 1)
+        pending.removeFirst()()
+        XCTAssertEqual(pending.count, 1)
+    }
+
+    func testAResolveInProgressIsNoFailure() {
+        var pending: [() -> Void] = []
+        let discovery = Discovery { pending.append($1) }
+        let imac = stale()
+        imac.answers = true
+        discovery.netServiceBrowser(NetServiceBrowser(), didFind: imac, moreComing: false)
+        let busy = [NetService.errorCode: NSNumber(value: NetService.ErrorCode.activityInProgress.rawValue)]
+        discovery.netService(imac, didNotResolve: busy)
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testTheBackoffStartsOverAfterAnAnswer() {
+        var pending: [(delay: TimeInterval, run: () -> Void)] = []
+        let discovery = Discovery { pending.append(($0, $1)) }
+        let imac = stale()
+        discovery.netServiceBrowser(NetServiceBrowser(), didFind: imac, moreComing: false)
+        pending.removeFirst().run()
+        imac.answers = true
+        pending.removeFirst().run()
+        XCTAssertTrue(pending.isEmpty)
+
+        imac.answers = false
+        discovery.refresh("iMac")
+        XCTAssertEqual(pending.first?.delay, Discovery.retryDelay(after: 0))
+    }
+
+    func testARemovedServiceIsNotResolvedAgain() {
+        var pending: [() -> Void] = []
+        let discovery = Discovery { pending.append($1) }
+        let browser = NetServiceBrowser()
+        let imac = stale()
+        discovery.netServiceBrowser(browser, didFind: imac, moreComing: false)
+        discovery.netServiceBrowser(browser, didRemove: imac, moreComing: false)
+        pending.forEach { $0() }
+        XCTAssertEqual(imac.resolves, 1)
+
+        // Its running resolve fails late
+        pending.removeAll()
+        discovery.netService(imac, didNotResolve: [:])
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testResolveRetriesBackOffToFifteenSeconds() {
+        XCTAssertEqual((0..<5).map(Discovery.retryDelay(after:)), [2, 4, 8, 15, 15])
+    }
 }
