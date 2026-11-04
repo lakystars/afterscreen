@@ -6,9 +6,7 @@ iMac을 Apple Silicon Mac의 디스플레이로 씁니다. 확장이나 복제�
 
 2014년 말 이후 iMac에는 대상 디스플레이 모드가 없습니다. Afterscreen은 이런 iMac과 그 이전 iMac을 다시 모니터로 쓸 수 있게 합니다. 두 Mac에 메뉴 막대 앱을 하나씩 설치하고 케이블이나 Wi-Fi로 연결하면 됩니다. 캡처 카드, 드라이버, 외부 라이브러리는 필요 없습니다.
 
-![iMac 데스크톱 위로 스트림이 열렸다가 다시 데스크톱으로 닫히는 모습](assets/cover-transition.gif)
-
-*화면 전체 덮기 모드의 연결과 연결 끊기: iMac 데스크톱 위로 스트림이 열리고, 끊으면 다시 데스크톱으로 닫힙니다. 수신기 셰이더로 렌더링한 화면입니다.*
+https://github.com/user-attachments/assets/3697271a-2277-4654-8ac2-8207e01cdc76
 
 ## 장점
 
@@ -43,6 +41,11 @@ iMac을 Apple Silicon Mac의 디스플레이로 씁니다. 확장이나 복제�
   - 품질 테스트: 지금 링크가 감당하는 해상도와 프레임레이트를 측정합니다.
   - 실시간 메뉴: 링크, 전송량, 지연 시간, 프레임레이트, 두 Mac의 자원 사용량을 보여 줍니다.
 - **언어:** 한국어, 영어. iMac은 송신기에서 고른 언어를 따르고, 기본값은 시스템 언어입니다.
+
+<p align="center">
+  <img src="assets/menu.png" width="380" alt="Thunderbolt로 연결 중인 송신기 메뉴: 링크 품질, 전송량, 지연 시간, 5120 × 2880 60fps">
+  <img src="assets/settings.png" width="380" alt="송신기 설정과 그 아래 iMac 설정">
+</p>
 
 ## 성능
 
@@ -123,3 +126,5 @@ swift test --package-path Receiver
 MIT. [LICENSE](LICENSE)를 참고하세요.
 
 iMac, Mac, macOS는 Apple Inc.의 상표이고, Thunderbolt는 Intel Corporation의 상표입니다. Afterscreen은 Apple과 제휴 관계가 없으며 Apple의 보증을 받지 않았습니다.
+
+데모 영상에는 Big Buck Bunny © 2008 Blender Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)이 나옵니다.

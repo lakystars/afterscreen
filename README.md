@@ -6,9 +6,7 @@ Use an iMac as a display for your Apple Silicon Mac, extended or mirrored, at th
 
 iMacs from late 2014 on have no Target Display Mode. Afterscreen gives them, and older iMacs too, a second life as a display. It is two menu bar apps, one on each Mac, connected by a cable or Wi-Fi. There is no capture card, no driver and no third-party library.
 
-![The stream opening over the iMac's desktop, then closing back to it](assets/cover-transition.gif)
-
-*Connecting and disconnecting in cover mode: the stream opens over the iMac's own desktop and closes back to it. Rendered with the receiver's shaders.*
+https://github.com/user-attachments/assets/3697271a-2277-4654-8ac2-8207e01cdc76
 
 ## Why Afterscreen
 
@@ -39,6 +37,11 @@ iMacs from late 2014 on have no Target Display Mode. Afterscreen gives them, and
   - A quality test that measures what your link sustains.
   - A live menu of link, throughput, latency, frame rates and resource use on both Macs.
 - **Languages:** English and Korean. The iMac follows the language chosen on the sender, the system language by default.
+
+<p align="center">
+  <img src="assets/menu.png" width="380" alt="The sender's menu while streaming over Thunderbolt: link quality, throughput, latency, and 5120 × 2880 at 60 fps">
+  <img src="assets/settings.png" width="380" alt="The sender's settings, with the iMac's own settings below">
+</p>
 
 ## Performance
 
@@ -119,3 +122,5 @@ swift test --package-path Receiver
 MIT. See [LICENSE](LICENSE).
 
 iMac, Mac and macOS are trademarks of Apple Inc. Thunderbolt is a trademark of Intel Corporation. Afterscreen is not affiliated with or endorsed by Apple.
+
+The demo video shows Big Buck Bunny © 2008 Blender Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
