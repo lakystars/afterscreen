@@ -1,0 +1,22 @@
+/* Keys are the English text; a missing key shows the key itself.
+   Placeholders keep the key's type (%@, %lld); with two or more, numbered (%1$@) so a
+   language may reorder them. scripts/check_strings.py checks this file against the sources. */
+
+/* PopoverView: Menu bar card */
+"Menu bar" = "메뉴 막대";
+"Show frame rate and throughput" = "프레임과 전송량 표시";
+"Off: the icon only" = "끄면 아이콘만 보입니다";
+
+/* PopoverView: Paired receivers card */
+"Paired receivers" = "페어링한 수신기";
+"None yet. Over Ethernet or Wi-Fi a receiver asks once for a code shown on its screen; Thunderbolt and USB cables need none." = "아직 없습니다. 이더넷·Wi-Fi로 처음 연결하면 수신기 화면에 표시된 코드를 한 번 입력합니다. Thunderbolt·USB 케이블은 필요 없습니다.";
+"Remove" = "해제";
+
+/* PopoverView: receiver settings card */
+"Applies by reconnecting at once" = "바꾸면 바로 다시 연결해 적용합니다";
+"%@ settings" = "%@ 설정";
+"Automatic: %@'s own panel first. %@" = "자동: %1$@ 자체 화면 우선. %2$@";
+"%@ (not connected)" = "%@ (연결 안 됨)";
+
+/* PopoverView: other receivers */
+"Other receivers (%lld)" = "다른 수신기 (%lld)";
