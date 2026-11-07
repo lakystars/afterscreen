@@ -85,6 +85,8 @@ public final class AppModel: ObservableObject {
         settings.$brightnessFollows.combineLatest(settings.$receiverBrightness).dropFirst()
             .sink { [weak self] follows, level in self?.session?.setReceiverBrightness(follows ? nil : level) }
             .store(in: &cancellables)
+        settings.$brightnessOffsets.dropFirst().sink { [weak self] offsets in self?.session?.setBrightnessOffsets(offsets) }
+            .store(in: &cancellables)
         settings.$streamResolution.dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.restart(L10n.t("Changing the resolution", "해상도를 바꾸는 중")) }
             .store(in: &cancellables)
@@ -339,7 +341,7 @@ public final class AppModel: ObservableObject {
                                     deband: settings.deband, resolution: settings.streamResolution,
                                     role: settings.displayRole, fit: settings.mirrorFit,
                                     ownBrightness: settings.brightnessFollows ? nil : settings.receiverBrightness,
-                                    highRefresh: settings.highRefresh, senderID: settings.deviceID, pairings: pairings)
+                                    brightnessOffsets: settings.brightnessOffsets, highRefresh: settings.highRefresh, senderID: settings.deviceID, pairings: pairings)
         session.onUpdate = { [weak self] s in
             guard let self = self else { return }
             self.follow(pairing: s.pairing, wrongCodes: s.wrongCodes)

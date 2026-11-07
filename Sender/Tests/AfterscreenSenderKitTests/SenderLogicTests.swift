@@ -196,6 +196,32 @@ final class CursorNormalizeTests: XCTestCase {
         XCTAssertTrue(SenderSession.brightnessChanged(0, from: 0.0625), "down to the lowest step")
     }
 
+    func testBrightnessOffsetIsARatioOfNits() {
+        XCTAssertEqual(BrightnessOffset.gain(0), 1)
+        XCTAssertEqual(BrightnessOffset.gain(1), 2)
+        XCTAssertEqual(BrightnessOffset.gain(-1), 0.5)
+        XCTAssertEqual(BrightnessOffset.label(0), "0%")
+        XCTAssertEqual(BrightnessOffset.label(1), "+100%")
+        XCTAssertEqual(BrightnessOffset.label(-1), "−50%")
+        XCTAssertEqual(BrightnessOffset.label(log2(1.2)), "+20%")
+        XCTAssertEqual(BrightnessOffset.snapped(-0.04), 0)
+        XCTAssertEqual(BrightnessOffset.snapped(-0.3), -0.3)
+        XCTAssertEqual(BrightnessOffset.snapped(-5), -1)
+        XCTAssertEqual(BrightnessOffset.snapped(.nan), 0)
+    }
+
+    func testFollowedLightCarriesTheReceiverOffset() throws {
+        XCTAssertEqual(SenderSession.followedLight(level: 0.5, linear: 0.25, peak: 1000, stops: 0), PanelLight(nits: 250, level: 0.5))
+        let brighter = SenderSession.followedLight(level: 0.5, linear: 0.25, peak: 1000, stops: log2(1.2))
+        XCTAssertEqual(try XCTUnwrap(brighter.nits), 300, accuracy: 1e-9)
+        XCTAssertGreaterThan(brighter.level, 0.5, "for a receiver that can't measure its peak")
+        // Without nits the slider stands in, near linear^(1/2.1)
+        let unmeasured = SenderSession.followedLight(level: 0.5, linear: 0.25, peak: nil, stops: 1)
+        XCTAssertNil(unmeasured.nits)
+        XCTAssertEqual(unmeasured.level, 0.5 * pow(2, 1 / 2.1), accuracy: 1e-9)
+        XCTAssertEqual(SenderSession.followedLight(level: 0.9, linear: 0.8, peak: nil, stops: 1).level, 1, "stops at full")
+    }
+
     func testOutsideIsHidden() {
         XCTAssertFalse(CursorTracker.normalize(point: CGPoint(x: 100, y: 100), displayBounds: bounds).visible)
         XCTAssertFalse(CursorTracker.normalize(point: CGPoint(x: 1800 + 2560, y: 0), displayBounds: bounds).visible)

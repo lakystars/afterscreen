@@ -111,6 +111,36 @@ public enum DisplaySize: String, CaseIterable, Identifiable {
     }
 }
 
+/// Following receiver's light over this Mac's, in stops
+/// 0 matches nits; -1 is half, 1 is double
+public enum BrightnessOffset {
+    public static let range: ClosedRange<Double> = -1...1
+    /// About 3.5% either side of even
+    static let snap = 0.05
+    /// Slider ≈ linear^(1/2.1) on Apple built-in panels
+    static let sliderGamma = 2.1
+
+    /// Clamped; near 0 snaps to 0
+    public static func snapped(_ stops: Double) -> Double {
+        guard stops.isFinite, abs(stops) >= snap else { return 0 }
+        return min(range.upperBound, max(range.lowerBound, stops))
+    }
+
+    /// Factor on the nits sent
+    public static func gain(_ stops: Double) -> Double { pow(2, stops) }
+
+    /// Slider level for a receiver matched without nits
+    public static func level(_ level: Double, stops: Double) -> Double {
+        min(1, max(0, level * pow(2, stops / sliderGamma)))
+    }
+
+    /// "+20%", "−50%", "0%"
+    public static func label(_ stops: Double) -> String {
+        let percent = Int(((gain(stops) - 1) * 100).rounded())
+        return percent > 0 ? "+\(percent)%" : percent < 0 ? "−\(-percent)%" : "0%"
+    }
+}
+
 /// Sender preferences in UserDefaults
 public final class SenderSettings: ObservableObject {
     private enum Key {
@@ -130,6 +160,7 @@ public final class SenderSettings: ObservableObject {
         static let mirrorFit = "mirrorFit"
         static let brightnessFollows = "brightnessFollows"
         static let receiverBrightness = "receiverBrightness"
+        static let brightnessOffsets = "brightnessOffsets"
         static let endPower = "endPower"
     }
 
@@ -171,6 +202,21 @@ public final class SenderSettings: ObservableObject {
     /// Receiver panel's own slider level, while not following
     @Published public var receiverBrightness: Double {
         didSet { defaults.set(receiverBrightness, forKey: Key.receiverBrightness) }
+    }
+    /// `BrightnessOffset` stops by receiver ID; panels age differently
+    @Published public private(set) var brightnessOffsets: [String: Double] {
+        didSet { defaults.set(brightnessOffsets, forKey: Key.brightnessOffsets) }
+    }
+
+    public func brightnessOffset(for receiverID: String) -> Double {
+        brightnessOffsets[receiverID] ?? 0
+    }
+
+    public func setBrightnessOffset(_ stops: Double, for receiverID: String) {
+        let snapped = BrightnessOffset.snapped(stops)
+        // Drags inside the snap repeat 0: no republish
+        guard snapped != brightnessOffset(for: receiverID) else { return }
+        brightnessOffsets[receiverID] = snapped == 0 ? nil : snapped
     }
 
     @Published public var streamResolution: StreamResolution {
@@ -241,6 +287,9 @@ public final class SenderSettings: ObservableObject {
         deband = (defaults.object(forKey: Key.deband) as? Int).flatMap { UInt8(exactly: $0) }.flatMap(Deband.init(rawValue:)) ?? .normal
         brightnessFollows = defaults.object(forKey: Key.brightnessFollows) as? Bool ?? true
         receiverBrightness = defaults.object(forKey: Key.receiverBrightness) as? Double ?? 0.5
+        // Per entry: one bad value drops only itself
+        brightnessOffsets = (defaults.dictionary(forKey: Key.brightnessOffsets) ?? [:])
+            .compactMapValues { ($0 as? NSNumber).map { BrightnessOffset.snapped($0.doubleValue) } }.filter { $0.value != 0 }
         endPower = defaults.enumValue(forKey: Key.endPower, default: .keepOn)
         language = defaults.enumValue(forKey: Key.language, default: .system)
         L10n.language = language

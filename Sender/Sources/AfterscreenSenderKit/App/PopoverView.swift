@@ -526,7 +526,7 @@ extension ReceiverOptions.OnDisconnect {
 }
 
 /// Receiver panel: follows this Mac, or its own slider
-/// Following: one slider, this Mac's; the receiver comes along
+/// Following: this Mac's, then the receiver's offset
 /// Not following: this Mac's, then the receiver's
 private struct BrightnessCard: View {
     @ObservedObject var feed: PopoverFeed
@@ -548,6 +548,15 @@ private struct BrightnessCard: View {
                                  "켜면 \(receiver) 밝기가 \(mac)의 밝기 키, 제어 센터, 자동 밝기를 따릅니다. 끄면 \(receiver) 밝기를 따로 정하고 \(mac) 화면은 마음대로 어둡게 둘 수 있습니다. 연결을 끊어도 \(receiver) 밝기는 그대로 둡니다"))
                 if let level = model.snapshot.macBrightness {
                     LevelSlider(name: mac, value: level) { model.setMacBrightness($0) }
+                    if settings.brightnessFollows, let id = model.snapshot.peer?.receiverID {
+                        let stops = settings.brightnessOffset(for: id)
+                        LevelSlider(name: L10n.t("\(receiver) brightness offset", "\(receiver) 밝기 보정"), value: stops,
+                                    range: BrightnessOffset.range, detail: BrightnessOffset.label(stops)) {
+                            settings.setBrightnessOffset($0, for: id)
+                        }
+                        .help(L10n.t("Keeps \(receiver) brighter or dimmer than \(mac) while following. At 0% both screens give the same nits. Once \(receiver) reaches its maximum, it gets no brighter",
+                                     "따라가는 동안 \(receiver) 밝기를 \(mac)보다 밝거나 어둡게 맞춥니다. 0%면 두 화면의 니트가 같습니다. \(receiver) 밝기가 최대에 닿으면 더 밝아지지 않습니다"))
+                    }
                 } else if settings.brightnessFollows {
                     Text(L10n.t("\(mac) has no built-in screen on; \(receiver) keeps its brightness", "\(mac)에 켜진 내장 화면이 없어 \(receiver) 밝기를 그대로 둡니다"))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -562,27 +571,37 @@ private struct BrightnessCard: View {
     }
 }
 
-/// A device's name over its 0…1 slider, boxed
-/// Holds the dragged value until the polled level catches up
+/// A name over its slider, boxed
+/// Holds the dragged value until the stored one catches up
 private struct LevelSlider: View {
     var name: String
     var value: Double
     var low = "sun.min"
     var high = "sun.max"
+    var range: ClosedRange<Double> = 0...1
+    /// Value text at the trailing edge
+    var detail: String?
     var set: (Double) -> Void
     @State private var held: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(name).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+            HStack {
+                Text(name).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                if let detail = detail {
+                    Spacer()
+                    Text(detail).font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
             HStack(spacing: 8) {
                 // Fixed width: tracks line up across cards
                 Image(systemName: low).foregroundStyle(.secondary).frame(width: 18)
-                Slider(value: Binding(get: { held ?? value }, set: { held = $0; set($0) }), in: 0...1) { editing in
-                    // Polled every 0.2 s: let one read land first
+                let slider = Slider(value: Binding(get: { held ?? value }, set: { held = $0; set($0) }), in: range) { editing in
+                    // Levels poll every 0.2 s; the offset snaps
                     if !editing { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { held = nil } }
                 }
                 .accessibilityLabel(name)
+                if let detail = detail { slider.accessibilityValue(detail) } else { slider }
                 Image(systemName: high).foregroundStyle(.secondary).frame(width: 18)
             }
         }

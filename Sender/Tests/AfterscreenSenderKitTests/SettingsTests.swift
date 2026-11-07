@@ -114,6 +114,21 @@ final class SenderSettingsTests: XCTestCase {
         XCTAssertTrue(SenderSettings(defaults: defaults).highRefresh)
     }
 
+    func testBrightnessOffsetIsKeptPerReceiver() {
+        let settings = SenderSettings(defaults: defaults)
+        XCTAssertEqual(settings.brightnessOffset(for: "a"), 0, "same nits by default")
+        settings.setBrightnessOffset(0.5, for: "a")
+        settings.setBrightnessOffset(3, for: "b")
+        let again = SenderSettings(defaults: defaults)
+        XCTAssertEqual(again.brightnessOffset(for: "a"), 0.5)
+        XCTAssertEqual(again.brightnessOffset(for: "b"), 1, "at most double")
+        XCTAssertEqual(again.brightnessOffset(for: "c"), 0)
+        again.setBrightnessOffset(0.02, for: "a")
+        XCTAssertEqual(SenderSettings(defaults: defaults).brightnessOffset(for: "a"), 0, "snaps back to even")
+        defaults.set(["b": 0.5, "x": "junk"], forKey: "brightnessOffsets")
+        XCTAssertEqual(SenderSettings(defaults: defaults).brightnessOffset(for: "b"), 0.5, "a bad entry drops alone")
+    }
+
     func testDefaultsAndPersistence() {
         let settings = SenderSettings(defaults: defaults)
         XCTAssertEqual(settings.displaySize, .standard)

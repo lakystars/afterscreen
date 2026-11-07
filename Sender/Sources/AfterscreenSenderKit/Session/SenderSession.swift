@@ -129,6 +129,8 @@ public final class SenderSession {
     private var brightnessSent: Double?
     /// Receiver's own slider level; nil follows this Mac
     private var ownBrightness: Double?
+    /// `BrightnessOffset` stops by receiver ID, while following
+    private var brightnessOffsets: [String: Double]
     /// Largest video layer encoded at the stream's rate
     private var videoCap: PixelSize?
     /// Ignored by the quality test, which measures the panel
@@ -181,7 +183,8 @@ public final class SenderSession {
     /// `link`: link to use; nil or unreachable uses the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
                 sound: Bool = false, deband: Deband = .normal, resolution: StreamResolution = .panel,
-                role: DisplayRole = .extend, fit: MirrorFit = .mac, ownBrightness: Double? = nil, highRefresh: Bool = false,
+                role: DisplayRole = .extend, fit: MirrorFit = .mac, ownBrightness: Double? = nil,
+                brightnessOffsets: [String: Double] = [:], highRefresh: Bool = false,
                 senderID: String = "", pairings: PairingStoring = MemoryPairingStore()) {
         self.target = target
         self.senderID = senderID
@@ -195,6 +198,7 @@ public final class SenderSession {
         self.role = role
         self.fit = fit
         self.ownBrightness = ownBrightness
+        self.brightnessOffsets = brightnessOffsets
         self.highRefresh = highRefresh
     }
 
@@ -202,6 +206,13 @@ public final class SenderSession {
     public func setReceiverBrightness(_ level: Double?) {
         ownBrightness = level
         // Levels of the two modes are different scales
+        brightnessSent = nil
+        if snapshot.isStreaming { followBrightness() }
+    }
+
+    /// Main queue: sent at once, so a drag shows live
+    public func setBrightnessOffsets(_ offsets: [String: Double]) {
+        brightnessOffsets = offsets
         brightnessSent = nil
         if snapshot.isStreaming { followBrightness() }
     }
@@ -280,7 +291,7 @@ public final class SenderSession {
         (cursorConnection ?? connection)?.send(Message(type: .volume, payload: OutputLevelWire.encode(level)))
     }
 
-    /// Receiver's panel takes this Mac's luminance, in nits
+    /// Receiver's panel takes this Mac's nits, times its offset
     /// Not the slider: panels map the slider differently
     /// Change judged on the slider; dim nits steps are tiny
     /// Polled: macOS posts no public brightness change
@@ -302,8 +313,14 @@ public final class SenderSession {
         }
         guard SenderSession.brightnessChanged(panel.level, from: brightnessSent) else { return }
         brightnessSent = panel.level
-        let light = PanelLight(nits: PanelBrightness.builtInPeakNits.map { panel.linear * $0 }, level: panel.level)
+        let stops = snapshot.peer?.receiverID.flatMap { brightnessOffsets[$0] } ?? 0
+        let light = SenderSession.followedLight(level: panel.level, linear: panel.linear, peak: PanelBrightness.builtInPeakNits, stops: stops)
         connection?.send(Message(type: .brightness, payload: BrightnessWire.encode(light)))
+    }
+
+    /// This Mac's panel, offset for the receiver
+    static func followedLight(level: Double, linear: Double, peak: Double?, stops: Double) -> PanelLight {
+        PanelLight(nits: peak.map { linear * $0 * BrightnessOffset.gain(stops) }, level: BrightnessOffset.level(level, stops: stops))
     }
 
     /// Steps below 0.4% are sensor noise, not a change
