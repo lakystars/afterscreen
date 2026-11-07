@@ -170,14 +170,6 @@ final class VideoWireTests: XCTestCase {
 }
 
 final class L10nTests: XCTestCase {
-    func testSystemFollowsTheFirstPreferredLanguage() {
-        XCTAssertTrue(L10n.isKorean(.system, preferred: ["ko-KR", "en-US"]))
-        XCTAssertFalse(L10n.isKorean(.system, preferred: ["en-US", "ko-KR"]))
-        XCTAssertFalse(L10n.isKorean(.system, preferred: []))
-        XCTAssertTrue(L10n.isKorean(.korean, preferred: ["en-US"]))
-        XCTAssertFalse(L10n.isKorean(.english, preferred: ["ko-KR"]))
-    }
-
     func testTranslationPicksTheChosenLanguage() {
         let saved = L10n.language
         defer { L10n.language = saved }

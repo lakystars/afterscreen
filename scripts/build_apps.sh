@@ -21,6 +21,9 @@ print "== Signing identity: $IDENTITY"
 
 mkdir -p "$OUT"
 
+print "== Strings"
+python3 "$ROOT/scripts/check_strings.py"
+
 print "== App icons"
 rm -rf "$OUT/icon"
 swift "$ROOT/scripts/icons.swift" "$OUT/icon"
@@ -34,6 +37,8 @@ plist() { # name bundle-id executable min-os extra-keys
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key><array>$(for lproj in "$ROOT"/Localization/*.lproj(N); do print -n "<string>${${lproj:t}%.lproj}</string>"; done)<string>en</string></array>
     <key>CFBundleName</key><string>$1</string>
     <key>CFBundleDisplayName</key><string>$1</string>
     <key>CFBundleIdentifier</key><string>$2</string>
@@ -60,6 +65,13 @@ bundle() { # app-path executable-src executable-name icon plist-content entitlem
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "$2" "$app/Contents/MacOS/$exe"
     cp "$OUT/icon/$4.icns" "$app/Contents/Resources/AppIcon.icns"
+    # Binary plist strings, as Xcode builds; plutil rejects bad syntax
+    for lproj in "$ROOT"/Localization/*.lproj(N); do
+        mkdir -p "$app/Contents/Resources/${lproj:t}"
+        for table in "$lproj"/*.strings(N); do
+            plutil -convert binary1 -o "$app/Contents/Resources/${lproj:t}/${table:t}" "$table"
+        done
+    done
     # Symbols only serve debugging; stripped executables are about 45% smaller
     strip "$app/Contents/MacOS/$exe"
     print -r -- "$5" > "$app/Contents/Info.plist"

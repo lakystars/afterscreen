@@ -1,0 +1,5 @@
+/* Privacy prompts: keys are the Info.plist keys of scripts/build_apps.sh */
+"NSLocalNetworkUsageDescription" = "Afterscreen은 Thunderbolt, USB, 이더넷 또는 Wi-Fi로 송신기와 수신기를 연결합니다.";
+"NSScreenCaptureUsageDescription" = "Afterscreen은 가상 디스플레이를 캡처해 수신기에 표시합니다.";
+"NSAudioCaptureUsageDescription" = "Afterscreen은 이 Mac의 소리를 수신기에서 재생합니다.";
+"NSAppleEventsUsageDescription" = "Afterscreen Receiver는 설정에서 허용한 경우 송신기가 요청하면 이 Mac을 종료합니다.";

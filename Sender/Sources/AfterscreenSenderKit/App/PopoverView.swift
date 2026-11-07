@@ -353,9 +353,9 @@ private struct SettingsPage: View {
             if model.snapshot.isStreaming, let options = model.snapshot.receiverOptions, options.editable {
                 ReceiverOptionsCard(options: options, receiver: model.receiverName) { model.changeReceiver($0) }
             }
-            Card(title: L10n.t("Menu bar", "메뉴 막대")) {
-                SwitchRow(title: L10n.t("Show frame rate and throughput", "프레임과 전송량 표시"), isOn: $settings.menuBarStats)
-                    .help(L10n.t("Off: the icon only", "끄면 아이콘만 보입니다"))
+            Card(title: L10n.s("Menu bar")) {
+                SwitchRow(title: L10n.s("Show frame rate and throughput"), isOn: $settings.menuBarStats)
+                    .help(L10n.s("Off: the icon only"))
             }
             Card(title: L10n.t("Language", "언어")) {
                 Picker(L10n.t("Language", "언어"), selection: $settings.language) {
@@ -415,17 +415,16 @@ private struct SettingsPage: View {
     }
 
     private var pairings: some View {
-        Card(title: L10n.t("Paired receivers", "페어링한 수신기")) {
+        Card(title: L10n.s("Paired receivers")) {
             if paired.isEmpty {
-                Text(L10n.t("None yet. Over Ethernet or Wi-Fi a receiver asks once for a code shown on its screen; Thunderbolt and USB cables need none.",
-                            "아직 없습니다. 이더넷·Wi-Fi로 처음 연결하면 수신기 화면에 표시된 코드를 한 번 입력합니다. Thunderbolt·USB 케이블은 필요 없습니다."))
+                Text(L10n.s("None yet. Over Ethernet or Wi-Fi a receiver asks once for a code shown on its screen; Thunderbolt and USB cables need none."))
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(paired, id: \.id) { pair in
                 HStack {
                     Text(pair.name).font(.system(size: 12))
                     Spacer()
-                    Button(L10n.t("Remove", "해제")) {
+                    Button(L10n.s("Remove")) {
                         model.removePairing(pair.id)
                         paired = model.pairedReceivers
                     }
@@ -442,10 +441,10 @@ private struct ReceiverOptionsCard: View {
     var receiver: String
     var edit: (ReceiverOptionsChange) -> Void
 
-    private var reconnects: String { L10n.t("Applies by reconnecting at once", "바꾸면 바로 다시 연결해 적용합니다") }
+    private var reconnects: String { L10n.s("Applies by reconnecting at once") }
 
     var body: some View {
-        Card(title: L10n.t("\(receiver) settings", "\(receiver) 설정")) {
+        Card(title: L10n.s("%@ settings", receiver)) {
             VStack(alignment: .leading, spacing: 8) {
                 Row(label: L10n.t("Show the stream", "스트림 표시 방식"), value: "", help: reconnects) {
                     menu(Binding(get: { options.presentation }, set: { edit(ReceiverOptionsChange(presentation: $0)) })) {
@@ -453,7 +452,7 @@ private struct ReceiverOptionsCard: View {
                     }
                 }
                 Row(label: L10n.t("Show on", "표시할 화면"), value: "",
-                    help: L10n.t("Automatic: \(receiver)'s own panel first. \(reconnects)", "자동: \(receiver) 자체 화면 우선. \(reconnects)")) {
+                    help: L10n.s("Automatic: %@'s own panel first. %@", receiver, reconnects)) {
                     menu(Binding(get: { options.screen ?? "" }, set: { edit(ReceiverOptionsChange(screen: $0)) })) {
                         Text(L10n.t("Automatic", "자동")).tag("")
                         ForEach(options.screens, id: \.key) { screen in
@@ -461,7 +460,7 @@ private struct ReceiverOptionsCard: View {
                             Text(verbatim: "\(screen.name) · \(screen.pixels.width)×\(screen.pixels.height)").tag(screen.key)
                         }
                         if let missing = options.missingScreen, let key = options.screen {
-                            Text(L10n.t("\(missing) (not connected)", "\(missing) (연결 안 됨)")).tag(key)
+                            Text(L10n.s("%@ (not connected)", missing)).tag(key)
                         }
                     }
                 }
@@ -1022,7 +1021,7 @@ struct PopoverView: View {
                     DisclosureGroup(isExpanded: $showOthers) {
                         ForEach(others) { receiverRow($0) }
                     } label: {
-                        Text(L10n.t("Other receivers (\(others.count))", "다른 수신기 (\(others.count))")).font(.system(size: 12))
+                        Text(L10n.s("Other receivers (%lld)", others.count)).font(.system(size: 12))
                     }
                 }
             }
