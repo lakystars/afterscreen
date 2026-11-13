@@ -24,6 +24,9 @@ public final class AppModel: ObservableObject {
     /// Default output's volume and mute; nil when fixed, like HDMI
     @Published public private(set) var macVolume: OutputLevel?
     public let macName = ComputerName.current
+    /// Latest release tag; nil until known or with checks off
+    @Published public private(set) var latestTag: String?
+    private let updates = UpdateChecker()
 
     public let settings: SenderSettings
     private var session: SenderSession?
@@ -61,6 +64,27 @@ public final class AppModel: ObservableObject {
     private let paths = NWPathMonitor()
     private var volumeWatcher: OutputWatcher?
     private var cancellables: Set<AnyCancellable> = []
+
+    /// Newer release for this Mac or the connected receiver
+    public var availableUpdate: AvailableUpdate? {
+        guard let tag = latestTag else { return nil }
+        // Receivers before 1.1.0 send no version
+        let receiver = snapshot.peer.map { $0.appVersion ?? "1.0.0" }
+        return UpdateChecker.update(tag: tag, installed: AppVersion.current, receiver: receiver)
+    }
+
+    /// From the app only: tests make no requests
+    public func startUpdateChecks() {
+        updates.onTag = { [weak self] tag in
+            if self?.latestTag != tag { self?.latestTag = tag }
+        }
+        settings.$checksUpdates.removeDuplicates().sink { [weak self] on in
+            guard let self = self else { return }
+            if on { return self.updates.start() }
+            self.updates.stop()
+            self.latestTag = nil
+        }.store(in: &cancellables)
+    }
 
     public init(settings: SenderSettings = SenderSettings(),
                 pairings: PairingStoring = KeychainPairingStore(service: "io.github.lakystars.afterscreen.sender.pairing")) {

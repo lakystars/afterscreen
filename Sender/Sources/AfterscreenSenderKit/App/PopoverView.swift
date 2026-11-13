@@ -357,6 +357,10 @@ private struct SettingsPage: View {
                 SwitchRow(title: L10n.s("Show frame rate and throughput"), isOn: $settings.menuBarStats)
                     .help(L10n.s("Off: the icon only"))
             }
+            Card(title: L10n.s("Updates")) {
+                SwitchRow(title: L10n.s("Check for new versions"), isOn: $settings.checksUpdates)
+                    .help(L10n.s("Asks GitHub for the latest release every 6 hours. GitHub sees this Mac's IP address"))
+            }
             Card(title: L10n.t("Language", "언어")) {
                 Picker(L10n.t("Language", "언어"), selection: $settings.language) {
                     ForEach(Language.allCases, id: \.self) { Text(L10n.name($0)).tag($0) }
@@ -969,6 +973,7 @@ struct PopoverView: View {
             if !model.showsSettings {
                 VStack(alignment: .leading, spacing: 10) {
                     Divider()
+                    if let update = model.availableUpdate { updateRow(update) }
                     // Session action left, app actions right
                     if model.isTesting || inSession, let message = model.lastMessage { note(message) }
                     HStack {
@@ -993,6 +998,19 @@ struct PopoverView: View {
 
     /// Connecting or streaming; a quality test excluded
     private var inSession: Bool { !model.isTesting && (model.isActive || model.snapshot.isStreaming) }
+
+    private func updateRow(_ update: AvailableUpdate) -> some View {
+        let receiver = model.receiverName, mac = model.macName
+        let text = update.mac && update.receiver ? L10n.s("Version %@ is out for %@ and %@", update.version, mac, receiver)
+            : update.receiver ? L10n.s("Version %@ is out for %@", update.version, receiver)
+            : L10n.s("Version %@ is out", update.version)
+        return HStack(spacing: 6) {
+            Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
+            note(text)
+            Spacer()
+            Button(L10n.s("Download")) { NSWorkspace.shared.open(update.page) }.controlSize(.small)
+        }
+    }
 
     private func note(_ text: String) -> some View {
         Text(text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)

@@ -21,3 +21,12 @@
 
 /* PopoverView: other receivers */
 "Other receivers (%lld)" = "다른 수신기 (%lld)";
+
+/* PopoverView: updates */
+"Updates" = "업데이트";
+"Check for new versions" = "새 버전 확인";
+"Asks GitHub for the latest release every 6 hours. GitHub sees this Mac's IP address" = "6시간마다 GitHub에서 최신 릴리스를 확인합니다. GitHub에 이 Mac의 IP 주소가 전달됩니다";
+"Version %@ is out" = "%@ 버전이 나왔습니다";
+"Version %@ is out for %@" = "%2$@용 %1$@ 버전이 나왔습니다";
+"Version %@ is out for %@ and %@" = "%2$@·%3$@용 %1$@ 버전이 나왔습니다";
+"Download" = "다운로드";

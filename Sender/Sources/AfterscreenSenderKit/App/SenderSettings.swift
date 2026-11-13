@@ -150,6 +150,7 @@ public final class SenderSettings: ObservableObject {
         static let lastPanelPoints = "lastPanelPoints"
         static let link = "link"
         static let menuBarStats = "menuBarStats"
+        static let checksUpdates = "checksUpdates"
         static let language = "language"
         static let sound = "sound"
         static let deband = "deband"
@@ -237,6 +238,10 @@ public final class SenderSettings: ObservableObject {
     @Published public var menuBarStats: Bool {
         didSet { defaults.set(menuBarStats, forKey: Key.menuBarStats) }
     }
+    /// Asks GitHub for newer releases
+    @Published public var checksUpdates: Bool {
+        didSet { defaults.set(checksUpdates, forKey: Key.checksUpdates) }
+    }
     /// Link to use; nil picks the fastest that answers
     public var link: LinkKind? {
         get { SenderSettings.launchLink ?? defaults.string(forKey: Key.link).flatMap(LinkKind.init(rawValue:)) }
@@ -281,6 +286,7 @@ public final class SenderSettings: ObservableObject {
         displaySize = defaults.enumValue(forKey: Key.displaySize, default: .standard)
         autoConnect = defaults.object(forKey: Key.autoConnect) as? Bool ?? true
         menuBarStats = defaults.bool(forKey: Key.menuBarStats)
+        checksUpdates = defaults.object(forKey: Key.checksUpdates) as? Bool ?? true
         sound = defaults.object(forKey: Key.sound) as? Bool ?? true
         streamResolution = defaults.enumValue(forKey: Key.streamResolution, default: .auto)
         highRefresh = defaults.bool(forKey: Key.highRefresh)

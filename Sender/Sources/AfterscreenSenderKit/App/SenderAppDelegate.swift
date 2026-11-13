@@ -111,6 +111,7 @@ public final class SenderAppDelegate: NSObject, NSApplicationDelegate, NSPopover
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        model.startUpdateChecks()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         statusItem.button?.imagePosition = .imageLeading

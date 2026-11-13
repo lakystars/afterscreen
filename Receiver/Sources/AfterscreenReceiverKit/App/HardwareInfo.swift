@@ -139,14 +139,16 @@ public enum HardwareInfo {
         let mm = panelMillimeters(id).map { PixelSize(width: $0.width, height: $0.height * panel.height / max(1, full.height)) }
         let model = HardwareModel.identifier
         let os = ProcessInfo.processInfo.operatingSystemVersion
-        return Welcome(protocolVersion: AfterscreenProtocol.version, name: name, modelID: model,
-                       marketingName: marketingName(modelID: model),
-                       osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
-                       gpuNames: gpuNames(), panelPixels: panel, panelPoints: points(forPanel: panel, scale: scale),
-                       hevcDecode: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
-                       h264Decode: VTIsHardwareDecodeSupported(kCMVideoCodecType_H264),
-                       bc7: true, hevcMain10Decode: hevcMain10Decode, audioPlayback: true, panelMillimeters: mm,
-                       refreshHz: refresh)
+        var welcome = Welcome(protocolVersion: AfterscreenProtocol.version, name: name, modelID: model,
+                              marketingName: marketingName(modelID: model),
+                              osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+                              gpuNames: gpuNames(), panelPixels: panel, panelPoints: points(forPanel: panel, scale: scale),
+                              hevcDecode: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
+                              h264Decode: VTIsHardwareDecodeSupported(kCMVideoCodecType_H264),
+                              bc7: true, hevcMain10Decode: hevcMain10Decode, audioPlayback: true, panelMillimeters: mm,
+                              refreshHz: refresh)
+        welcome.appVersion = AppVersion.current
+        return welcome
     }
 }
 
