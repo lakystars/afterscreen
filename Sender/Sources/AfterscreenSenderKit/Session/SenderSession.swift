@@ -56,6 +56,8 @@ public struct SenderSnapshot {
     public var missingLink: LinkKind?
     /// This Mac's sound goes to the receiver
     public var soundOnReceiver = false
+    /// Sound on but kept: this Mac's output is headphones
+    public var soundOnHeadphones = false
     /// Receiver output's level; nil while it keeps its own
     public var outputLevel: OutputLevel?
     /// Built-in panel level; nil without one or lid closed
@@ -240,29 +242,37 @@ public final class SenderSession {
         sendOutputLevel(playing: false)
     }
 
+    /// Headphones keep the sound; speakers hand it over
     private func startSound() {
         guard audioTap == nil, sound, snapshot.peer?.audioPlayback == true, soundRoute.connection != nil else { return }
+        // No tap before 14.2: watching would only flicker the receiver's level
+        guard #available(macOS 14.2, *) else { return }
+        if output == nil {
+            output = OutputWatcher { [weak self] outputChanged in self?.outputChanged(outputChanged) }
+        }
+        let headphones = SystemOutput().headphones
+        if snapshot.soundOnHeadphones != headphones { update { $0.soundOnHeadphones = headphones } }
+        guard !headphones else { return sendOutputLevel(playing: false) }
         // Level first: no sound at the iMac's own level
         sendOutputLevel(playing: true)
-        if #available(macOS 14.2, *) {
-            // Looked up per packet: a handover moves the channel
-            let route = soundRoute
-            audioTap = AudioTap(onSamples: { rate, channels, samples in
-                route.connection?.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: rate, channels: channels, samples: samples)))
-            }, onChange: { [weak self] in
-                // A new output device or format: rebuild the tap
-                self?.stopSound()
-                self?.startSound()
-            })
-        }
+        // Looked up per packet: a handover moves the channel
+        let route = soundRoute
+        audioTap = AudioTap(onSamples: { rate, channels, samples in
+            route.connection?.send(Message(type: .audio, payload: AudioWire.encode(sampleRate: rate, channels: channels, samples: samples)))
+        }, onChange: { [weak self] in
+            // A new output device or format: rebuild the tap
+            self?.stopTap()
+            self?.startSound()
+        })
         update { $0.soundOnReceiver = audioTap != nil }
         guard audioTap != nil else { return sendOutputLevel(playing: false) }
-        if output == nil {
-            output = OutputWatcher { [weak self] _ in
-                guard let self = self else { return }
-                self.sendOutputLevel(playing: self.audioTap != nil)
-            }
-        }
+    }
+
+    /// New device or jack source: headphones may come or go
+    private func outputChanged(_ device: Bool) {
+        if device, audioTap != nil, SystemOutput().headphones { stopTap() }
+        if device { startSound() }
+        sendOutputLevel(playing: audioTap != nil)
     }
 
     /// Cursor channel from the handshake: sound never waits behind frames
@@ -271,12 +281,17 @@ public final class SenderSession {
     }
 
     /// Receiver keeps this Mac's level across a tap rebuild
-    private func stopSound() {
+    private func stopTap() {
         if #available(macOS 14.2, *) { (audioTap as? AudioTap)?.stop() }
         audioTap = nil
+        update { $0.soundOnReceiver = false }
+    }
+
+    private func stopSound() {
+        stopTap()
         output?.stop()
         output = nil
-        update { $0.soundOnReceiver = false }
+        update { $0.soundOnHeadphones = false }
     }
 
     /// Receiver's output takes this Mac's volume and mute

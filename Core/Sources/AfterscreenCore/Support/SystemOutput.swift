@@ -32,6 +32,7 @@ public struct SystemOutput {
     static let mute = AudioObjectPropertyAddress(kAudioDevicePropertyMute, scope: kAudioDevicePropertyScopeOutput)
     static let source = AudioObjectPropertyAddress(kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeOutput)
     static let uid = AudioObjectPropertyAddress(kAudioDevicePropertyDeviceUID)
+    static let transport = AudioObjectPropertyAddress(kAudioDevicePropertyTransportType)
     static let defaultDevice = AudioObjectPropertyAddress(kAudioHardwarePropertyDefaultOutputDevice)
     static let uidToDevice = AudioObjectPropertyAddress(kAudioHardwarePropertyTranslateUIDToDevice)
     static let system = AudioObjectID(kAudioObjectSystemObject)
@@ -59,6 +60,23 @@ public struct SystemOutput {
         // No main mute control counts as unmuted
         _ = SystemOutput.get(device, SystemOutput.mute, &mute)
         return OutputLevel(volume: Double(volume), muted: mute != 0)
+    }
+
+    /// Default output is personal: Bluetooth or the headphone jack
+    public var headphones: Bool { device.map(headphones(_:)) ?? false }
+
+    public func headphones(_ device: AudioObjectID) -> Bool {
+        var transport = UInt32(0), source = UInt32(0)
+        _ = SystemOutput.get(device, SystemOutput.transport, &transport)
+        return SystemOutput.headphones(transport: transport, source: SystemOutput.get(device, SystemOutput.source, &source) ? source : nil,
+                                       uid: key(of: device)?.uid)
+    }
+
+    /// Bluetooth counts as personal: AirPods, most such outputs
+    /// Jack: 'hdpn' source, or its own device on Apple silicon
+    static func headphones(transport: UInt32, source: UInt32?, uid: String? = nil) -> Bool {
+        transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE || source == 0x6864_706E
+            || (transport == kAudioDeviceTransportTypeBuiltIn && uid == "BuiltInHeadphoneOutputDevice")
     }
 
     public func key(of device: AudioObjectID) -> OutputKey? {

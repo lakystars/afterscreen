@@ -645,8 +645,12 @@ private struct SoundCard: View {
         Card(title: L10n.t("Sound", "소리")) {
             VStack(alignment: .leading, spacing: 8) {
                 SwitchRow(title: L10n.t("Play on \(receiver)", "\(receiver)에서 재생"), isOn: $settings.sound)
-                    .help(L10n.t("\(mac) stays silent while \(receiver) plays; \(receiver) follows \(mac)'s volume and mute. Asks once for System Audio Recording permission. About 1.5 Mbps",
-                                 "\(receiver)에서 재생하는 동안 \(mac)에서는 소리가 나지 않고, \(receiver) 음량과 음소거는 \(mac) 설정을 따릅니다. 처음 한 번 시스템 오디오 녹음 권한을 묻습니다. 약 1.5Mbps를 씁니다"))
+                    .help(L10n.t("\(mac) stays silent while \(receiver) plays; \(receiver) follows \(mac)'s volume and mute. Headphones and Bluetooth outputs like AirPods keep the sound. Asks once for System Audio Recording permission. About 1.5 Mbps",
+                                 "\(receiver)에서 재생하는 동안 \(mac)에서는 소리가 나지 않고, \(receiver) 음량과 음소거는 \(mac) 설정을 따릅니다. 헤드폰이나 AirPods 같은 블루투스 출력으로 들을 때는 넘기지 않습니다. 처음 한 번 시스템 오디오 녹음 권한을 묻습니다. 약 1.5Mbps를 씁니다"))
+                if settings.sound && model.snapshot.soundOnHeadphones {
+                    Text(L10n.t("Headphones in use: sound stays on \(mac)", "헤드폰 사용 중이라 \(mac)에서 소리가 납니다"))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 // This Mac's output; named for where the sound comes out
                 if let level = model.macVolume {
                     LevelSlider(name: settings.sound && model.snapshot.soundOnReceiver ? receiver : mac, value: level.volume,
