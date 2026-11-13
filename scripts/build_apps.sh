@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/build"
-VERSION="${AFTERSCREEN_VERSION:-1.0.0}"
+VERSION="${AFTERSCREEN_VERSION:-1.1.0}"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 SDK="$(xcrun --show-sdk-path --sdk macosx)"
 SDK_VERSION="$(xcrun --show-sdk-version --sdk macosx)"
