@@ -1201,12 +1201,31 @@ public final class SenderSession {
             do {
                 let modes = PathPolicy.displayModes(welcome: welcome, stream: config.streamPixels, size: displaySize)
                 display = try VirtualDisplay(name: "Afterscreen — \(welcome.name)", streamPixels: config.streamPixels, hiDPI: welcome.isRetina,
-                                             modes: modes.all, initial: modes.initial, millimeters: PathPolicy.millimeters(welcome),
+                                             modes: modes.all, millimeters: PathPolicy.millimeters(welcome),
                                              refresh: config.frameRate)
+                return applyInitialDisplayMode(modes.initial, config: config, deadline: .now() + 3)
             } catch {
                 return stop(reason: "\(error)")
             }
         }
+        startCapture(config)
+    }
+
+    private func applyInitialDisplayMode(_ points: PixelSize, config: StreamConfig, deadline: DispatchTime) {
+        guard !ended, !stopping, let display = display else { return }
+        if display.setMode(points: points) {
+            return startCapture(config)
+        }
+        guard DispatchTime.now() < deadline else {
+            return stop(reason: "\(VirtualDisplayError.mode)")
+        }
+        // WindowServer's new display modes become visible after the main queue is free.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.applyInitialDisplayMode(points, config: config, deadline: deadline)
+        }
+    }
+
+    private func startCapture(_ config: StreamConfig) {
         // After the display: a refused one opens no window there
         connection?.send(.config, json: config)
         if purpose == .display, let display = display {

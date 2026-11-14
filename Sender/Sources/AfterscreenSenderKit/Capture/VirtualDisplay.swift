@@ -34,7 +34,7 @@ public final class VirtualDisplay {
 
     /// `modes` in points; HiDPI backing is 2× the points
     /// `millimeters`: the receiver panel's physical size
-    public init(name: String, streamPixels: PixelSize, hiDPI: Bool, modes: [PixelSize], initial: PixelSize, millimeters: PixelSize,
+    public init(name: String, streamPixels: PixelSize, hiDPI: Bool, modes: [PixelSize], millimeters: PixelSize,
                 refresh: Double = 60) throws {
         let scale = hiDPI ? 2 : 1
         let desc = CGVirtualDisplayDescriptor()
@@ -54,12 +54,6 @@ public final class VirtualDisplay {
         self.display = display
         self.hiDPI = hiDPI
         displayID = display.displayID
-        // The mode list appears shortly after the settings apply
-        let deadline = Date().addingTimeInterval(3)
-        while !setMode(points: initial) {
-            guard Date() < deadline else { throw VirtualDisplayError.mode }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
     }
 
     /// Sets "looks like" size; false if no such mode listed
