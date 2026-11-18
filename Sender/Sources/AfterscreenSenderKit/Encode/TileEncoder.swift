@@ -36,6 +36,7 @@ public final class TileEncoder {
     public var motion = Motion.bc1
     /// Max settled tiles sent per frame
     /// Keeps a big refinement from stalling motion on slow links
+    /// Video path: also the BC7 cap for a frame's changed still tiles
     public var settleLimit = Int.max
     /// BC1 motion path: max moving tiles per frame as BC7
     /// Exceeded: all moving tiles go out as BC1
@@ -168,11 +169,13 @@ public final class TileEncoder {
     /// `dirty`: capture's changed regions in stream pixels; nil encodes all
     /// `congested`: stream lags its source
     /// Then a tile also changed last frame is moving
+    /// `start`: a stream's first keyframe; may go by video
     /// Settled BC1 tiles are sent along as BC7
     /// nil when there is nothing to send
     /// or no upload buffer frees up within 1 s
     public func encode(texture: MTLTexture, forceAll: Bool, dirty: [CGRect]?,
-                       now: TimeInterval = ProcessInfo.processInfo.systemUptime, congested: Bool = false) -> EncodedFrame? {
+                       now: TimeInterval = ProcessInfo.processInfo.systemUptime, congested: Bool = false,
+                       start: Bool = false) -> EncodedFrame? {
         changedTiles = 0
         let list = candidateList.contents().assumingMemoryBound(to: UInt32.self)
         var count = 0
@@ -222,7 +225,7 @@ public final class TileEncoder {
         let congestedWindow = lastCongested ? max(TileEncoder.congestedMotionWindow, 1.5 * (now - lastEncode)) : TileEncoder.congestedMotionWindow
         lastEncode = now
         lastCongested = congested || forceAll
-        var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = [], moving: [Int] = []
+        var settling: [Int] = [], entering: [Int] = [], referenceOnly: [Int] = [], moving: [Int] = [], still: [Int] = []
         var changed = 0
         for t in 0..<geometry.tileCount {
             if flags[t] != 0 {
@@ -234,27 +237,30 @@ public final class TileEncoder {
                 lastChange[t] = now
                 lastFrame[t] = encodes
                 if inMotion && motion == .video {
-                    // Video tiles become lossy once a frame carries their run
-                    if onVideo[t] {
-                        flags[t] = 0
-                        modes[t] = 3
-                        referenceOnly.append(t)
-                    } else {
-                        mark(t, mode: 3, in: flags)
-                        entering.append(t)
-                    }
+                    toVideo(t, flags, &entering, &referenceOnly)
                     continue
                 }
                 if inMotion {
                     moving.append(t)
                 } else {
-                    lossy[t] = false
-                    onVideo[t] = false
-                    mark(t, mode: 0, in: flags)
+                    still.append(t)
                 }
             } else if lossy[t] && now - lastChange[t] >= TileEncoder.settleDelay && settling.count < settleLimit {
                 settling.append(t)
                 mark(t, mode: 1, in: flags)
+            }
+        }
+        // Video path: a change past the settle budget goes by video
+        // Its tiles settle to BC7 within the budget later
+        // A requested keyframe stays BC7: it recovers a failing decoder
+        let viaVideo = motion == .video && (!forceAll || start) && still.count > settleLimit
+        for t in still {
+            if viaVideo {
+                toVideo(t, flags, &entering, &referenceOnly)
+            } else {
+                lossy[t] = false
+                onVideo[t] = false
+                mark(t, mode: 0, in: flags)
             }
         }
         // Motion within the link's BC7 budget stays BC7
@@ -274,6 +280,18 @@ public final class TileEncoder {
         }
         changedTiles = changed
         return settle(settling, frame)
+    }
+
+    /// Video tiles become lossy once a frame carries their run
+    private func toVideo(_ t: Int, _ flags: UnsafeMutableBufferPointer<UInt32>, _ entering: inout [Int], _ referenceOnly: inout [Int]) {
+        if onVideo[t] {
+            flags[t] = 0
+            modes[t] = 3
+            referenceOnly.append(t)
+        } else {
+            mark(t, mode: 3, in: flags)
+            entering.append(t)
+        }
     }
 
     /// Settling tiles stay lossy until a frame carries their BC7

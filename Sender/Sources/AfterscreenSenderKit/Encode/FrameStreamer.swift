@@ -73,6 +73,8 @@ final class FrameStreamer {
     private var outbox: [Outgoing] = []
     private let lock = NSLock()
     private var keyframeRequested = true
+    /// The first frame went: later keyframes are requests
+    private var opened = false
     /// Since the last encoded frame: the socket held two back
     /// Stream lags source: tile changed in consecutive frames is moving
     private var queueWasFull = false
@@ -385,7 +387,10 @@ final class FrameStreamer {
         CVMetalTextureCacheCreateTextureFromImage(nil, tile.cache, pixelBuffer, nil, format,
                                                   CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), 0, &cvTexture)
         guard let cvt = cvTexture, let texture = CVMetalTextureGetTexture(cvt) else { return }
-        var out = Outgoing(frame: tile.encoder.encode(texture: texture, forceAll: forceKey, dirty: captured.dirty, congested: queueWasFull))
+        let start = forceKey && !opened
+        opened = true
+        var out = Outgoing(frame: tile.encoder.encode(texture: texture, forceAll: forceKey, dirty: captured.dirty, congested: queueWasFull,
+                                                      start: start))
         out.created = started
         out.changedTiles = tile.encoder.changedTiles
         gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)
@@ -450,7 +455,8 @@ final class FrameStreamer {
     private func refine() {
         guard let tile = tile, !connection.isClosed else { return }
         // Handing over: `wake` refines once the switch is done
-        refinePending = inFlight >= 2 || !sending
+        // Only on an idle link: new frames go first
+        refinePending = inFlight > 0 || !sending
         guard !refinePending else { return }
         if let frame = tile.encoder.refine() {
             gpuMeter.add(seconds: tile.encoder.lastGPUSeconds)

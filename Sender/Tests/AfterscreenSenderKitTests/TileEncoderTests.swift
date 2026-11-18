@@ -452,6 +452,47 @@ extension MotionTests {
         XCTAssertEqual(next.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc1)])
     }
 
+    func testAChangePastTheSettleBudgetGoesByVideo() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        // Limit 1: the second tile never settled; it stays on video, no run
+        for (limit, runs, lossy) in [(1, [TileRun(row: 0, first: 0, count: 1, format: .video)], 2),
+                                     (2, [TileRun(row: 0, first: 0, count: 2, format: .bc7)], 0)] {
+            let encoder = try TileEncoder(device: device, geometry: TileGeometry(width: w, height: h), uploadBuffers: 6)
+            encoder.motion = .video
+            encoder.settleLimit = limit
+            _ = encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: false, dirty: nil, now: 0)
+            _ = encoder.refine(now: 1)
+            // Both tiles change after a second still
+            let changed = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 1), w, h), forceAll: false, dirty: nil, now: 2))
+            XCTAssertEqual(changed.runs, runs, "limit \(limit)")
+            XCTAssertEqual(encoder.lossyTiles, lossy, "limit \(limit)")
+        }
+    }
+
+    func testAKeyframeStaysBC7PastTheSettleBudget() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let encoder = try TileEncoder(device: device, geometry: TileGeometry(width: w, height: h), uploadBuffers: 6)
+        encoder.motion = .video
+        encoder.settleLimit = 1
+        let key = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0))
+        XCTAssertEqual(key.runs, [TileRun(row: 0, first: 0, count: 2, format: .bc7)])
+        XCTAssertEqual(encoder.lossyTiles, 0)
+    }
+
+    func testAStreamsFirstKeyframeGoesByVideoPastTheSettleBudget() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let w = 128, h = 64
+        let encoder = try TileEncoder(device: device, geometry: TileGeometry(width: w, height: h), uploadBuffers: 6)
+        encoder.motion = .video
+        encoder.settleLimit = 1
+        let first = try XCTUnwrap(encoder.encode(texture: texture(device, scene(w, h, phase: 0), w, h), forceAll: true, dirty: nil, now: 0,
+                                                 start: true))
+        XCTAssertEqual(first.runs, [TileRun(row: 0, first: 0, count: 2, format: .video)])
+        XCTAssertEqual(encoder.lossyTiles, 2)
+    }
+
     func testSettlingIsCappedPerFrame() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let w = 128, h = 64

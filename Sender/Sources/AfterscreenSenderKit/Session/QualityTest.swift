@@ -47,8 +47,8 @@ public enum QualityTest {
 
     /// Skipped at stage start; at most 5 s
     /// Receiver fps counter spans one second
-    /// New stream opens with lossless frames, one byte per pixel
-    /// Slow links take a while to carry them
+    /// Tile path opens with lossless frames, one byte per pixel
+    /// Slow links take a while to carry them; hybrid opens by video
     static func warmup(stage: PixelSize, capacityGbps: Double?) -> Double {
         min(5, 1 + 2 * Double(stage.pixelCount) * 8 / ((capacityGbps ?? 0) * 1e9))
     }
