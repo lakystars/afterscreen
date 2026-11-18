@@ -74,6 +74,9 @@ public final class Connection {
     private var closed = false
     private var queued = 0
     private var queuedPictures = 0
+    private var queuedPayload = 0
+    /// Half the unsent limit: the kernel's mark and each write
+    private var unsentStep: Int?
     private var started = false
     private var lastRead = ProcessInfo.processInfo.systemUptime
     private var gated = false
@@ -104,6 +107,26 @@ public final class Connection {
     public var queuedFrames: Int {
         lock.lock(); defer { lock.unlock() }
         return queuedPictures
+    }
+
+    /// Bytes handed to `send`, not yet written to the socket
+    public var queuedBytes: Int {
+        lock.lock(); defer { lock.unlock() }
+        return queuedPayload
+    }
+
+    /// Caps unsent bytes in the kernel; nil: whole buffer
+    /// The backlog then waits here, where senders see it
+    /// Writes wait for half the cap, then add half
+    public func limitUnsent(_ bytes: Int?) {
+        let step = bytes.flatMap { $0 >= 2 ? $0 / 2 : nil }
+        lock.lock()
+        // A released fd number may belong to another socket
+        guard !closed else { return lock.unlock() }
+        unsentStep = step
+        var value = Int32(clamping: step ?? 0)
+        setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &value, socklen_t(MemoryLayout<Int32>.size))
+        lock.unlock()
     }
 
     /// Tile frames stand for whole frames
@@ -300,17 +323,22 @@ public final class Connection {
     }
 
     private func enqueue(_ parts: [Data], picture: Bool) {
+        let bytes = parts.reduce(0) { $0 + $1.count }
         lock.lock()
         if closed { lock.unlock(); return }
         queued += 1
+        queuedPayload += bytes
         if picture { queuedPictures += 1 }
         lock.unlock()
         writer.async { [self] in
             var vecs: [iovec] = []
             vecs.reserveCapacity(parts.count)
-            let ok = Connection.withIovecs(parts[...], &vecs) { writeAll(&$0) }
+            var sent = 0
+            let ok = Connection.withIovecs(parts[...], &vecs) { writeAll(&$0, written: &sent) }
             lock.lock()
             queued -= 1
+            // Written parts left the count as they went
+            queuedPayload -= bytes - sent
             if picture { queuedPictures -= 1 }
             let written = picture ? frameWritten : nil
             lock.unlock()
@@ -332,15 +360,24 @@ public final class Connection {
     }
 
     /// One writev per message; partial writes advance through the vector
-    private func writeAll(_ vecs: inout [iovec]) -> Bool {
+    /// Limited: each writev waits for the kernel to drain
+    private func writeAll(_ vecs: inout [iovec], written: inout Int) -> Bool {
         var i = 0
         while i < vecs.count {
             if isClosed { return false }
-            let n = vecs.withUnsafeBufferPointer { writev(fd, $0.baseAddress! + i, Int32(min(vecs.count - i, Int(IOV_MAX)))) }
+            lock.lock()
+            let step = unsentStep
+            lock.unlock()
+            if step != nil, !waitWritable() { return false }
+            let n = Connection.writev(fd, &vecs, from: i, limit: step ?? .max)
             if n < 0 {
                 if errno == EINTR { continue }
                 return false
             }
+            written += n
+            lock.lock()
+            queuedPayload -= n
+            lock.unlock()
             throttle(bytes: n)
             var left = n
             while left > 0, i < vecs.count {
@@ -355,6 +392,34 @@ public final class Connection {
             }
         }
         return true
+    }
+
+    /// One writev from `i`, `limit` bytes at most
+    private static func writev(_ fd: Int32, _ vecs: inout [iovec], from i: Int, limit: Int) -> Int {
+        var count = 0, total = 0
+        while i + count < vecs.count, count < Int(IOV_MAX), total < limit {
+            total += vecs[i + count].iov_len
+            count += 1
+        }
+        // Last part cut to the limit for this call only
+        let last = i + count - 1, full = vecs[last].iov_len
+        if total > limit { vecs[last].iov_len = full - (total - limit) }
+        let n = vecs.withUnsafeBufferPointer { Darwin.writev(fd, $0.baseAddress! + i, Int32(count)) }
+        vecs[last].iov_len = full
+        return n
+    }
+
+    /// Unsent bytes under the kernel's mark; false once closed
+    /// Hang-up counts as writable: the write reports it
+    private func waitWritable() -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        while !isClosed {
+            p.revents = 0
+            let ready = poll(&p, 1, 250)
+            if ready > 0 { return true }
+            if ready < 0 && errno != EINTR { return false }
+        }
+        return false
     }
 
     private func throttle(bytes: Int) {

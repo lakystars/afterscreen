@@ -169,6 +169,15 @@ public enum PathPolicy {
         Int((capacityGbps ?? 0) * 0.5e9 / 8 / fps / Double(tileBytes))
     }
 
+    /// Cap on unsent bytes in the socket: 25 ms of the link
+    /// Backlog past it stays in the app, where frames skip
+    /// nil: fast links keep the whole socket buffer
+    public static func unsentLimit(capacityGbps: Double?) -> Int? {
+        guard let gbps = capacityGbps, gbps > 0 else { return nil }
+        let bytes = Int(gbps * 1e9 / 8 * 0.025)
+        return bytes >= 4 << 20 ? nil : max(128 << 10, bytes)
+    }
+
     /// Video bitrate: 40% of the link, clamped to 20…200 Mbps
     /// Rest goes to lossless tiles
     public static func bitrate(capacityGbps: Double?) -> Int {

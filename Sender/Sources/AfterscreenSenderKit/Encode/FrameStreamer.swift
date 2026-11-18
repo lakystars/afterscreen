@@ -94,6 +94,8 @@ final class FrameStreamer {
     private var lastSent: (bytes: UInt64, at: TimeInterval)?
     /// Video bitrate now and from the probe; under `lock`
     private var bitrates: (now: Int, start: Int)?
+    /// Measured link; sizes the socket's unsent limit
+    private var linkGbps: Double?
 
     init(config: StreamConfig, capacityGbps: Double?, connection: Connection) throws {
         self.connection = connection
@@ -117,6 +119,8 @@ final class FrameStreamer {
     private func apply(_ config: StreamConfig, capacityGbps: Double?) {
         guard let tile = tile else { return }
         let geometry = tile.encoder.geometry, fps = config.frameRate
+        linkGbps = capacityGbps
+        connection.limitUnsent(PathPolicy.unsentLimit(capacityGbps: capacityGbps))
         // A resume off Thunderbolt drops 120 fps
         if abs(gate.interval - (1 / fps - 0.002)) > 1e-6 { gate = FrameGate(interval: 1 / fps - 0.002) }
         compression = CompressionPolicy(capacityGbps: capacityGbps, fps: fps)
@@ -218,6 +222,8 @@ final class FrameStreamer {
                 next.send(.reconfigure, json: config)
                 apply(config, capacityGbps: capacityGbps)
             } else {
+                linkGbps = capacityGbps ?? linkGbps
+                next.limitUnsent(PathPolicy.unsentLimit(capacityGbps: linkGbps))
                 rate?.newLink()
             }
             // Frames held while switching: out before the next capture
@@ -297,7 +303,9 @@ final class FrameStreamer {
     private func sampleLink() {
         guard rate != nil, video != nil, let tcp = connection.tcpInfo() else { return }
         if lastSent == nil { lastSent = (tcp.sentBytes, ProcessInfo.processInfo.systemUptime) }
-        leastBuffered = min(leastBuffered ?? tcp.sendBuffered, tcp.sendBuffered)
+        // Socket and app queue: the limit moves backlog here
+        let buffered = tcp.sendBuffered + connection.queuedBytes
+        leastBuffered = min(leastBuffered ?? buffered, buffered)
         leastWindow = min(leastWindow ?? tcp.peerWindow, tcp.peerWindow)
         rateTicks += 1
         if rateTicks % 4 == 0 { adjustRate(tcp) }

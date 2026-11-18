@@ -499,6 +499,23 @@ final class PathPolicyTests: XCTestCase {
         let c = PathPolicy.choose(link: .loopback, capacityGbps: 40, welcome: welcome(panel: PixelSize(width: 3600, height: 2338)))
         XCTAssertEqual(c?.streamPixels, PixelSize(width: 3600, height: 2336))
     }
+
+    func testUnsentLimitIsTwentyFiveMillisecondsOfSlowLinks() {
+        XCTAssertNil(PathPolicy.unsentLimit(capacityGbps: nil))
+        XCTAssertNil(PathPolicy.unsentLimit(capacityGbps: 16), "Thunderbolt keeps the buffer")
+        XCTAssertNil(PathPolicy.unsentLimit(capacityGbps: 2.8), "USB too")
+        XCTAssertEqual(PathPolicy.unsentLimit(capacityGbps: 0.94), 2_937_500)
+        XCTAssertEqual(PathPolicy.unsentLimit(capacityGbps: 0.07), 218_750)
+        XCTAssertEqual(PathPolicy.unsentLimit(capacityGbps: 0.01), 128 << 10, "floor")
+    }
+
+    func testProbeQueueFollowsTheAcknowledgedRate() {
+        XCTAssertEqual(SenderSession.probeQueue(acked: 0, elapsed: 0), 256 << 10)
+        // 70 Mbps: 100 ms is 875 KB
+        XCTAssertEqual(SenderSession.probeQueue(acked: 8_750_000, elapsed: 1), 875_000)
+        XCTAssertEqual(SenderSession.probeQueue(acked: 1_250_000, elapsed: 1), 256 << 10, "10 Mbps: floor")
+        XCTAssertEqual(SenderSession.probeQueue(acked: 2_000_000_000, elapsed: 1), 12 << 20, "Thunderbolt: cap")
+    }
 }
 
 final class FrameGateTests: XCTestCase {

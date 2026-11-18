@@ -1173,14 +1173,29 @@ public final class SenderSession {
         }
     }
 
-    /// 0.3 s of 1 MiB messages on `c`; answered there
+    /// Probe backlog: 100 ms at the rate acknowledged so far
+    /// Slow links drain soon after the deadline; fast ones fill
+    static func probeQueue(acked: Int, elapsed: TimeInterval) -> Int {
+        let rate = elapsed > 0 ? Double(acked) / elapsed : 0
+        return min(12 << 20, max(256 << 10, Int(rate * 0.1)))
+    }
+
+    /// 0.3 s of probe data on `c`, then the end; answered there
     private func probe(_ c: Connection) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let chunk = Data(count: 1 << 20)
-            let deadline = ProcessInfo.processInfo.systemUptime + 0.3
-            while ProcessInfo.processInfo.systemUptime < deadline && !c.isClosed {
-                if c.queuedMessages < 8 {
-                    c.send(Message(type: .probe, payload: chunk))
+            let block = Data(count: 1 << 20)
+            let start = ProcessInfo.processInfo.systemUptime, deadline = start + 0.3
+            var handed = 0
+            while !c.isClosed {
+                let now = ProcessInfo.processInfo.systemUptime
+                guard now < deadline else { break }
+                // App queue and socket, in flight included
+                let queued = c.queuedBytes + (c.tcpInfo()?.sendBuffered ?? 0)
+                let target = SenderSession.probeQueue(acked: max(0, handed - queued), elapsed: now - start)
+                if queued < target {
+                    let n = min(block.count, max(64 << 10, target / 4))
+                    c.send(Message(type: .probe, payload: block.prefix(n)))
+                    handed += n
                 } else {
                     usleep(200)
                 }

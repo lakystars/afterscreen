@@ -200,6 +200,41 @@ final class TransportTests: XCTestCase {
         server.close(reason: "done")
     }
 
+    func testUnsentLimitKeepsBacklogInTheAppQueue() throws {
+        let (client, server) = try pair()
+        let limit = 128 << 10
+        client.limitUnsent(limit)
+        client.start(queue: queue)
+        // Parts past the limit are cut across writes
+        let messages = (0..<48).map { i in Data((0..<(300 << 10)).map { UInt8(truncatingIfNeeded: $0 &+ i) }) }
+        messages.forEach { client.send(Message(type: .tileFrame, payload: $0)) }
+        Thread.sleep(forTimeInterval: 0.5)
+        let info = try XCTUnwrap(client.tcpInfo())
+        XCTAssertLessThanOrEqual(info.sendBuffered, limit, "unsent stays under the limit")
+        XCTAssertGreaterThan(client.queuedBytes, 8 << 20, "the rest waits in the app")
+        var received: [Data] = []
+        let got = expectation(description: "all")
+        got.expectedFulfillmentCount = messages.count
+        server.onMessage = { received.append($0.payload); got.fulfill() }
+        server.start(queue: queue)
+        wait(for: [got], timeout: 10)
+        XCTAssertEqual(received, messages)
+        XCTAssertEqual(client.queuedBytes, 0)
+        client.close(reason: "done")
+    }
+
+    func testQueuedBytesDropAsPartsAreWritten() throws {
+        let (client, server) = try pair()
+        client.limitUnsent(128 << 10)
+        client.start(queue: queue)
+        client.send(Message(type: .tileFrame, payload: Data(count: 16 << 20)))
+        Thread.sleep(forTimeInterval: 0.5)
+        // Part of the one message sits in the peer's buffer
+        XCTAssertLessThan(client.queuedBytes, 16 << 20)
+        client.close(reason: "done")
+        server.close(reason: "done")
+    }
+
     func testUnstartedConnectionClosesSocketOnRelease() throws {
         var (client, server): (Connection?, Connection) = try pair()
         let closed = expectation(description: "closed")
