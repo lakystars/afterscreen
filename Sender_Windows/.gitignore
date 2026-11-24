@@ -1,0 +1,28 @@
+# .NET build
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/
+
+# Local smoke / live stream artifacts
+*.out
+*.err
+*.log
+*.pid
+*.proc.xml
+self-test-*.txt
+
+# Test / IDE
+TestResults/
+.idea/
+
+# Scratch / accidental binary drops
+scan-tmp/
+tools-scan.csx
+*.dll
+*.exe
+*.pdb
+
+# Published app (dotnet publish -o dist)
+dist/
