@@ -23,12 +23,20 @@ public sealed class EncodeOptions
 public sealed class EncodePipeline : IDisposable
 {
     public required ITileEncoder Tiles { get; init; }
-    public IVideoEncoder? Video { get; init; }
+    public IVideoEncoder? Video { get; set; }
     public required StreamConfig Config { get; init; }
     public GpuAdapterInfo? Adapter { get; init; }
     /// <summary>Shared D3D device for the preferred adapter (HLSL BC7 / MF DXGI later).</summary>
     public D3dEncodeDevice? D3d { get; init; }
     public string Summary { get; init; } = "";
+
+    /// <summary>Swap the video encoder (Phase B: rebind MF DXGI to the capture/tile device). Disposes the previous.</summary>
+    public void ReplaceVideo(IVideoEncoder? next)
+    {
+        if (ReferenceEquals(Video, next)) return;
+        Video?.Dispose();
+        Video = next;
+    }
 
     public void Dispose()
     {
@@ -114,6 +122,15 @@ public static class EncodeServices
                     Bitrate = bitrate,
                     TenBit = ten,
                 };
+                // Phase B: defer MF create to MacLoop (bind DXGI on capture gpuDev once). Creating here
+                // then ReplaceVideo left ~QSV dispose residue every session.
+                if (VideoZeroCopy.Wanted)
+                {
+                    // Capacity already proved this size can sustain the rate (or cached); keep layer only.
+                    path = StreamPath.hybrid;
+                    video = null;
+                    break;
+                }
                 try
                 {
                     video = MfH264Encoder.TryCreate(layer, fps, adapter, d3d);
@@ -150,13 +167,16 @@ public static class EncodeServices
         };
 
         // Mac FrameStreamer.reconfigure: hybrid → motion=.video; else .bc1.
-        tiles.Motion = path == StreamPath.hybrid && video is not null
+        // Zero-copy defers the encoder to MacLoop but still wants .video motion once streaming.
+        tiles.Motion = path == StreamPath.hybrid && (video is not null || (VideoZeroCopy.Wanted && layer is not null))
             ? TileMotion.Video
             : TileMotion.Bc1;
 
         var d3dTag = d3d is not null ? $"; d3d={d3d.Adapter.Description}" : "";
-        var summary = path == StreamPath.hybrid && video is not null
-            ? $"stream={stream.Width}x{stream.Height}; tiles={tiles.BackendName}; video={video.BackendName}; {layer!.Pixels.Width}x{layer.Pixels.Height} @{layer.Bitrate / 1_000_000}Mbps{d3dTag}"
+        var summary = path == StreamPath.hybrid && layer is not null
+            ? video is not null
+                ? $"stream={stream.Width}x{stream.Height}; tiles={tiles.BackendName}; video={video.BackendName}; {layer.Pixels.Width}x{layer.Pixels.Height} @{layer.Bitrate / 1_000_000}Mbps{d3dTag}"
+                : $"stream={stream.Width}x{stream.Height}; tiles={tiles.BackendName}; video=deferred-zc; {layer.Pixels.Width}x{layer.Pixels.Height} @{layer.Bitrate / 1_000_000}Mbps{d3dTag}"
             : $"stream={stream.Width}x{stream.Height}; tiles={tiles.BackendName}; path=tile; motion={tiles.Motion}{d3dTag}";
 
         return new EncodePipeline

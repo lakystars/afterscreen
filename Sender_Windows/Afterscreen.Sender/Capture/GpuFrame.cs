@@ -33,7 +33,8 @@ public sealed class GpuFrame : IDisposable
             Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
-            BindFlags = renderTarget ? BindFlags.ShaderResource | BindFlags.RenderTarget : BindFlags.ShaderResource,
+            // Always allow RT: VideoProcessor input views reject SRV-only textures (Phase B zero-copy).
+            BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
         });
         Srv = device.CreateShaderResourceView(Texture);
         if (renderTarget) Rtv = device.CreateRenderTargetView(Texture);

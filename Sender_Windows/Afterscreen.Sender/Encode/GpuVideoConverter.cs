@@ -92,8 +92,29 @@ void main(uint3 id : SV_DispatchThreadID)
     private readonly ID3D11UnorderedAccessView _outUav;
     private readonly ID3D11Buffer _staging;
     private readonly int _outBytes;
+    // ConvertLocked stage timings (ms) since last TakeStageTimings — for VIDEO_DIAG / zero-copy plan.
+    private double _tCsMs, _tGpuCopyMs, _tMapMs, _tMemcpyMs;
+    private int _tFrames;
+    private readonly AblationMode _ablation;
+    private bool _ablationPrimed;
 
     public int OutputBytes => _outBytes;
+
+    /// <summary>Phase 0 CPU attribution: AFTERSCREEN_VIDEO_ABLATION=memcpy|convert.</summary>
+    public enum AblationMode { None, SkipMemcpy, SkipConvert }
+
+    public AblationMode Ablation => _ablation;
+
+    private static AblationMode ReadAblation()
+    {
+        var v = Environment.GetEnvironmentVariable("AFTERSCREEN_VIDEO_ABLATION");
+        if (string.IsNullOrWhiteSpace(v)) return AblationMode.None;
+        if (v.Equals("memcpy", StringComparison.OrdinalIgnoreCase) || v.Equals("skipcopy", StringComparison.OrdinalIgnoreCase))
+            return AblationMode.SkipMemcpy;
+        if (v.Equals("convert", StringComparison.OrdinalIgnoreCase) || v.Equals("noconvert", StringComparison.OrdinalIgnoreCase))
+            return AblationMode.SkipConvert;
+        return AblationMode.None;
+    }
 
     /// <summary>Output size must be a multiple of 4 horizontally and 2 vertically.</summary>
     public static bool Supports(int w, int h) => w % 4 == 0 && h % 2 == 0;
@@ -104,6 +125,9 @@ void main(uint3 id : SV_DispatchThreadID)
         _w = dstWidth;
         _h = dstHeight;
         _tenBit = tenBit;
+        _ablation = ReadAblation();
+        if (_ablation != AblationMode.None)
+            Console.WriteLine($"  [video-ablation] GpuVideoConverter mode={_ablation}");
         _outBytes = tenBit ? dstWidth * dstHeight * 3 : dstWidth * dstHeight * 3 / 2;
         var d = device.Device;
         var code = Compiler.Compile(Hlsl, "main", "GpuVideoConverter.hlsl", "cs_5_0", ShaderFlags.OptimizationLevel3);
@@ -156,9 +180,29 @@ void main(uint3 id : SV_DispatchThreadID)
             ConvertLocked(frame, yuv);
     }
 
+    /// <summary>
+    /// Average ms per convert: compute dispatch, GPU→staging copy+Flush, Map(Read), MemoryCopy into MF/CPU buffer; resets.
+    /// </summary>
+    public (double Cs, double GpuCopy, double Map, double Memcpy, int Frames, int Bytes) TakeStageTimings()
+    {
+        var n = Math.Max(1, _tFrames);
+        var r = (_tCsMs / n, _tGpuCopyMs / n, _tMapMs / n, _tMemcpyMs / n, _tFrames, _outBytes);
+        _tCsMs = _tGpuCopyMs = _tMapMs = _tMemcpyMs = 0;
+        _tFrames = 0;
+        return r;
+    }
+
     private unsafe void ConvertLocked(GpuFrame frame, IntPtr yuv)
     {
+        // Phase 0: after one real convert, skip the whole GPU→CPU path (reuse last MF buffer contents).
+        if (_ablation == AblationMode.SkipConvert && _ablationPrimed)
+        {
+            _tFrames++;
+            return;
+        }
+
         var ctx = _device.Context;
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var mapped = ctx.Map(_cb, MapMode.WriteDiscard, MapFlags.None);
         Marshal.WriteInt32(mapped.DataPointer, 0, _w);
         Marshal.WriteInt32(mapped.DataPointer, 4, _h);
@@ -176,18 +220,32 @@ void main(uint3 id : SV_DispatchThreadID)
         ctx.CSSetShaderResource(0, (ID3D11ShaderResourceView?)null!);
         ctx.CSSetConstantBuffer(0, (ID3D11Buffer?)null!);
         ctx.CSSetShader(null);
+        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         ctx.CopyResource(_staging, _outBuf);
         ctx.Flush();
+        var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
+
         var m = ctx.Map(_staging, 0, MapMode.Read, MapFlags.None);
+        var t3 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            Buffer.MemoryCopy((void*)m.DataPointer, (void*)yuv, _outBytes, _outBytes);
+            // Phase 0: Map (GPU sync) still runs; skip only the ~13 MB CPU copy.
+            if (_ablation != AblationMode.SkipMemcpy)
+                Buffer.MemoryCopy((void*)m.DataPointer, (void*)yuv, _outBytes, _outBytes);
         }
         finally
         {
             ctx.Unmap(_staging, 0);
         }
+        var t4 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        _tCsMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0, t1).TotalMilliseconds;
+        _tGpuCopyMs += System.Diagnostics.Stopwatch.GetElapsedTime(t1, t2).TotalMilliseconds;
+        _tMapMs += System.Diagnostics.Stopwatch.GetElapsedTime(t2, t3).TotalMilliseconds;
+        _tMemcpyMs += System.Diagnostics.Stopwatch.GetElapsedTime(t3, t4).TotalMilliseconds;
+        _tFrames++;
+        _ablationPrimed = true;
     }
 
     public void Dispose()

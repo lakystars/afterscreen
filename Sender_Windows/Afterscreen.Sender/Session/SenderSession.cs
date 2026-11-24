@@ -1321,6 +1321,18 @@ public sealed partial class SenderSession : IDisposable
             var lat = mf.TakeOutputLatency();
             if (vs + vn + vp + vq > 0)
                 Snapshot.State += $" v[scale={vs:0.0} nv12={vn:0.0} copy={vp:0.0} submit={vq:0.0} lat={lat:0.0}]";
+            // VIDEO_DIAG (default on): GPU→CPU NV12 path breakdown for zero-copy planning.
+            // vd[cs=compute gpu=Copy+Flush map=Map(Read) cpy=MemoryCopy n=frames B=NV12 bytes path=sysmem|dxgi]
+            if (!string.Equals(Environment.GetEnvironmentVariable("AFTERSCREEN_VIDEO_DIAG"), "0", StringComparison.Ordinal))
+            {
+                var (cs, gpu, map, cpy, vnFrames, nv12Bytes) = mf.TakeConvertDiag();
+                if (vnFrames > 0)
+                {
+                    var mbs = nv12Bytes * vnFrames / (1024.0 * 1024.0);
+                    Snapshot.State +=
+                        $" vd[cs={cs:0.00} gpu={gpu:0.00} map={map:0.00} cpy={cpy:0.00} n={vnFrames} B={nv12Bytes} MB/s={mbs:0.0} path={mf.InputPathTag} abl={mf.ConvertAblationTag}]";
+                }
+            }
         }
         if (_tileN > 0)
             Snapshot.State += $" tile={_tileMsSum / _tileN:0.0}";

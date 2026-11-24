@@ -35,6 +35,7 @@ static void Usage()
           capture-once [out.bgra]           DXGI grab → 2880x1620 (smoke)
           monitors                          list DXGI outputs and the one AFTERSCREEN_OUTPUT selects
           encode-smoke                      list GPUs + try MF H.264 once
+          dxgi-prove                        Phase A: FORCE_DXGI + texture-sample prove (does not touch live App)
         """);
 }
 
@@ -56,6 +57,7 @@ return args[0] switch
     "enc-capacity" => RunEncCapacity(),
     "discover" => await RunDiscover(),
     "idr-probe" => RunIdrProbe(args.Length > 1 && int.TryParse(args[1], out var iv) ? iv : 1),
+    "dxgi-prove" => RunDxgiProve(),
     _ => FailUsage(),
 };
 
@@ -407,6 +409,57 @@ static int RunEncCapacity()
             Console.WriteLine($"  {codec}{(ten ? " 10-bit" : "")} {size.Width}x{size.Height}: {fps:0.0} fps (took {System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalSeconds:0.0} s)");
         }
     return 0;
+}
+
+/// <summary>Phase A: prove QSV with real DXGI NV12/P010 texture samples (AFTERSCREEN_MF_FORCE_DXGI=1).</summary>
+static int RunDxgiProve()
+{
+    Environment.SetEnvironmentVariable("AFTERSCREEN_MF_FORCE_DXGI", "1");
+    Environment.SetEnvironmentVariable("AFTERSCREEN_MF_VERBOSE", "1");
+    var prefer = Afterscreen.Sender.Encode.GpuAdapters.Prefer();
+    using var d3d = Afterscreen.Sender.Encode.D3dEncodeDevice.TryCreate(prefer);
+    if (d3d is null) { Console.WriteLine("FAIL d3d unavailable"); return 1; }
+    Console.WriteLine($"d3d: {d3d.Adapter.Description}");
+    var cases = new (string name, Afterscreen.Protocol.VideoCodec codec, bool ten, int w, int h)[]
+    {
+        ("hevc10-2880", Afterscreen.Protocol.VideoCodec.hevc, true, 2880, 1620),
+        ("hevc8-2880", Afterscreen.Protocol.VideoCodec.hevc, false, 2880, 1620),
+        ("hevc10-1280", Afterscreen.Protocol.VideoCodec.hevc, true, 1280, 720),
+        ("h264-1280", Afterscreen.Protocol.VideoCodec.h264, false, 1280, 720),
+    };
+    var anyDxgi = false;
+    var anyOk = false;
+    foreach (var c in cases)
+    {
+        var layer = new Afterscreen.Protocol.VideoLayer
+        {
+            Codec = c.codec,
+            TenBit = c.ten,
+            Pixels = new Afterscreen.Protocol.PixelSize(c.w, c.h),
+            Bitrate = 20_000_000,
+        };
+        Console.WriteLine($"--- prove {c.name} {c.w}x{c.h} ---");
+        using var enc = Afterscreen.Sender.Encode.MfH264Encoder.TryCreate(layer, 30, prefer, d3d);
+        if (enc is null) { Console.WriteLine($"RESULT {c.name}: FAIL create"); continue; }
+        var dxgi = enc.UsesDxgiInput || enc.BackendName.Contains("|dxgi", StringComparison.Ordinal);
+        anyDxgi |= dxgi;
+        anyOk = true;
+        Console.WriteLine($"RESULT {c.name}: OK backend={enc.BackendName} UsesDxgiInput={enc.UsesDxgiInput}");
+        // Extra: encode a few frames after create (prove already ran inside TryCreate).
+        var bgra = new byte[c.w * c.h * 4];
+        Array.Fill(bgra, (byte)64);
+        var got = 0;
+        for (var i = 0; i < 8; i++)
+        {
+            bgra[(i * 31) % bgra.Length] = (byte)(80 + i);
+            if (enc.Encode(bgra, c.w, c.h, forceKeyframe: i == 0) is not null) got++;
+        }
+        Console.WriteLine($"  post-create encodes with output: {got}/8");
+    }
+    Console.WriteLine(anyDxgi
+        ? "SUMMARY: at least one encoder used DXGI manager (texture samples in Encode when dxgi)."
+        : "SUMMARY: no DXGI encoder — fell back to sysmem (texture input not selected).");
+    return anyOk ? 0 : 1;
 }
 
 static int RunIdrProbe(int variant)

@@ -33,8 +33,9 @@ public sealed class MfH264Encoder : IVideoEncoder
     private readonly long _frameDuration;
     private readonly byte[] _nv12;
     private byte[]? _scaleScratch; // reuse — avoid 8MB alloc per frame under scroll load
-    private ID3D11Texture2D? _nv12Gpu;
-    private ID3D11Texture2D? _nv12Staging;
+    // Two GPU/staging pairs: ConvertGpu writes slot while QSV may still hold the other (pipeline ring).
+    private readonly ID3D11Texture2D?[] _nv12Gpu = new ID3D11Texture2D?[2];
+    private readonly ID3D11Texture2D?[] _nv12Staging = new ID3D11Texture2D?[2];
     // One recycled system-memory sample — CreateNv12Sample-per-frame leaked native WS to multi-GB.
     private IMFSample? _inputSample;
     private IMFMediaBuffer? _inputBuffer;
@@ -213,14 +214,43 @@ public sealed class MfH264Encoder : IVideoEncoder
     private readonly IMFMediaBuffer?[] _ringBuffers = new IMFMediaBuffer?[2];
     private int _ringSubmitted = 1;
     private int _ringPrepared = -1;
+    private GpuVideoProcessorNv12? _vpNv12;
+    private bool _vpNv12Failed;
+    private bool _zeroCopyActive;
+    private int _zcFrames;
+    private double _zcMs;
+
+    /// <summary>Phase B: last ConvertGpu used VideoProcessor→DXGI (no CPU map/cpy).</summary>
+    public bool ZeroCopyActive => _zeroCopyActive;
 
     /// <summary>
     /// GPU scale + YUV convert of the picture straight into the input sample <see cref="SubmitPrepared"/> hands over
     /// next. Leaves the in-flight input alone, so it runs while the previous frame encodes.
+    /// When <see cref="UsesDxgiInput"/>: Phase B zero-copy (same-device VideoProcessor) or A′ CPU upload into DXGI.
     /// </summary>
     public void ConvertGpu(D3dEncodeDevice device, Capture.GpuFrame frame)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var slot = _ringSubmitted ^ 1;
+        _ringPrepared = -1;
+        _zeroCopyActive = false;
+
+        // Phase B: try VP→DXGI first so GpuVideoConverter (~28MB staging) is not allocated on the zc path.
+        if (UsesDxgiInput && _d3d is not null
+            && VideoZeroCopy.Wanted
+            && ReferenceEquals(device.Device, _d3d.Device)
+            && TryConvertZeroCopy(device, frame, slot))
+        {
+            _ringPrepared = slot;
+            _zeroCopyActive = true;
+            var dt = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+            _tNv12Ms += dt;
+            _zcMs += dt;
+            _zcFrames++;
+            return;
+        }
+
         if (_gpuConv is null && !_gpuConvFailed)
         {
             try { _gpuConv = new GpuVideoConverter(device, _width, _height, _tenBit); }
@@ -228,9 +258,22 @@ public sealed class MfH264Encoder : IVideoEncoder
         }
         if (_gpuConv is null)
             throw new InvalidOperationException("GPU video converter unavailable");
-        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var slot = _ringSubmitted ^ 1;
-        _ringPrepared = -1;
+
+        if (UsesDxgiInput && _d3d is not null)
+        {
+            // A′: convert + CPU upload into a per-slot DXGI texture sample.
+            try { _ring[slot]?.Dispose(); } catch { /* ignore */ }
+            _ring[slot] = null;
+            _ringBuffers[slot] = null;
+            var pin = GCHandle.Alloc(_nv12, GCHandleType.Pinned);
+            try { _gpuConv.Convert(frame, pin.AddrOfPinnedObject()); }
+            finally { pin.Free(); }
+            _ring[slot] = CreateDxgiNv12Sample(_nv12, _width, _height, 0, _frameDuration, slot);
+            _ringPrepared = slot;
+            _tNv12Ms += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+            return;
+        }
+
         if (_ring[slot] is null)
         {
             _ringBuffers[slot] = MediaFactory.MFCreateMemoryBuffer(_nv12.Length);
@@ -244,6 +287,59 @@ public sealed class MfH264Encoder : IVideoEncoder
         buffer.CurrentLength = _nv12.Length;
         _ringPrepared = slot;
         _tNv12Ms += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+    }
+
+    private bool TryConvertZeroCopy(D3dEncodeDevice device, Capture.GpuFrame frame, int slot)
+    {
+        if (_vpNv12Failed) return false;
+        if (_vpNv12 is null)
+        {
+            _vpNv12 = GpuVideoProcessorNv12.TryCreate(device, frame.Width, frame.Height, _width, _height, _tenBit);
+            if (_vpNv12 is null)
+            {
+                _vpNv12Failed = true;
+                Console.WriteLine("  [zerocopy] falling back to A′ CPU→DXGI upload");
+                return false;
+            }
+            Console.WriteLine($"  [zerocopy] VideoProcessor BGRA→{(_tenBit ? "P010" : "NV12")} {_width}x{_height}");
+        }
+
+        try
+        {
+            if (_nv12Gpu[slot] is null)
+                _nv12Gpu[slot] = GpuVideoProcessorNv12.CreateOutputTexture(_d3d!.Device, _width, _height, _tenBit);
+            var gpu = _nv12Gpu[slot]!;
+            lock (device.ContextLock)
+                _vpNv12.Convert(frame, gpu);
+
+            try { _ring[slot]?.Dispose(); } catch { /* ignore */ }
+            _ring[slot] = null;
+            _ringBuffers[slot] = null;
+            using var buffer = MediaFactory.MFCreateDXGISurfaceBuffer(
+                typeof(ID3D11Texture2D).GUID, gpu, 0, false);
+            var sample = MediaFactory.MFCreateSample();
+            sample.AddBuffer(buffer);
+            sample.SampleTime = 0;
+            sample.SampleDuration = _frameDuration;
+            _ring[slot] = sample;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("  [zerocopy] Convert failed, A′ fallback: " + ex.Message);
+            _vpNv12?.Dispose();
+            _vpNv12 = null;
+            _vpNv12Failed = true;
+            // VP-only textures may lack staging; drop them so A′ EnsureDxgiTextures recreates pairs.
+            for (var i = 0; i < _nv12Gpu.Length; i++)
+            {
+                _nv12Gpu[i]?.Dispose();
+                _nv12Staging[i]?.Dispose();
+                _nv12Gpu[i] = null;
+                _nv12Staging[i] = null;
+            }
+            return false;
+        }
     }
 
     /// <summary>A frame from <see cref="ConvertGpu"/> waits for <see cref="SubmitPrepared"/>.</summary>
@@ -327,8 +423,13 @@ public sealed class MfH264Encoder : IVideoEncoder
         }
     }
 
+    /// <param name="preferDxgi">
+    /// When true, DXGI manager attempts first (Phase B MacLoop bind). When null, follows
+    /// <see cref="VideoZeroCopy.PreferDxgiManager"/> (FORCE_DXGI env only — not ZEROCOPY).
+    /// </param>
     public static MfH264Encoder? TryCreate(
-        VideoLayer layer, double fps, GpuAdapterInfo? adapter, D3dEncodeDevice? d3d = null)
+        VideoLayer layer, double fps, GpuAdapterInfo? adapter, D3dEncodeDevice? d3d = null,
+        bool? preferDxgi = null)
     {
         if (layer.Codec is not (VideoCodec.h264 or VideoCodec.hevc))
             return null;
@@ -356,20 +457,34 @@ public sealed class MfH264Encoder : IVideoEncoder
             }
         }
 
-        // Prefer HW that actually proves output. Iris QSV often accepts DXGI ProcessInput
-        // but never emits METransformHaveOutput; system-memory NV12 into QSV is the
-        // known-good path (Intel/community). DXGI is tried after that.
-        var attempts = new (EnumFlag flags, bool hwOnly, bool useDxgi)[]
-        {
-            (EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, false),
-            (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, false),
-            (EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, true),
-            (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, true),
-            (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter, false, false),
-        };
+        // Prefer HW that actually proves output. Default: sysmem first (known-good on Iris).
+        // DXGI-first only when preferDxgi:true (MacLoop zero-copy) or AFTERSCREEN_MF_FORCE_DXGI=1.
+        var forceDxgi = preferDxgi ?? VideoZeroCopy.PreferDxgiManager;
+        var attempts = forceDxgi
+            ? new (EnumFlag flags, bool hwOnly, bool useDxgi)[]
+            {
+                (EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, true),
+                (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, true),
+                (EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, false),
+                (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, false),
+                (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter, false, false),
+            }
+            : new (EnumFlag flags, bool hwOnly, bool useDxgi)[]
+            {
+                (EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, false),
+                (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, false),
+                (EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, true),
+                (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSortandfilter, true, true),
+                (EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter, false, false),
+            };
 
-        var verbose = string.Equals(Environment.GetEnvironmentVariable("AFTERSCREEN_MF_VERBOSE"), "1", StringComparison.Ordinal);
+        var verbose = string.Equals(Environment.GetEnvironmentVariable("AFTERSCREEN_MF_VERBOSE"), "1", StringComparison.Ordinal)
+                      || VideoZeroCopy.PreferDxgiManager;
         void Log(string msg) { if (verbose) Console.Error.WriteLine("[mf] " + msg); }
+        if (forceDxgi)
+            Log(VideoZeroCopy.PreferDxgiManager
+                ? "FORCE_DXGI=1 — DXGI attempts first; prove uses DXGI surface samples when manager is set"
+                : "preferDxgi — DXGI attempts first (zero-copy bind)");
 
         foreach (var (flags, hwOnly, useDxgi) in attempts)
         {
@@ -655,8 +770,10 @@ public sealed class MfH264Encoder : IVideoEncoder
             else BgraToNv12(scaled, _width, _height, _nv12);
         }
         var tC = System.Diagnostics.Stopwatch.GetTimestamp();
-        // One recycled IMFSample for the session — per-frame MFCreateMemoryBuffer grew WS to max.
-        var sample = CreateNv12Sample(_nv12, _width, _height, _pts, _frameDuration);
+        // DXGI encoder: feed an NV12/P010 texture sample (Phase A). Sysmem encoder: recycled memory buffer.
+        var sample = _dxgiManager is not null && _d3d is not null
+            ? CreateDxgiNv12Sample(_nv12, _width, _height, _pts, _frameDuration)
+            : CreateNv12Sample(_nv12, _width, _height, _pts, _frameDuration);
         var tD = System.Diagnostics.Stopwatch.GetTimestamp();
         if (!_proving)
         {
@@ -696,6 +813,39 @@ public sealed class MfH264Encoder : IVideoEncoder
         _tFrames = 0;
         return r;
     }
+
+    /// <summary>
+    /// GPU convert breakdown (cs / gpuCopy+Flush / Map / memcpy) plus NV12 byte size; resets converter counters.
+    /// On Phase B zero-copy, cs is VideoProcessor Blt wall time and map/cpy are 0.
+    /// </summary>
+    public (double Cs, double GpuCopy, double Map, double Memcpy, int Frames, int Bytes) TakeConvertDiag()
+    {
+        if (_zcFrames > 0)
+        {
+            var n = _zcFrames;
+            var cs = _zcMs / n;
+            _zcFrames = 0;
+            _zcMs = 0;
+            _gpuConv?.TakeStageTimings(); // discard any stale A′ samples
+            return (cs, 0, 0, 0, n, _nv12.Length);
+        }
+        return _gpuConv is { } c ? c.TakeStageTimings() : (0, 0, 0, 0, 0, 0);
+    }
+
+    /// <summary>stream-stats path tag: sysmem | dxgi | dxgi-zc.</summary>
+    public string InputPathTag =>
+        !UsesDxgiInput ? "sysmem" : _zeroCopyActive || _vpNv12 is not null ? "dxgi-zc" : "dxgi";
+
+    /// <summary>True when this encoder was activated with DXGI device manager (texture input path available).</summary>
+    public bool UsesDxgiInput => _dxgiManager is not null;
+
+    /// <summary>Phase 0 ablation tag for stream-stats (`none` / `memcpy` / `convert`).</summary>
+    public string ConvertAblationTag => _gpuConv?.Ablation switch
+    {
+        GpuVideoConverter.AblationMode.SkipMemcpy => "memcpy",
+        GpuVideoConverter.AblationMode.SkipConvert => "convert",
+        _ => "none",
+    };
 
     private EncodedVideoFrame FinishFrame(EncodedVideoFrame produced)
     {
@@ -918,8 +1068,15 @@ public sealed class MfH264Encoder : IVideoEncoder
         }
         catch { /* ignore */ }
         _gpuConv?.Dispose();
-        _nv12Staging?.Dispose();
-        _nv12Gpu?.Dispose();
+        _vpNv12?.Dispose();
+        _vpNv12 = null;
+        for (var i = 0; i < _nv12Gpu.Length; i++)
+        {
+            _nv12Staging[i]?.Dispose();
+            _nv12Gpu[i]?.Dispose();
+            _nv12Staging[i] = null;
+            _nv12Gpu[i] = null;
+        }
         try { _inputSample?.Dispose(); } catch { /* ignore */ }
         try { _inputBuffer?.Dispose(); } catch { /* ignore */ }
         _inputSample = null;
@@ -1188,32 +1345,35 @@ public sealed class MfH264Encoder : IVideoEncoder
         return _inputSample;
     }
 
-    /// <summary>QSV/NVENC path: upload NV12 into a DXGI texture and wrap as an MF sample.</summary>
-    private IMFSample CreateDxgiNv12Sample(byte[] nv12, int w, int h, long time, long duration)
+    /// <summary>Upload NV12/P010 system bytes into a DXGI texture and wrap as an MF sample (Phase A prove / A′ live).</summary>
+    private IMFSample CreateDxgiNv12Sample(byte[] yuv, int w, int h, long time, long duration, int slot = 0)
     {
-        EnsureDxgiTextures();
+        EnsureDxgiTextures(slot);
+        var staging = _nv12Staging[slot]!;
+        var gpu = _nv12Gpu[slot]!;
         var ctx = _d3d!.Context;
-        var mapped = ctx.Map(_nv12Staging!, 0, MapMode.Write, MapFlags.None);
+        var bpp = _tenBit ? 2 : 1; // bytes per luma sample (P010=2, NV12=1); UV row is also w*bpp
+        var mapped = ctx.Map(staging, 0, MapMode.Write, MapFlags.None);
         try
         {
             var pitch = (int)mapped.RowPitch;
-            // Y plane
+            var rowBytes = w * bpp;
+            var copy = Math.Min(pitch, rowBytes);
             for (var y = 0; y < h; y++)
-                Marshal.Copy(nv12, y * w, mapped.DataPointer + y * pitch, w);
-            // UV plane (interleaved) starts after Y in NV12 system buffer.
-            var uvSrc = w * h;
+                Marshal.Copy(yuv, y * rowBytes, mapped.DataPointer + y * pitch, copy);
+            var uvSrc = h * rowBytes;
             var uvDst = mapped.DataPointer + h * pitch;
             for (var y = 0; y < h / 2; y++)
-                Marshal.Copy(nv12, uvSrc + y * w, uvDst + y * pitch, w);
+                Marshal.Copy(yuv, uvSrc + y * rowBytes, uvDst + y * pitch, copy);
         }
         finally
         {
-            ctx.Unmap(_nv12Staging!, 0);
+            ctx.Unmap(staging, 0);
         }
-        ctx.CopyResource(_nv12Gpu!, _nv12Staging!);
+        ctx.CopyResource(gpu, staging);
 
         using var buffer = MediaFactory.MFCreateDXGISurfaceBuffer(
-            typeof(ID3D11Texture2D).GUID, _nv12Gpu!, 0, false);
+            typeof(ID3D11Texture2D).GUID, gpu, 0, false);
         var sample = MediaFactory.MFCreateSample();
         sample.AddBuffer(buffer);
         sample.SampleTime = time;
@@ -1221,16 +1381,19 @@ public sealed class MfH264Encoder : IVideoEncoder
         return sample;
     }
 
-    private void EnsureDxgiTextures()
+    private void EnsureDxgiTextures(int slot)
     {
-        if (_nv12Gpu is not null) return;
+        if ((uint)slot >= (uint)_nv12Gpu.Length)
+            throw new ArgumentOutOfRangeException(nameof(slot));
+        if (_nv12Gpu[slot] is not null) return;
+        var fmt = _tenBit ? Format.P010 : Format.NV12;
         var desc = new Texture2DDescription
         {
             Width = (uint)_width,
             Height = (uint)_height,
             MipLevels = 1,
             ArraySize = 1,
-            Format = Format.NV12,
+            Format = fmt,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
             BindFlags = BindFlags.None,
@@ -1250,25 +1413,26 @@ public sealed class MfH264Encoder : IVideoEncoder
                 desc.BindFlags = bind;
                 desc.Usage = ResourceUsage.Default;
                 desc.CPUAccessFlags = CpuAccessFlags.None;
-                _nv12Gpu = _d3d!.Device.CreateTexture2D(desc);
+                desc.Format = fmt;
+                _nv12Gpu[slot] = _d3d!.Device.CreateTexture2D(desc);
                 desc.Usage = ResourceUsage.Staging;
                 desc.BindFlags = BindFlags.None;
                 desc.CPUAccessFlags = CpuAccessFlags.Write;
-                _nv12Staging = _d3d.Device.CreateTexture2D(desc);
+                _nv12Staging[slot] = _d3d.Device.CreateTexture2D(desc);
                 last = null;
                 break;
             }
             catch (Exception ex)
             {
                 last = ex;
-                _nv12Gpu?.Dispose();
-                _nv12Staging?.Dispose();
-                _nv12Gpu = null;
-                _nv12Staging = null;
+                _nv12Gpu[slot]?.Dispose();
+                _nv12Staging[slot]?.Dispose();
+                _nv12Gpu[slot] = null;
+                _nv12Staging[slot] = null;
             }
         }
-        if (_nv12Gpu is null || _nv12Staging is null)
-            throw last ?? new InvalidOperationException("NV12 DXGI textures unavailable");
+        if (_nv12Gpu[slot] is null || _nv12Staging[slot] is null)
+            throw last ?? new InvalidOperationException((_tenBit ? "P010" : "NV12") + " DXGI textures unavailable");
     }
 
     private static byte[] ScaleBgra(byte[] src, int sw, int sh, int dw, int dh, ref byte[]? scratch)

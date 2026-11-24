@@ -62,7 +62,8 @@ public sealed partial class SenderSession
         var width = config.StreamPixels.Width;
         var height = config.StreamPixels.Height;
 
-        // One D3D device for capture + tile encoding (the MF/QSV device stays separate: sharing it grew memory).
+        // Capture + tiles on one device. MF/QSV historically used pipeline.D3d alone (sharing with BC7 tiles
+        // grew WS); Phase B rebinds MF DXGI onto this same gpuDev so VideoProcessor can feed textures.
         var gpuDev = EnableCapture ? D3dEncodeDevice.TryCreate(pipeline.Adapter) : null;
         DxgiCapture? capture = null;
         GpuTileEncoder? tile = null;
@@ -82,11 +83,45 @@ public sealed partial class SenderSession
             return;
         }
 
-        using (pipeline)
-        using (var timer = HighResTimer.Begin())
+        // Phase B: one MF create on gpuDev (EncodeServices deferred video when ZEROCOPY). Avoid create+dispose residue.
+        if (VideoZeroCopy.Wanted && gpuDev is not null && config.Video is { } zcLayer)
+        {
+            try
+            {
+                var bound = MfH264Encoder.TryCreate(zcLayer, config.FrameRate, pipeline.Adapter, gpuDev, preferDxgi: true);
+                if (bound is MfH264Encoder { IsHardware: true, UsesDxgiInput: true })
+                {
+                    pipeline.ReplaceVideo(bound);
+                    Console.WriteLine("[zerocopy] MF DXGI on capture/tile device");
+                }
+                else
+                {
+                    bound?.Dispose();
+                    var fallback = MfH264Encoder.TryCreate(zcLayer, config.FrameRate, pipeline.Adapter, pipeline.D3d);
+                    if (fallback is { IsHardware: true })
+                    {
+                        pipeline.ReplaceVideo(fallback);
+                        Console.WriteLine("[zerocopy] DXGI on gpuDev failed — pipeline.D3d encoder (A′ if manager set)");
+                    }
+                    else
+                    {
+                        fallback?.Dispose();
+                        Console.WriteLine("[zerocopy] no hardware video encoder");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[zerocopy] MF bind error: " + ex.Message);
+            }
+        }
+
+        // Dispose pipeline (video on gpuDev) before gpuDev (ownership order).
         using (gpuDev)
+        using (var timer = HighResTimer.Begin())
         using (tile)
         using (capture)
+        using (pipeline)
         {
             var geometry = new TileGeometry(width, height);
             var video = pipeline.Video;
@@ -257,10 +292,13 @@ public sealed partial class SenderSession
                     rebuildBitrate = wantedBitrate;
                     rebuildAt = Stopwatch.GetTimestamp();
                     var adapter = pipeline.Adapter;
-                    var d3d = pipeline.D3d;
+                    // Same device as the live encoder (gpuDev when zero-copy DXGI is active).
+                    var zcLive = VideoZeroCopy.Wanted && video is MfH264Encoder { UsesDxgiInput: true };
+                    var d3d = zcLive ? gpuDev : pipeline.D3d;
+                    var preferDxgi = zcLive;
                     rebuild = Task.Run<IVideoEncoder?>(() =>
                     {
-                        try { return MfH264Encoder.TryCreate(layer, fps, adapter, d3d); }
+                        try { return MfH264Encoder.TryCreate(layer, fps, adapter, d3d, preferDxgi: preferDxgi); }
                         catch (Exception ex) { Console.WriteLine("[rate] rebuild failed: " + ex.Message); return null; }
                     });
                     return;
@@ -641,6 +679,18 @@ public sealed partial class SenderSession
                 }
             }
             _macTile = null;
+            if (rebuild is not null)
+            {
+                try
+                {
+                    if (!rebuild.Wait(TimeSpan.FromSeconds(8)))
+                        Console.WriteLine("[rate] rebuild still running at stream end — abandoning wait");
+                    else
+                        rebuild.Result?.Dispose();
+                }
+                catch (Exception ex) { Console.WriteLine("[rate] rebuild cleanup: " + ex.Message); }
+                rebuild = null;
+            }
         }
     }
 }
