@@ -1,6 +1,7 @@
 import CoreGraphics
 import CryptoKit
 import Foundation
+import os
 import AfterscreenCore
 
 /// Connection carrying sound; set on main, read by audio
@@ -181,6 +182,13 @@ public final class SenderSession {
     public static var simulatedLinkMbps: Double?
     /// Development: one telemetry line per second on stderr
     public static var logStats = false
+    private static let log = Logger(subsystem: "io.github.lakystars.afterscreen.sender", category: "session")
+
+    /// System log; stderr too under `logStats`
+    static func record(_ line: String) {
+        log.notice("\(line, privacy: .public)")
+        if logStats { FileHandle.standardError.write(Data("[sender] \(line)\n".utf8)) }
+    }
 
     /// `link`: link to use; nil or unreachable uses the fastest
     public init(target: DiscoveredReceiver, purpose: Purpose = .display, displaySize: DisplaySize = .standard, link: LinkKind? = nil,
@@ -388,7 +396,9 @@ public final class SenderSession {
                 }
                 switch result {
                 case let .success(c): self.connected(c, route: route)
-                case .failure: self.connect(Array(routes.dropFirst()))
+                case let .failure(error):
+                    SenderSession.record("route \(route.kind.rawValue) via \(route.interface) failed: \(error)")
+                    self.connect(Array(routes.dropFirst()))
                 }
             }
         }

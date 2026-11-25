@@ -1016,16 +1016,38 @@ struct PopoverView: View {
         Text(text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
     }
 
+    /// Unapplied permission and a button to its Settings pane
+    private func accessWarning(_ title: String, _ detail: String, open: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(title).font(.system(size: 12)).foregroundStyle(.orange)
+                Spacer()
+                Button(L10n.t("Open Settings", "설정 열기"), action: open)
+            }
+            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// macOS 27.2 lists a remove button; removal makes macOS ask
+    private var localNetworkFix: String {
+        if #available(macOS 27.2, *) {
+            return L10n.s("Settings may show it on. In System Settings > Privacy & Security > Local Network, remove Afterscreen (−), then allow it when macOS asks. If macOS does not ask, reopen Afterscreen.")
+        }
+        return L10n.s("Settings may show it on. In System Settings > Privacy & Security > Local Network, turn Afterscreen off and on, then reopen Afterscreen. If it returns after every Mac restart, update macOS.")
+    }
+
     private var idleBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Afterscreen").font(.headline)
             if !model.screenRecordingGranted {
-                HStack {
-                    Text(L10n.t("Screen Recording permission is required", "화면 기록 권한이 필요합니다"))
-                        .font(.system(size: 12)).foregroundStyle(.orange)
-                    Spacer()
-                    Button(L10n.t("Open Settings", "설정 열기")) { model.openPrivacySettings() }
-                }
+                accessWarning(L10n.t("Screen Recording permission is required", "화면 기록 권한이 필요합니다"),
+                              L10n.s("If Settings shows it on, remove Afterscreen (−) and add it again (+), then reopen Afterscreen."),
+                              open: model.openPrivacySettings)
+            }
+            if model.localNetworkDenied {
+                accessWarning(L10n.s("Local Network access is not applied"),
+                              localNetworkFix,
+                              open: model.openLocalNetworkSettings)
             }
             if let report = model.testReport { QualityCard(report: report, testing: false) }
             Card(title: L10n.t("Receivers", "수신기")) {

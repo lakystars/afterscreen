@@ -87,7 +87,7 @@ The release builds are not notarized by Apple, so macOS warns the first time you
 - **macOS 15 or newer:** open the app once, then click **Open Anyway** in System Settings → Privacy & Security.
 - **macOS 14 or older:** Control-click the app, choose **Open**, then click **Open** again.
 
-The builds are signed ad hoc, so each new version asks for Screen Recording and Local Network access again.
+The builds are signed ad hoc, so Screen Recording and Local Network access do not carry over to a new version. macOS may ask again, or show the switch on while access is not applied. In that case, in System Settings → Privacy & Security, remove Afterscreen from the list, then add it again or allow it when macOS asks. Where the list has no remove button, turn Afterscreen off and on.
 
 To build the apps yourself, see [Build](#build).
 

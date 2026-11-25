@@ -30,3 +30,7 @@
 "Version %@ is out for %@" = "%2$@용 %1$@ 버전이 나왔습니다";
 "Version %@ is out for %@ and %@" = "%2$@·%3$@용 %1$@ 버전이 나왔습니다";
 "Download" = "다운로드";
+"If Settings shows it on, remove Afterscreen (−) and add it again (+), then reopen Afterscreen." = "설정에 켜져 있으면 Afterscreen을 제거(−)한 뒤 다시 추가(+)하고 Afterscreen을 다시 여세요.";
+"Local Network access is not applied" = "로컬 네트워크 권한이 적용되지 않았습니다";
+"Settings may show it on. In System Settings > Privacy & Security > Local Network, remove Afterscreen (−), then allow it when macOS asks. If macOS does not ask, reopen Afterscreen." = "설정에 켜져 있어도 적용되지 않았을 수 있습니다. 시스템 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 Afterscreen을 제거(−)한 뒤, macOS가 물으면 허용하세요. 묻지 않으면 Afterscreen을 다시 여세요.";
+"Settings may show it on. In System Settings > Privacy & Security > Local Network, turn Afterscreen off and on, then reopen Afterscreen. If it returns after every Mac restart, update macOS." = "설정에 켜져 있어도 적용되지 않았을 수 있습니다. 시스템 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 Afterscreen을 껐다 켠 뒤 Afterscreen을 다시 여세요. 재시동할 때마다 반복되면 macOS를 업데이트하세요.";

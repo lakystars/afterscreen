@@ -10,6 +10,12 @@ public final class AppModel: ObservableObject {
     @Published public var snapshot = SenderSnapshot()
     @Published public var activeReceiver: String?
     @Published public var screenRecordingGranted = CGPreflightScreenCaptureAccess()
+    /// macOS denies the local network; Settings may show it on
+    @Published public var localNetworkDenied = false
+    private var checkingLocalNetwork = false
+    private var localNetworkHosts: [String] = []
+    private var localNetworkRecheck: DispatchWorkItem?
+    private static let localNetworkPoll: TimeInterval = 3
     @Published public var lastMessage: String?
     /// Latest quality test, kept after it ends
     @Published public var testReport: QualityTest.Report?
@@ -202,6 +208,7 @@ public final class AppModel: ObservableObject {
                 DispatchQueue.main.async {
                     let kinds = RoutePlanner.kinds(routes)
                     guard let self = self else { return }
+                    self.checkLocalNetwork(routes.filter { $0.kind != .loopback }.map(\.address))
                     let changed = self.links[receiver.name] != kinds
                     // Change only: rebuilt items close an open link menu
                     if changed {
@@ -221,6 +228,36 @@ public final class AppModel: ObservableObject {
         }
         let kept = links.filter { name, _ in receivers.contains { $0.name == name } }
         if kept != links { links = kept }
+        // Denied Bonjour lists no receiver to ask about
+        if receivers.isEmpty { checkLocalNetwork([]) }
+    }
+
+    /// Idle only: a streaming session proves the access
+    /// The mDNS group stands in when no receiver is listed
+    private func checkLocalNetwork(_ addresses: [String]) {
+        guard session == nil, !checkingLocalNetwork else { return }
+        checkingLocalNetwork = true
+        localNetworkRecheck?.cancel()
+        localNetworkHosts = [LocalNetworkAccess.multicast] + addresses
+        LocalNetworkAccess.isDenied(hosts: localNetworkHosts) { [weak self] denied in
+            guard let self = self else { return }
+            self.checkingLocalNetwork = false
+            self.noteLocalNetwork(denied)
+            guard denied else { return }
+            // Polled while denied: the warning clears once access applies
+            let again = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.checkLocalNetwork(Array(self.localNetworkHosts.dropFirst()))
+            }
+            self.localNetworkRecheck = again
+            DispatchQueue.main.asyncAfter(deadline: .now() + AppModel.localNetworkPoll, execute: again)
+        }
+    }
+
+    private func noteLocalNetwork(_ denied: Bool) {
+        guard localNetworkDenied != denied else { return }
+        localNetworkDenied = denied
+        SenderSession.record("local network denied: \(denied)")
     }
 
     /// nil: automatic, moved by the faster link check
@@ -374,6 +411,7 @@ public final class AppModel: ObservableObject {
             self.snapshot = s
             if s.isStreaming { self.auto.streamed() }
             if started {
+                self.noteLocalNetwork(false)
                 // A relink's reason gives way to its outcome
                 self.lastMessage = self.awaitingFasterLink.map { AppModel.fasterLinkOutcome(wanted: $0, got: s.link) }
                 self.awaitingFasterLink = nil
@@ -601,6 +639,11 @@ public final class AppModel: ObservableObject {
 
     public func openPrivacySettings() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+    }
+
+    /// macOS without this anchor opens Privacy & Security
+    public func openLocalNetworkSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?privacy-localnetwork")!)
     }
 
     public var statusTitle: String { StatusTitle.text(snapshot, stats: settings.menuBarStats) }
