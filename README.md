@@ -80,6 +80,8 @@ Tested on a 2017 27-inch 5K iMac over all four links. Other models meet the requ
 
 On the iMac, pressing Esc twice stops the session, and ⌥⌘I shows a heads-up display.
 
+While connected, macOS treats the Mac's screen as shared and hides notification banners and their sounds. To keep them, allow notifications when mirroring or sharing the display in System Settings → Notifications.
+
 ### First launch
 
 The release builds are not notarized by Apple, so macOS warns the first time you open them.
